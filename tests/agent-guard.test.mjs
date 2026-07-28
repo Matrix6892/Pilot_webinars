@@ -147,6 +147,46 @@ test("records a safe template replacement without leaking rejected Latin copy", 
   );
 });
 
+test("removes CJK fragments from every visible model field", () => {
+  const draft = agentDraft();
+  draft.understood = [
+    "Продукт КР-001",
+    "В заказ 也包括 срочная доставка",
+    "Фрагмент ㄅ",
+  ];
+  draft.product.note = "Скидка согласована 也包括";
+  draft.unexpected = "Скрытый вывод 也包括";
+  draft.businessContext = "Компания 也包括 несколько площадок.";
+  draft.zoneReason = "Заказ 也包括 особые условия.";
+  draft.managerNote = "Проверить 也包括 график.";
+  draft.research = {
+    checked: true,
+    summary: "Источник 也包括 сведения о компании.",
+    sources: [
+      {
+        title: "Карточка 也包括 компании",
+        url: "https://example.com/company",
+        checkedAt: "2026-07-28 也包括",
+        fact: "Компания 也包括 выпускает оборудование.",
+      },
+    ],
+  };
+  draft.reply.body = "Подтверждаем 也包括 заказ.";
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Завод",
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.doesNotMatch(
+    JSON.stringify(result),
+    /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/u,
+  );
+  assert.match(result.reply.body, /Подтвердили 200 кг/);
+  assert.equal("unexpected" in result, false);
+});
+
 test("replaces client rhetoric that violates the Russian copy contract", () => {
   const draft = agentDraft();
   const rejectedCopy = [
@@ -253,6 +293,31 @@ test("keeps a completed research check visible when no sources were found", () =
   assert.equal(result.research.checked, true);
   assert.deepEqual(result.research.sources, []);
   assert.match(result.research.summary, /поиск завершён/i);
+});
+
+test("keeps a public source with a Latin date label", () => {
+  const draft = agentDraft();
+  draft.research = {
+    checked: true,
+    summary: "Публичная карточка компании найдена.",
+    sources: [
+      {
+        title: "Карточка компании",
+        url: "https://example.com/company",
+        checkedAt: "28 Jul 2026",
+        fact: "Компания выпускает промышленное оборудование.",
+      },
+    ],
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Завод",
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.equal(result.research.sources.length, 1);
+  assert.equal(result.research.sources[0].checkedAt, "28 Jul 2026");
 });
 
 test("clips a long research summary at a word boundary", () => {
@@ -806,7 +871,13 @@ test("does not reuse client copy rejected by the reviewer", () => {
   assert.doesNotMatch(
     [
       reviewed.reply.subject,
-      ...reviewed.options.map((option) => option.reply),
+      ...reviewed.missing,
+      ...reviewed.options.flatMap((option) => [
+        option.title,
+        option.rationale,
+        option.tradeoff,
+        option.reply,
+      ]),
     ].join(" "),
     /гарантируем доставку завтра|10:00/i,
   );
@@ -820,8 +891,14 @@ test("removes unsupported business conclusions after a negative review", () => {
     body: "Нужно 800 кг КР-001 для металла снаружи, цвет RAL 7024.",
   };
   const draft = agentDraft({ sku: "КР-001", requestedKg: 800 });
+  draft.understood = [
+    "Объём: 800 кг",
+    "Выручка клиента превышает 50 млрд рублей",
+  ];
   draft.businessContext =
     "Доставка займёт один день, риск неплатежа низкий.";
+  draft.managerNote =
+    "Выручка клиента высокая, руководитель может принять риск.";
   draft.research = {
     checked: true,
     summary: "Риск неплатежа низкий, доставка займёт один день.",
@@ -855,6 +932,148 @@ test("removes unsupported business conclusions after a negative review", () => {
   );
   assert.match(reviewed.businessContext, /исключил неподтверждённые выводы/i);
   assert.equal(reviewed.research.sources.length, 1);
+  assert.equal(
+    reviewed.research.sources[0].fact,
+    "Источник найден. Руководитель проверяет сведения перед решением.",
+  );
+  assert.doesNotMatch(
+    reviewed.research.sources[0].fact,
+    /обрабатывает металлические изделия/i,
+  );
+  assert.doesNotMatch(reviewed.understood.join(" "), /выручк|50 млрд/i);
+  assert.doesNotMatch(reviewed.managerNote, /выручк|принять риск/i);
+  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/i);
+  assert.match(reviewed.understood.join(" "), /800 кг/i);
+});
+
+test("keeps source company names when rebuilding understanding after review", () => {
+  const job = {
+    company: "VOLGA STEEL",
+    subject: "Fwd: Заказ КР-001",
+    body: "Нужно 800 кг КР-001 для металла снаружи, цвет RAL 7024.",
+  };
+  const reviewed = applyReviewerResult(
+    normalizeAgentResult(
+      agentDraft({ sku: "КР-001", requestedKg: 800 }),
+      demoData,
+      job,
+    ),
+    {
+      approved: false,
+      verdict: "Требуется решение руководителя",
+      notes: [],
+      blockingIssues: ["Условие требует подтверждения"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.match(reviewed.understood.join(" "), /VOLGA STEEL/);
+  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/);
+  assert.match(reviewed.understood.join(" "), /800 кг/);
+});
+
+test("keeps a deterministic SKU mismatch note after a negative review", () => {
+  const job = {
+    company: "МехПром",
+    subject: "Заказ Металл Про",
+    body: "Нужно 200 кг Металл Про для наружных металлоконструкций, цвет RAL 7024.",
+  };
+  const reviewed = applyReviewerResult(
+    normalizeAgentResult(
+      agentDraft({ sku: "КР-001", requestedKg: 200 }),
+      demoData,
+      job,
+    ),
+    {
+      approved: false,
+      verdict: "Артикул требует проверки",
+      notes: [],
+      blockingIssues: ["Модель выбрала другой продукт"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.match(
+    reviewed.missing.join(" "),
+    /модель указала КР-001.*письмо соответствует КР-002/i,
+  );
+});
+
+test("mentions the catalogue when product is known and quantity is missing", () => {
+  const job = {
+    company: "ВолгаМаш",
+    subject: "Заказ КР-001",
+    body: "Нужен КР-001 для металла снаружи, цвет RAL 7024.",
+  };
+  const reviewed = applyReviewerResult(
+    normalizeAgentResult(agentDraft({ sku: "КР-001" }), demoData, job),
+    {
+      approved: false,
+      verdict: "Объём требует уточнения",
+      notes: [],
+      blockingIssues: ["Количество не указано"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/i);
+  assert.match(reviewed.businessContext, /письмо, каталог и остатки/i);
+});
+
+test("explains a completed public search with no confirmed sources", () => {
+  const job = {
+    company: "ГородПроект",
+    subject: "Белая краска для офиса",
+    body: "Нужно 200 кг продукта КР-004 для внутренних стен офиса, цвет белый.",
+  };
+  const draft = agentDraft({ sku: "КР-004", requestedKg: 200 });
+  draft.research = {
+    checked: true,
+    summary: "Неподтверждённый вывод модели.",
+    sources: [],
+  };
+  const reviewed = applyReviewerResult(
+    normalizeAgentResult(draft, demoData, job),
+    {
+      approved: false,
+      verdict: "Публичные сведения требуют подтверждения",
+      notes: [],
+      blockingIssues: ["Источник не найден"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.match(reviewed.research.summary, /поиск завершён/i);
+  assert.match(reviewed.research.summary, /не нашёл/i);
+  assert.doesNotMatch(
+    `${reviewed.businessContext} ${reviewed.research.summary}`,
+    /источники (?:ниже|дают)/i,
+  );
+});
+
+test("logs final context after review without blocking result persistence", async () => {
+  const source = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const reviewIndex = source.lastIndexOf("result = applyReviewerResult(");
+  const contextIndex = source.indexOf('"research-result"');
+  const resultIndex = source.indexOf('action: "result"');
+
+  assert.ok(reviewIndex >= 0 && reviewIndex < contextIndex);
+  assert.ok(contextIndex < resultIndex);
+  assert.match(
+    source.slice(contextIndex, resultIndex),
+    /\.catch\(\(\) => \{\}\)/,
+  );
 });
 
 test("rejects reviewer approval when blocking issues are not empty", () => {

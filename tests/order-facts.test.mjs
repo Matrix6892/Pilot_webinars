@@ -78,6 +78,24 @@ test("does not read a budget in thousands as tonnes", () => {
   assert.equal(quantityFromText("Требуется 2 т. покрытия."), 2000);
 });
 
+test("does not read packaging or a unit-price request as order volume", () => {
+  assert.equal(
+    quantityFromText(
+      "Нужна грунт-эмаль в таре по 20 кг. Общий объём уточним позже.",
+    ),
+    0,
+  );
+  assert.equal(quantityFromText("Пришлите цену за 1 кг и сроки."), 0);
+  assert.equal(
+    quantityFromText("Фасовка 20 кг. Общий объём заказа 800 кг."),
+    800,
+  );
+  assert.equal(quantityFromText("Нужно 40 вёдер по 20 кг."), 0);
+  assert.equal(quantityFromText("Нужно 20 банок по 25 кг."), 0);
+  assert.equal(quantityFromText("Нужно по 800 кг на каждый объект."), 800);
+  assert.equal(quantityFromText("Объём 5 т.к. график ещё обсуждаем."), 0);
+});
+
 test("treats a short mistyped SKU as an explicit unknown identifier", () => {
   assert.equal(explicitSkuFromText("Нужно 200 кг КР-99."), "КР-99");
   assert.equal(

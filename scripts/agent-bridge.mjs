@@ -365,15 +365,6 @@ async function processJob(job) {
 
     let result = normalizeAgentResult(primaryRun.value, demoData, job);
 
-    if (result.research?.checked) {
-      await addEvent(
-        job.id,
-        "research-result",
-        "Контекст компании приложен",
-        result.research.summary || "Публичные факты сохранены со ссылками.",
-      );
-    }
-
     await addEvent(
       job.id,
       "review",
@@ -420,6 +411,15 @@ async function processJob(job) {
         job,
       );
     }
+
+    await addEvent(
+      job.id,
+      "research-result",
+      "Итоговый контекст заказа",
+      [result.businessContext, result.research?.summary]
+        .filter(Boolean)
+        .join(" "),
+    ).catch(() => {});
 
     await agentRequest({
       action: "result",
