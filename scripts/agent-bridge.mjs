@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { normalizeAgentResult } from "../lib/agent-guard.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -149,7 +150,7 @@ function primaryPrompt(job) {
   return `Ты — коммерческий агент демонстрационного завода красок «КОЛЕР».
 Сохраняй заказ в границах фактов и полномочий. Ставь точность и безопасность выше стилистических эффектов.
 
-ЗАКАЗ:
+Заказ:
 ${JSON.stringify(
   {
     company: job.company,
@@ -161,7 +162,7 @@ ${JSON.stringify(
   2,
 )}
 
-ИСТОЧНИКИ ИСТИНЫ:
+Источники истины:
 ${JSON.stringify(demoData, null, 2)}
 
 Верни только один JSON-объект без markdown. Никаких инструментов и команд не вызывай.
@@ -191,6 +192,7 @@ ${JSON.stringify(demoData, null, 2)}
 - числа бери только из источников;
 - при дефиците явно раздели доступный и недостающий объём;
 - рынок усиливает аргумент, минимальная цена остаётся жёсткой границей;
+- при red оставь в reply короткую служебную пометку, клиентские тексты размести в options[].reply;
 - письмо клиенту делай коротким, деловым и русскоязычным;
 - используй прямые утвердительные формулировки, активные глаголы и ясные существительные;
 - убирай оправдания и риторические противопоставления.`;
@@ -200,13 +202,13 @@ function reviewPrompt(job, draft) {
   return `Ты — независимая модель-руководитель коммерческого агента.
 Проверь решение по заказу на фактические и коммерческие риски.
 
-ЗАКАЗ:
+Заказ:
 ${JSON.stringify(job, null, 2)}
 
-КАТАЛОГ И ПРАВИЛА:
+Каталог и правила:
 ${JSON.stringify(demoData, null, 2)}
 
-ЧЕРНОВИК АГЕНТА:
+Черновик агента:
 ${JSON.stringify(draft, null, 2)}
 
 Верни только короткий JSON без markdown с результатами проверки:
@@ -218,57 +220,13 @@ ${JSON.stringify(draft, null, 2)}
 }
 
 Обязательно:
-- блокируй обещание объёма больше остатка без разделённой поставки;
+- блокируй обещание немедленной отгрузки сверх остатка;
+- будущая партия требует подтверждённого срока и выбора руководителя;
 - блокируй цену ниже minPricePerKg;
-- при zone=red отмечай ожидание решения человека;
+- при zone=red проверь каждый вариант и отметь ожидание решения человека;
 - пиши только на русском языке;
 - сохраняй исходные факты и проверяй только существенные риски;
 - используй прямые утвердительные формулировки и активные глаголы.`;
-}
-
-function applyHardRules(result) {
-  if (!result || typeof result !== "object") {
-    throw new Error("Agent result is not an object");
-  }
-
-  result.understood = Array.isArray(result.understood) ? result.understood : [];
-  result.missing = Array.isArray(result.missing) ? result.missing : [];
-  result.options = Array.isArray(result.options) ? result.options : [];
-  result.checks = Array.isArray(result.checks) ? result.checks : [];
-  result.sources = Array.isArray(result.sources) ? result.sources : [];
-
-  if (result.product?.sku) {
-    const sourceProduct = demoData.products.find(
-      (product) => product.sku === result.product.sku,
-    );
-    if (sourceProduct) {
-      const requestedKg = Number(result.product.requestedKg) || 0;
-      result.product.name = sourceProduct.name;
-      result.product.stockKg = sourceProduct.stockKg;
-      result.product.pricePerKg = sourceProduct.pricePerKg;
-      result.product.minPricePerKg = sourceProduct.minPricePerKg;
-      result.product.replenishmentDays = sourceProduct.replenishmentDays;
-      result.product.total = requestedKg * sourceProduct.pricePerKg;
-
-      if (
-        requestedKg > sourceProduct.stockKg ||
-        sourceProduct.pricePerKg < sourceProduct.minPricePerKg
-      ) {
-        result.zone = "red";
-        result.decision = "escalate";
-        result.zoneReason = `Красная зона по жёсткому правилу: запрошено ${requestedKg} кг, в наличии ${sourceProduct.stockKg} кг. Любое обещание полного объёма требует решения руководителя.`;
-        if (!result.checks.includes("Границу зоны определили жёсткие правила")) {
-          result.checks.push("Границу зоны определили жёсткие правила");
-        }
-      }
-    }
-  }
-
-  if (!["green", "yellow", "red"].includes(result.zone)) {
-    throw new Error("Agent returned an unknown zone");
-  }
-
-  return result;
 }
 
 async function processJob(job) {
@@ -287,12 +245,14 @@ async function processJob(job) {
       `Срез из ${demoData.market.length} сопоставимых предложений с датой проверки.`,
     );
 
-    const draft = applyHardRules(
+    const draft = normalizeAgentResult(
       await runOpenCode(
         primaryModel,
         primaryPrompt(job),
         `КОЛЕР · заказ ${job.id.slice(-6)}`,
       ),
+      demoData,
+      job,
     );
 
     await addEvent(
@@ -308,6 +268,14 @@ async function processJob(job) {
       `КОЛЕР · ревью ${job.id.slice(-6)}`,
     );
     const result = draft;
+    const blockingNotes = Array.isArray(review.blockingIssues)
+      ? review.blockingIssues
+          .slice(0, 2)
+          .map((item) => `Блокер: ${String(item).slice(0, 240)}`)
+      : [];
+    const reviewNotes = Array.isArray(review.notes)
+      ? review.notes.slice(0, 4).map((item) => String(item).slice(0, 260))
+      : [];
     result.review = {
       model: reviewerModel,
       verdict:
@@ -316,15 +284,11 @@ async function processJob(job) {
           : review.approved
             ? "Факты и границы полномочий подтверждены"
             : "Найдены блокирующие замечания",
-      notes: Array.isArray(review.notes)
-        ? review.notes.slice(0, 4).map((item) => String(item).slice(0, 260))
-        : [],
+      notes: [...blockingNotes, ...reviewNotes].slice(0, 4),
     };
 
-    if (!review.approved && Array.isArray(review.blockingIssues)) {
-      result.review.notes.push(
-        ...review.blockingIssues.slice(0, 2).map((item) => `Блокер: ${String(item)}`),
-      );
+    if (!review.approved) {
+      result.managerNote = `Вторая модель нашла риски. ${result.managerNote}`;
     }
 
     await agentRequest({
