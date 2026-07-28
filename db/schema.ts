@@ -14,6 +14,8 @@ export const orders = sqliteTable("orders", {
   managerDecision: text("manager_decision"),
   agentModel: text("agent_model"),
   reviewerModel: text("reviewer_model"),
+  requestedModel: text("requested_model"),
+  sentAt: text("sent_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });

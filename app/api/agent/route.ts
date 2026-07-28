@@ -1,19 +1,44 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, lt, sql } from "drizzle-orm";
 import { env } from "cloudflare:workers";
 import { ensureDb, getDb } from "@/db";
 import { orderEvents, orders, systemState } from "@/db/schema";
 
 export const dynamic = "force-dynamic";
 
-function expectedToken() {
+function validResult(value: unknown): value is {
+  zone: "green" | "yellow" | "red";
+  reply: { subject: string; body: string };
+  understood: unknown[];
+  missing: unknown[];
+  options: unknown[];
+  checks: unknown[];
+  sources: unknown[];
+} {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Record<string, unknown>;
+  const reply = result.reply as Record<string, unknown> | undefined;
   return (
-    (env as unknown as { BRIDGE_TOKEN?: string }).BRIDGE_TOKEN ??
-    "local-demo-bridge"
+    ["green", "yellow", "red"].includes(String(result.zone)) &&
+    Array.isArray(result.understood) &&
+    Array.isArray(result.missing) &&
+    Array.isArray(result.options) &&
+    Array.isArray(result.checks) &&
+    Array.isArray(result.sources) &&
+    Boolean(
+      reply &&
+        typeof reply.subject === "string" &&
+        typeof reply.body === "string",
+    )
   );
 }
 
+function expectedToken() {
+  return (env as unknown as { BRIDGE_TOKEN?: string }).BRIDGE_TOKEN?.trim() ?? "";
+}
+
 function authorized(request: Request) {
-  return request.headers.get("authorization") === `Bearer ${expectedToken()}`;
+  const token = expectedToken();
+  return Boolean(token) && request.headers.get("authorization") === `Bearer ${token}`;
 }
 
 function denied() {
@@ -24,6 +49,15 @@ export async function GET(request: Request) {
   if (!authorized(request)) return denied();
   await ensureDb();
   const db = getDb();
+  await db
+    .update(orders)
+    .set({ status: "queued", updatedAt: sql`CURRENT_TIMESTAMP` })
+    .where(
+      and(
+        eq(orders.status, "processing"),
+        lt(orders.updatedAt, sql`datetime('now', '-6 minutes')`),
+      ),
+    );
   const [job] = await db
     .select()
     .from(orders)
@@ -33,19 +67,22 @@ export async function GET(request: Request) {
 
   if (!job) return Response.json({ job: null });
 
-  await db
+  const [claimedJob] = await db
     .update(orders)
     .set({ status: "processing", updatedAt: sql`CURRENT_TIMESTAMP` })
-    .where(eq(orders.id, job.id));
+    .where(and(eq(orders.id, job.id), eq(orders.status, "queued")))
+    .returning();
+  if (!claimedJob) return Response.json({ job: null });
+
   await db.insert(orderEvents).values({
-    orderId: job.id,
+    orderId: claimedJob.id,
     stage: "understanding",
     title: "OpenCode разбирает письмо",
     detail: "Агент выделяет потребность и выбирает необходимые источники.",
     state: "active",
   });
 
-  return Response.json({ job });
+  return Response.json({ job: claimedJob });
 }
 
 export async function POST(request: Request) {
@@ -72,6 +109,21 @@ export async function POST(request: Request) {
     return Response.json({ error: "orderId is required" }, { status: 400 });
   }
 
+  const [order] = await db
+    .select({ id: orders.id, status: orders.status })
+    .from(orders)
+    .where(eq(orders.id, orderId))
+    .limit(1);
+  if (!order) {
+    return Response.json({ error: "order not found" }, { status: 404 });
+  }
+  if (order.status !== "processing") {
+    return Response.json(
+      { error: "order is not processing" },
+      { status: 409 },
+    );
+  }
+
   if (action === "event") {
     await db.insert(orderEvents).values({
       orderId,
@@ -84,12 +136,13 @@ export async function POST(request: Request) {
   }
 
   if (action === "result") {
-    const result = payload.result as { zone?: string; decision?: string } | undefined;
-    if (!result || !["green", "yellow", "red"].includes(String(result.zone))) {
+    const result = payload.result;
+    if (!validResult(result)) {
       return Response.json({ error: "invalid result" }, { status: 400 });
     }
-    const status = result.zone === "red" ? "awaiting_approval" : "completed";
-    await db
+    const status =
+      result.zone === "red" ? "awaiting_approval" : "ready_to_send";
+    const [updatedOrder] = await db
       .update(orders)
       .set({
         status,
@@ -102,7 +155,23 @@ export async function POST(request: Request) {
         ),
         updatedAt: sql`CURRENT_TIMESTAMP`,
       })
-      .where(eq(orders.id, orderId));
+      .where(and(eq(orders.id, orderId), eq(orders.status, "processing")))
+      .returning({ id: orders.id });
+    if (!updatedOrder) {
+      return Response.json(
+        { error: "order state changed" },
+        { status: 409 },
+      );
+    }
+    await db
+      .update(orderEvents)
+      .set({ state: "done" })
+      .where(
+        and(
+          eq(orderEvents.orderId, orderId),
+          eq(orderEvents.state, "active"),
+        ),
+      );
     await db.insert(orderEvents).values({
       orderId,
       stage: "decision",
@@ -116,18 +185,32 @@ export async function POST(request: Request) {
   }
 
   if (action === "error") {
-    await db
+    const [failedOrder] = await db
       .update(orders)
       .set({ status: "error", updatedAt: sql`CURRENT_TIMESTAMP` })
-      .where(eq(orders.id, orderId));
+      .where(and(eq(orders.id, orderId), eq(orders.status, "processing")))
+      .returning({ id: orders.id });
+    if (!failedOrder) {
+      return Response.json(
+        { error: "order state changed" },
+        { status: 409 },
+      );
+    }
+    await db
+      .update(orderEvents)
+      .set({ state: "error" })
+      .where(
+        and(
+          eq(orderEvents.orderId, orderId),
+          eq(orderEvents.state, "active"),
+        ),
+      );
     await db.insert(orderEvents).values({
       orderId,
       stage: "error",
       title: "Агент остановился",
-      detail: String(payload.detail ?? "Не удалось завершить обработку.").slice(
-        0,
-        1200,
-      ),
+      detail:
+        "OpenCode остановил обработку. Письмо и журнал сохранены; запустите новую карточку.",
       state: "error",
     });
     return Response.json({ ok: true });

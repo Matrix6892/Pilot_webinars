@@ -32,6 +32,8 @@ export async function ensureDb() {
         manager_decision TEXT,
         agent_model TEXT,
         reviewer_model TEXT,
+        requested_model TEXT,
+        sent_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
@@ -61,4 +63,19 @@ export async function ensureDb() {
       "CREATE INDEX IF NOT EXISTS orders_status_created_at_idx ON orders (status, created_at)",
     ),
   ]);
+
+  const columns = await env.DB.prepare("PRAGMA table_info(orders)").all<{
+    name: string;
+  }>();
+  const names = new Set(columns.results.map((column) => column.name));
+  const additions: D1PreparedStatement[] = [];
+  if (!names.has("requested_model")) {
+    additions.push(
+      env.DB.prepare("ALTER TABLE orders ADD COLUMN requested_model TEXT"),
+    );
+  }
+  if (!names.has("sent_at")) {
+    additions.push(env.DB.prepare("ALTER TABLE orders ADD COLUMN sent_at TEXT"));
+  }
+  if (additions.length) await env.DB.batch(additions);
 }

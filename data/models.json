@@ -1,0 +1,20 @@
+{
+  "default": "opencode-go/deepseek-v4-flash",
+  "options": [
+    {
+      "id": "opencode-go/deepseek-v4-flash",
+      "label": "DeepSeek V4 Flash",
+      "note": "Быстрый исполнитель"
+    },
+    {
+      "id": "opencode-go/deepseek-v4-pro",
+      "label": "DeepSeek V4 Pro",
+      "note": "Больше проверки"
+    },
+    {
+      "id": "opencode/gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "note": "Сильный проход"
+    }
+  ]
+}
