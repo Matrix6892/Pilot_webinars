@@ -124,9 +124,9 @@ export function buildDemoResult(input: OrderInput): AgentResult {
         items: [],
       },
       businessContext:
-        "Агент не подменяет недостающие факты догадками и сохраняет контекст заказа.",
+        "Агент фиксирует пробелы в заявке и сохраняет контекст заказа.",
       zoneReason: "Без существенных параметров безопасное предложение невозможно.",
-      managerNote: "Участие руководителя не требуется.",
+      managerNote: "Запрос проходит по стандартному регламенту уточнения.",
       options: [],
       reply: {
         subject: `Уточнение по запросу: ${input.subject}`,
@@ -135,8 +135,8 @@ export function buildDemoResult(input: OrderInput): AgentResult {
         )}\n\nПосле ответа мы сразу проверим наличие и срок поставки.`,
       },
       checks: [
-        "Цена не рассчитывалась без подтверждённого продукта",
-        "Неподтверждённые свойства не обещаны",
+        "Цена появится после подтверждения продукта",
+        "Ответ опирается на подтверждённые свойства",
         "Запрошены только существенные параметры",
       ],
       sources: ["Входящее письмо", "Правила продаж"],
@@ -192,7 +192,7 @@ export function buildDemoResult(input: OrderInput): AgentResult {
       businessContext: `Для отрасли «${industry.name}» важны ${industry.priority}; ключевой риск — ${industry.risk}.`,
       zoneReason: `В наличии ${money.format(product.stockKg)} из ${money.format(
         requestedKg,
-      )} кг. Агент не имеет права обещать полный объём без решения руководителя.`,
+      )} кг. Обещание полного объёма требует решения руководителя.`,
       managerNote: `Рекомендуется ${industry.play}. Это сохраняет заказ без выхода за минимальную цену.`,
       options: [
         {
@@ -227,8 +227,8 @@ export function buildDemoResult(input: OrderInput): AgentResult {
       },
       checks: [
         `Цена ${money.format(product.pricePerKg)} ₽/кг подтверждена каталогом`,
-        `Минимальная цена ${money.format(product.minPricePerKg)} ₽/кг не нарушена`,
-        "Полный объём не обещан без согласования",
+        `Цена соблюдает минимум ${money.format(product.minPricePerKg)} ₽/кг`,
+        "Обещание полного объёма передано на согласование",
         "Рыночные данные имеют дату среза",
       ],
       sources: ["Каталог и остатки", "Правила продаж", "Срез рынка", "Отраслевые сценарии"],
@@ -266,7 +266,7 @@ export function buildDemoResult(input: OrderInput): AgentResult {
     },
     businessContext: `Товар полностью доступен. Для отрасли «${industry.name}» предложение усилено аргументом о ${industry.priority}.`,
     zoneReason: "Товар есть полностью, цена и свойства подтверждены источниками.",
-    managerNote: "Отдельное согласование не требуется.",
+    managerNote: "Предложение проходит по стандартному регламенту.",
     options: [],
     reply: {
       subject: `Коммерческое предложение: ${product.name}`,
@@ -282,7 +282,7 @@ export function buildDemoResult(input: OrderInput): AgentResult {
       "Весь объём подтверждён остатками",
       `Цена выше минимальной границы ${money.format(product.minPricePerKg)} ₽/кг`,
       "Свойства взяты из карточки продукта",
-      "Руководитель не требуется по регламенту",
+      "Регламент разрешает самостоятельный ответ агента",
     ],
     sources: ["Каталог и остатки", "Правила продаж", "Срез рынка"],
     review: {

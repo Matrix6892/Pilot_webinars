@@ -104,6 +104,7 @@ function formatMoney(value: number) {
 
 export function OrderStand() {
   const [draft, setDraft] = useState<Draft>(scenarios[0].draft);
+  const [activeScenario, setActiveScenario] = useState("red");
   const [orderId, setOrderId] = useState("");
   const [order, setOrder] = useState<OrderRecord | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -158,6 +159,7 @@ export function OrderStand() {
     const scenario = scenarios.find((item) => item.id === id);
     if (scenario) {
       setDraft(scenario.draft);
+      setActiveScenario(id);
       setError("");
     }
   };
@@ -220,6 +222,7 @@ export function OrderStand() {
     setEvents([]);
     setError("");
     setDraft(emptyDraft);
+    setActiveScenario("");
   };
 
   const result = order?.result;
@@ -241,7 +244,7 @@ export function OrderStand() {
           </span>
           <span>
             <strong>КОЛЕР</strong>
-            <small>агент отдела продаж</small>
+            <small>Агент отдела продаж</small>
           </span>
         </a>
         <div className={`connection ${bridgeOnline ? "is-live" : ""}`}>
@@ -250,49 +253,39 @@ export function OrderStand() {
             {bridgeOnline ? "OpenCode подключён" : "Автономный демо-режим"}
           </span>
         </div>
-        <div className="topbar-note">Данные стенда · не вводите реальные реквизиты</div>
+        <div className="topbar-note">Используйте вымышленные реквизиты</div>
       </header>
 
       <main>
         <section className="hero">
           <div className="hero-copy">
-            <p className="eyebrow">От входящего письма — к управляемому решению</p>
-            <h1>
-              Не просто ответ.
-              <br />
-              <span>Сохранённый заказ.</span>
-            </h1>
-            <p className="hero-lead">
-              Напишите запрос как обычный клиент. Агент разберёт потребность,
-              проверит склад и рынок, пройдёт модельное ревью и покажет границу
-              своих полномочий.
-            </p>
+            <p className="eyebrow">Публичное демо · данные синтетические</p>
+            <h1>Проведите заказ через агента</h1>
           </div>
 
-          <div className="zone-strip" aria-label="Правила перехода">
-            {(Object.keys(zoneCopy) as Array<keyof typeof zoneCopy>).map((zone) => (
-              <div className={`zone-card zone-${zone}`} key={zone}>
-                <span className="zone-light" aria-hidden="true" />
-                <strong>{zoneCopy[zone].short}</strong>
-                <small>{zoneCopy[zone].description}</small>
-              </div>
-            ))}
-          </div>
+          <p className="hero-lead">
+            Напишите заявку заводу красок. КОЛЕР разберёт потребность, проверит
+            каталог, остатки и рынок, запросит ревью второй модели и подготовит
+            решение.
+          </p>
         </section>
 
         <section className="workbench">
           <div className="compose-column">
             <div className="section-label">
               <span>01</span>
-              Письмо заказчика
+              Заявка клиента
             </div>
 
             <div className="scenario-row" aria-label="Быстрые сценарии">
               {scenarios.map((scenario) => (
                 <button
-                  className={`scenario scenario-${scenario.id}`}
+                  className={`scenario scenario-${scenario.id} ${
+                    activeScenario === scenario.id ? "is-active" : ""
+                  }`}
                   type="button"
                   onClick={() => selectScenario(scenario.id)}
+                  aria-pressed={activeScenario === scenario.id}
                   key={scenario.id}
                 >
                   <span>{scenario.zone}</span>
@@ -303,16 +296,10 @@ export function OrderStand() {
 
             <form className="mail-card" onSubmit={submit}>
               <div className="mail-toolbar">
-                <span className="mail-dot" />
-                <span className="mail-dot" />
-                <span className="mail-dot" />
-                <span>Новое письмо</span>
+                <strong>Новое письмо</strong>
+                <span>sales@koler-demo.ru</span>
               </div>
 
-              <label className="mail-field compact">
-                <span>Кому</span>
-                <input value="sales@koler-demo.ru" readOnly aria-label="Получатель" />
-              </label>
               <label className="mail-field compact">
                 <span>Компания</span>
                 <input
@@ -371,7 +358,7 @@ export function OrderStand() {
                   <span>{submitting ? "Отправляем…" : "Отправить агенту"}</span>
                   <span aria-hidden="true">→</span>
                 </button>
-                <small>Письмо станет рабочей задачей, а не просто промптом.</small>
+                <small>Агент примет письмо как заказ и запустит проверку.</small>
               </div>
             </form>
           </div>
@@ -379,7 +366,7 @@ export function OrderStand() {
           <div className="process-column" aria-live="polite">
             <div className="section-label">
               <span>02</span>
-              Ход обработки
+              Ход работы агента
               {orderId && (
                 <button className="text-button" type="button" onClick={reset}>
                   Новый заказ
@@ -387,20 +374,53 @@ export function OrderStand() {
               )}
             </div>
 
+            <div className="zone-strip zone-strip-workbench" aria-label="Границы решения">
+              {(Object.keys(zoneCopy) as Array<keyof typeof zoneCopy>).map((zone) => (
+                <div className={`zone-card zone-${zone}`} key={zone}>
+                  <span className="zone-light" aria-hidden="true" />
+                  <strong>{zoneCopy[zone].short}</strong>
+                  <small>{zoneCopy[zone].description}</small>
+                </div>
+              ))}
+            </div>
+
             {!orderId ? (
               <div className="empty-process">
-                <div className="orbit" aria-hidden="true">
-                  <span>письмо</span>
-                  <span>склад</span>
-                  <span>рынок</span>
-                  <span>правила</span>
-                  <div>АГЕНТ</div>
+                <div className="empty-process-copy">
+                  <span>Маршрут заказа</span>
+                  <h2>Агент покажет ход решения</h2>
+                  <p>
+                    Каждый шаг показывает источник, найденный факт и точку
+                    согласования.
+                  </p>
                 </div>
-                <h2>Здесь появится путь решения</h2>
-                <p>
-                  Вы увидите не скрытые рассуждения модели, а проверяемые действия:
-                  источник, результат и точку согласования.
-                </p>
+                <div className="process-preview" aria-hidden="true">
+                  <div>
+                    <span>1</span>
+                    <strong>Разбор заявки</strong>
+                    <small>Что нужно клиенту</small>
+                  </div>
+                  <div>
+                    <span>2</span>
+                    <strong>Каталог и остатки</strong>
+                    <small>Продукт, объём и цена</small>
+                  </div>
+                  <div>
+                    <span>3</span>
+                    <strong>Снимок рынка</strong>
+                    <small>Сроки и предложения</small>
+                  </div>
+                  <div>
+                    <span>4</span>
+                    <strong>Ревью второй модели</strong>
+                    <small>Факты и коммерческий риск</small>
+                  </div>
+                  <div>
+                    <span>5</span>
+                    <strong>Решение</strong>
+                    <small>Ответ или выбор руководителя</small>
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="run-panel">

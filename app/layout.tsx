@@ -1,15 +1,15 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { Manrope, Unbounded } from "next/font/google";
+import { Geologica, Golos_Text } from "next/font/google";
 import "./globals.css";
 
-const manrope = Manrope({
-  variable: "--font-manrope",
+const golos = Golos_Text({
+  variable: "--font-golos",
   subsets: ["cyrillic", "latin"],
 });
 
-const unbounded = Unbounded({
-  variable: "--font-unbounded",
+const geologica = Geologica({
+  variable: "--font-geologica",
   subsets: ["cyrillic", "latin"],
 });
 
@@ -45,7 +45,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="ru">
-      <body className={`${manrope.variable} ${unbounded.variable}`}>
+      <body className={`${golos.variable} ${geologica.variable}`}>
         {children}
       </body>
     </html>

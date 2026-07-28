@@ -10,12 +10,14 @@ test("ships the КОЛЕР product surface and removes the starter", async () =>
   ]);
 
   assert.match(page, /<OrderStand \/>/);
-  assert.match(stand, /Не просто ответ/);
-  assert.match(stand, /Сохранённый заказ/);
+  assert.match(stand, /Проведите заказ через агента/);
+  assert.match(stand, /Агент покажет ход решения/);
   assert.match(stand, /Отправить агенту/);
   assert.match(stand, /Зелёная зона/);
   assert.match(stand, /Жёлтая зона/);
   assert.match(stand, /Красная зона/);
   assert.match(layout, /КОЛЕР — агент отдела продаж завода красок/);
+  assert.match(layout, /Geologica, Golos_Text/);
+  assert.doesNotMatch(stand, /Сохранённый заказ|промптом/);
   assert.doesNotMatch(`${page}\n${stand}\n${layout}`, /codex-preview|SkeletonPreview/i);
 });
