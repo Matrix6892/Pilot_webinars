@@ -18,6 +18,7 @@ import {
 import type { AgentResult } from "@/lib/demo-engine";
 import {
   asksCompatibility,
+  calculatedSurfaceQuantityFromText,
   explicitSkuFromText,
   hasColor,
   hasSpecialTerms,
@@ -188,7 +189,7 @@ type DailyStats = {
 type ModalName = "catalog" | "instructions" | "order" | null;
 
 const sheetUrl =
-  "https://docs.google.com/spreadsheets/d/1gabC2L8HOihMzPpp6pDeoMDtqXN9cEoGxwV-Al3PaYY/edit";
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vR7jeOl2r8s8mHvuFEkhJgG9F9kRiUknVTDG_Qt7RwX3nzj8AtVJihpdhX1kxxXCULV3d5D1xhUNBmU/pubhtml";
 const publicSiteUrl = "https://koler-agent-demo.odinmaniac.chatgpt.site";
 const liveStockDemoSku = "КР-005";
 const maxPhotoSizeMb = 8;
@@ -222,7 +223,7 @@ const zoneCopy = {
     color: "Выбор руководителя",
     short: "Агент приносит варианты",
     description:
-      "Для скидки, оплаты после поставки, поставки частями и срочного срока агент готовит выполнимые варианты.",
+      "Склад подтверждает часть объёма или клиент просит особую цену, оплату после поставки либо срочный срок. Агент готовит выполнимые варианты.",
     next: "Выберите один вариант и отправьте готовое письмо.",
   },
 } satisfies Record<
@@ -281,11 +282,11 @@ function humanizeText(value: string) {
     .replace(
       /цена\s+([\d\s]+)\s*₽\/кг\s+в\s+пределах\s+minPricePerKg\s+([\d\s]+)\s*₽\/кг\s*[—-]\s*нарушени[яй]\s+нет/giu,
       (_, price: string, floor: string) =>
-        `Цена ${price.trim()} ₽/кг выше минимальной цены с прибылью ${floor.trim()} ₽/кг. Завод зарабатывает на заказе`,
+        `Цена ${price.trim()} ₽/кг выше ${floor.trim()} ₽/кг — суммы, от которой завод зарабатывает на заказе`,
     )
     .replaceAll(
       "minPricePerKg",
-      "минимальная цена с прибылью",
+      "цена, от которой завод зарабатывает на заказе",
     )
     .replace(
       /вариант\s+split\s+не обещает отгрузку сверх остатка/gi,
@@ -338,7 +339,7 @@ function humanizeText(value: string) {
     .replace(/нарушени[ея]/gi, "особое условие")
     .replace(
       /минимальн(?:ая|ой|ую)\s+(?:границ[аы]|цен[аы])/gi,
-      "минимальная цена, при которой заказ остаётся прибыльным",
+      "цена, от которой завод зарабатывает на заказе",
     )
     .replace(/обнаружены пробелы/gi, "собраны вопросы клиенту")
     .replace(
@@ -411,25 +412,51 @@ function positiveChecks(result: AgentResult) {
     ].filter((item, index, rows) => rows.indexOf(item) === index);
   }
   return [
-    "Склад показывает объём для первого шага",
+    result.product &&
+    result.product.requestedKg > result.product.stockKg
+      ? "Склад подтвердил доступную первую партию"
+      : "Весь объём подтверждён складом",
     "Агент подготовил варианты для руководителя",
     ...checks,
   ].filter((item, index, rows) => rows.indexOf(item) === index);
+}
+
+function customerLetterForTransition(
+  result: AgentResult | null | undefined,
+  fallback: string,
+) {
+  const approvedOption =
+    result?.route === "manager"
+      ? result.options.find(
+          (option) => option.reply.trim() === result.reply.body.trim(),
+        )
+      : null;
+  const option =
+    result?.route === "manager"
+      ? approvedOption ?? result.options[0]
+      : null;
+  return {
+    body: option?.reply || result?.reply.body || fallback,
+    optionTitle: option?.title || "",
+  };
 }
 
 function optionBusinessResult(
   option: AgentResult["options"][number],
   result: AgentResult,
 ) {
+  const suppliedResult = humanizeText(option.businessResult ?? "").trim();
+  if (suppliedResult) return suppliedResult;
+
   const key = `${option.id} ${option.title}`.toLocaleLowerCase("ru-RU");
   if (/оплата-до-отгрузки/.test(key)) {
-    return "Завод получает оплату до отгрузки и сохраняет обычную прибыль.";
+    return "Завод получает оплату до отгрузки и зарабатывает на заказе.";
   }
   if (/оплата-за-план/.test(key)) {
     return "Завод получает план закупок и заранее готовит нужный объём.";
   }
   if (/оплата-поэтапно/.test(key)) {
-    return "Завод получает часть денег до отгрузки и меньше ждёт оплату.";
+    return "Завод получает часть денег до отгрузки и быстрее получает остальную оплату.";
   }
   if (/замен|alternative|аналог/.test(key)) {
     return "Завод закрывает весь заказ товаром, который уже есть на складе.";
@@ -447,9 +474,9 @@ function optionBusinessResult(
     return "Завод узнаёт главный приоритет клиента и готовит выполнимые условия.";
   }
   return result.product
-    ? `Завод сохраняет цену ${formatMoney(
+    ? `Завод продаёт по цене ${formatMoney(
         result.product.pricePerKg,
-      )} ₽/кг и обычную прибыль.`
+      )} ₽/кг и зарабатывает на заказе.`
     : "Завод получает данные для точного и выполнимого предложения.";
 }
 
@@ -477,9 +504,20 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
     } as const;
   }
 
+  const quantity = quantityFromText(text);
+  const product = matchProduct(text, demoData.products);
+  const calculatedQuantity = calculatedSurfaceQuantityFromText(
+    text,
+    product,
+    demoData.rules.calculationReservePercent,
+  );
+  const routeQuantity = quantity || calculatedQuantity;
+  const photoNeedsPickup =
+    Boolean(draft.attachment) && (!product || !routeQuantity);
+
   if (
     draft.demoKind === "fence-photo" ||
-    Boolean(draft.attachment) ||
+    photoNeedsPickup ||
     /забор|прикладываю фото|на фото/i.test(text)
   ) {
     return {
@@ -490,8 +528,6 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
     } as const;
   }
 
-  const quantity = quantityFromText(text);
-  const product = matchProduct(text, demoData.products);
   const liveProduct = product
     ? inventory.find((item) => item.sku === product.sku)
     : null;
@@ -499,7 +535,7 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
   const hasUnknownSku = Boolean(explicitSkuFromText(text)) && !product;
   const special = hasSpecialTerms(text);
 
-  if (special || (product && quantity > availableKg)) {
+  if (special || (product && routeQuantity > availableKg)) {
     return {
       zone: "red",
       label: "Похоже: решает руководитель",
@@ -517,7 +553,7 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
         : "агент подберёт краску по задаче",
     );
   }
-  if (!quantity) missing.push("агент рассчитает или уточнит количество");
+  if (!routeQuantity) missing.push("агент рассчитает или уточнит количество");
   if (!hasUsableEnvironment(text)) {
     missing.push("уточним: улица или помещение");
   }
@@ -539,7 +575,11 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
   return {
     zone: "green",
     label: "Похоже: готов ответить",
-    reason: "Краска, объём, место работ и цвет уже указаны.",
+    reason: calculatedQuantity
+      ? `Агент рассчитает ${formatMoney(calculatedQuantity)} кг по площади и проверит этот объём по складу.`
+      : draft.attachment
+      ? "Краска, объём, место работ и цвет уже указаны. Фотография останется в карточке."
+      : "Краска, объём, место работ и цвет уже указаны.",
   } as const;
 }
 
@@ -549,6 +589,10 @@ function modelLabel(id?: string | null) {
     modelCatalog.options.find((model) => model.id === id)?.label ??
     (id ? "Подключённая модель" : "—")
   );
+}
+
+function usesOpenCode(mode?: string | null) {
+  return Boolean(mode?.startsWith("opencode-"));
 }
 
 function orderNumber(id: string) {
@@ -569,7 +613,7 @@ function statusLabel(status: string) {
       awaiting_approval: "Руководитель выбирает вариант",
       ready_to_send: "Ответ готов к отправке",
       completed: "Ответ готов к отправке",
-      sent: "Отправлено на стенде",
+      sent: "Отправка записана",
       error: "Можно запустить снова",
     }[status] ?? "Состояние обновлено"
   );
@@ -1331,8 +1375,9 @@ export function OrderStand() {
               <li>
                 <strong>Руководитель подтверждает обязательства</strong>
                 <small>
-                  При скидке, оплате после поставки или нехватке выбирает один
-                  подготовленный вариант и открывает отправку письма.
+                  При особой цене, оплате после поставки или частичном наличии
+                  выбирает один подготовленный вариант и открывает отправку
+                  письма.
                 </small>
               </li>
             </ul>
@@ -1370,7 +1415,7 @@ export function OrderStand() {
             <article>
               <span>04</span>
               <strong>Сведения о клиенте</strong>
-              <small>Что производит компания и зачем ей краска</small>
+              <small>Когда это помогает продаже: чем занимается компания</small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
@@ -1381,25 +1426,25 @@ export function OrderStand() {
             <i aria-hidden="true">→</i>
             <article>
               <span>06</span>
-              <strong>Действие</strong>
-              <small>Готовое письмо или выполнимые варианты</small>
+              <strong>Письмо и продолжение</strong>
+              <small>Клиент получает ответ и продолжает ту же карточку</small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>07</span>
-              <strong>Журнал всех заказов</strong>
-              <small>Заказ, действия и результат доступны команде</small>
+              <strong>Журнал и таблица</strong>
+              <small>Каждый шаг виден команде и попадает в дневную выгрузку</small>
             </article>
           </div>
 
           <div className="source-dock" aria-label="Источники и правила стенда">
             <a href={sheetUrl} target="_blank" rel="noreferrer">
-              <span>Одна живая таблица</span>
-              Товары, правила и вся работа за день
+              <span>Общая таблица вебинара</span>
+              Заказы, действия и результат дня
             </a>
-              <button type="button" onClick={() => setModal("catalog")}>
-                <span>Живой склад</span>
-                Остаток меняется — черновик пересчитывается
+            <button type="button" onClick={() => setModal("catalog")}>
+              <span>Живой склад</span>
+              Остаток меняется — черновик пересчитывается
             </button>
             <button type="button" onClick={() => setModal("instructions")}>
               <span>Три правила</span>
@@ -1746,7 +1791,7 @@ export function OrderStand() {
                     <small>
                       {order?.company || "Частный клиент"} ·{" "}
                       этап переписки {order?.roundNo ?? 1} ·{" "}
-                      {order?.mode === "opencode-live"
+                      {usesOpenCode(order?.mode)
                         ? modelLabel(
                             order?.agentModel ??
                               order?.requestedModel ??
@@ -1985,7 +2030,7 @@ export function OrderStand() {
               <small>вопросы уже готовы или отправлены</small>
             </article>
             <article>
-              <span>Отправлено на стенде</span>
+              <span>Записано отправок</span>
               <strong>{stats.sent}</strong>
               <small>зафиксировано в журнале</small>
             </article>
@@ -2081,6 +2126,8 @@ function ResultPanel({
     afterStockKg: number;
     beforeZone: ScenarioZone;
     beforeReason: string;
+    beforeReply: string;
+    beforeOptionTitle?: string;
     afterRevision: number;
   } | null>(null);
   const zone = zoneCopy[result.zone];
@@ -2108,6 +2155,8 @@ function ResultPanel({
     order.status === "ready_to_send" &&
     result.route !== "needs_info" &&
     !inventoryChanged;
+  const selectedManagerOption =
+    result.options.find((option) => option.id === selectedOption) ?? null;
   const checks = positiveChecks(result);
   const insights = [
     result.market.checked
@@ -2142,6 +2191,19 @@ function ResultPanel({
     const match = value.match(/(\d[\d\s]*)\s*кг/iu);
     return match ? `${match[1].replace(/\s+/g, " ").trim()} кг` : "";
   };
+  const savedBeforeLetter = savedRecalculation
+    ? customerLetterForTransition(
+        savedRecalculation.before.result,
+        savedRecalculation.before.replyBody,
+      )
+    : null;
+  const savedAfterLetter = savedRecalculation
+    ? customerLetterForTransition(
+        savedRecalculation.after.result,
+        savedRecalculation.after.replyBody,
+      )
+    : null;
+  const currentLetter = customerLetterForTransition(result, result.reply.body);
   const persistedTransition =
     savedRecalculation &&
     savedRecalculation.after.id === resultHistory.at(-1)?.id
@@ -2165,6 +2227,12 @@ function ResultPanel({
           afterZone: savedRecalculation.after.zone,
           beforeReason: savedRecalculation.before.zoneReason,
           afterReason: savedRecalculation.after.zoneReason,
+          beforeReply:
+            savedBeforeLetter?.body ?? savedRecalculation.before.replyBody,
+          afterReply:
+            savedAfterLetter?.body ?? savedRecalculation.after.replyBody,
+          beforeOptionTitle: savedBeforeLetter?.optionTitle ?? "",
+          afterOptionTitle: savedAfterLetter?.optionTitle ?? "",
         }
       : null;
   const visibleTransition =
@@ -2179,15 +2247,25 @@ function ResultPanel({
           afterZone: result.zone,
           beforeReason: inventoryTransition.beforeReason,
           afterReason: result.zoneReason,
+          beforeReply: inventoryTransition.beforeReply,
+          afterReply: currentLetter.body,
+          beforeOptionTitle: inventoryTransition.beforeOptionTitle ?? "",
+          afterOptionTitle: currentLetter.optionTitle,
         }
       : null);
   const recalculateWithComparison = async () => {
     if (savedItem && liveItem) {
+      const beforeLetter = customerLetterForTransition(
+        result,
+        result.reply.body,
+      );
       setInventoryTransition({
         beforeStockKg: savedItem.stockKg,
         afterStockKg: liveItem.stockKg,
         beforeZone: result.zone,
         beforeReason: result.zoneReason,
+        beforeReply: beforeLetter.body,
+        beforeOptionTitle: beforeLetter.optionTitle,
         afterRevision: liveItem.revision,
       });
     }
@@ -2260,6 +2338,29 @@ function ResultPanel({
               {humanizeText(visibleTransition.afterReason)}
             </p>
           </div>
+          <div
+            className="transition-letter-grid"
+            aria-label="Как изменилось письмо клиенту"
+          >
+            <article>
+              <span>
+                Письмо до обновления склада
+                {visibleTransition.beforeOptionTitle
+                  ? ` · вариант «${visibleTransition.beforeOptionTitle}»`
+                  : ""}
+              </span>
+              <p>{visibleTransition.beforeReply}</p>
+            </article>
+            <article>
+              <span>
+                Письмо после обновления склада
+                {visibleTransition.afterOptionTitle
+                  ? ` · вариант «${visibleTransition.afterOptionTitle}»`
+                  : ""}
+              </span>
+              <p>{visibleTransition.afterReply}</p>
+            </article>
+          </div>
           <small>
             Во время пересчёта согласование и отправка оставались закрытыми.
             Обе версии сохранились в карточке и журнале. Теперь письмо ждёт
@@ -2315,7 +2416,7 @@ function ResultPanel({
             </p>
           </article>
           <article>
-            <span>Как увеличить прибыль</span>
+            <span>Как заработать больше</span>
             <p>
               {humanizeText(
                 result.market.profitOpportunity || result.market.summary,
@@ -2345,7 +2446,11 @@ function ResultPanel({
         (result.research.checked || result.research.sources.length > 0) && (
           <div className="research-card">
             <div className="research-confirmed">
-              <span>Проверено по источникам</span>
+              <span>
+                {result.research.checked
+                  ? "Проверено по источникам"
+                  : "Источники для проверки"}
+              </span>
               <p>{humanizeText(result.research.summary)}</p>
             </div>
             {result.research.sources.length > 0 ? (
@@ -2381,11 +2486,11 @@ function ResultPanel({
                 </small>
               </div>
             )}
-            {order.mode !== "opencode-live" && (
+            {!usesOpenCode(order.mode) && (
               <small className="research-mode-note">
-                В демонстрации карточка показывает заранее проверенные
-                источники. Подключённая модель для заказов открывает страницы и
-                сохраняет ссылки сама.
+                Карточка уже содержит проверенные источники. При подключении
+                OpenCode модель открывает страницы и сохраняет ссылки во время
+                работы.
               </small>
             )}
           </div>
@@ -2394,7 +2499,20 @@ function ResultPanel({
       {result.calculation && (
         <section className="calculation-card">
           <div className="calculation-heading">
-            <span>Агент сам рассчитал количество</span>
+            <span>
+              Расчёт для{" "}
+              {result.calculation.surface === "стена"
+                ? "стен"
+                : result.calculation.surface === "пол"
+                  ? "пола"
+                  : "забора"}{" "}
+              ·{" "}
+              {result.calculation.source === "распознанное фото"
+                ? "сведения с фотографии"
+                : order.roundNo && order.roundNo > 1
+                  ? "данные из переписки"
+                  : "данные из письма"}
+            </span>
             <strong>
               {formatMoney(result.calculation.packages)}{" "}
               {countNoun(
@@ -2407,18 +2525,44 @@ function ResultPanel({
             </strong>
           </div>
           <div className="calculation-steps">
-            <span>
-              {result.calculation.lengthM} × {result.calculation.heightM} м
-            </span>
-            <i aria-hidden="true">→</i>
-            <span>
-              {result.calculation.sides === 2
-                ? "две стороны"
-                : "одна сторона"}
-            </span>
-            <i aria-hidden="true">→</i>
-            <span>{formatMoney(result.calculation.paintAreaM2)} м²</span>
-            <i aria-hidden="true">→</i>
+            {result.calculation.kind === "fence-area" ? (
+              <>
+                <span>
+                  {result.calculation.lengthM} ×{" "}
+                  {result.calculation.heightM} м
+                </span>
+                <i aria-hidden="true">→</i>
+                <span>
+                  {result.calculation.sides === 2
+                    ? "две стороны"
+                    : "одна сторона"}
+                </span>
+                <i aria-hidden="true">→</i>
+              </>
+            ) : (
+              <>
+                <span>{formatMoney(result.calculation.paintAreaM2)} м²</span>
+                <i aria-hidden="true">→</i>
+                <span>
+                  {formatMoney(result.calculation.coats)}{" "}
+                  {countNoun(
+                    result.calculation.coats,
+                    "слой",
+                    "слоя",
+                    "слоёв",
+                  )}
+                </span>
+                <i aria-hidden="true">→</i>
+                <span>{result.calculation.reservePercent}% на запас</span>
+                <i aria-hidden="true">→</i>
+              </>
+            )}
+            {result.calculation.kind === "fence-area" && (
+              <>
+                <span>{formatMoney(result.calculation.paintAreaM2)} м²</span>
+                <i aria-hidden="true">→</i>
+              </>
+            )}
             <span>{formatMoney(result.calculation.roundedKg)} кг</span>
           </div>
           <p>{humanizeText(result.calculation.explanation)}</p>
@@ -2539,6 +2683,13 @@ function ResultPanel({
               </label>
             ))}
           </fieldset>
+          {selectedManagerOption && (
+            <div className="selected-option-letter" role="status">
+              <span>Письмо по выбранному варианту</span>
+              <strong>{humanizeText(selectedManagerOption.title)}</strong>
+              <p>{humanizeText(selectedManagerOption.reply)}</p>
+            </div>
+          )}
           <button
             className="approve-button"
             type="button"
@@ -2569,15 +2720,15 @@ function ResultPanel({
         <div className="reply-head">
           <div>
             <span>Ответ</span>
-            <small>Отправка на стенде</small>
+            <small>Запись в общий журнал</small>
           </div>
           <div className={`reply-status ${sent ? "is-sent" : ""}`}>
             {sent
-              ? "Отправлено на стенде"
+              ? "Отправка записана"
               : inventoryChanged
                 ? "Склад обновился · обновите черновик"
               : waitingForCustomer
-                ? "Вопросы отправлены на стенде · ожидаем ответ"
+                ? "Вопросы записаны · ожидаем ответ"
                 : canClarify
                   ? "Вопросы готовы к отправке"
                 : order.status === "awaiting_approval"
@@ -2599,29 +2750,29 @@ function ResultPanel({
               disabled={clarifying}
             >
               {clarifying
-                ? "Отправляем на стенде…"
-                : "Отправить вопросы на стенде"}
+                ? "Записываем вопросы…"
+                : "Записать вопросы"}
             </button>
             <small>
-              На стенде отправка сохраняется в журнале всех заказов. В рабочей системе
-              письмо уйдёт через почту компании.
+              Кнопка добавляет вопросы в общий журнал. В рабочей системе письмо
+              уйдёт через почту компании.
             </small>
           </div>
         )}
         {canSend && (
           <div className="reply-action">
             <button type="button" onClick={onSend} disabled={sending}>
-              {sending ? "Отправляем на стенде…" : "Отправить на стенде"}
+              {sending ? "Записываем отправку…" : "Записать отправку"}
             </button>
             <small>
-              Здесь отправка записывает результат в журнал всех заказов. В рабочей
-              системе письмо уйдёт через почту компании.
+              Кнопка добавляет письмо в общий журнал. В рабочей системе оно
+              уйдёт через почту компании.
             </small>
           </div>
         )}
         {sent && (
           <div className="sent-note">
-            Отправлено на стенде. Карточка вошла в результат дня.
+            Отправка записана. Карточка вошла в результат дня.
           </div>
         )}
       </div>
@@ -2677,7 +2828,7 @@ function ResultPanel({
           <strong key={source}>{humanizeText(source)}</strong>
         ))}
         <small>
-          {order.mode === "opencode-live"
+          {usesOpenCode(order.mode)
             ? `Заказ ведёт: ${modelLabel(order.agentModel)} · решение проверяет: ${modelLabel(order.reviewerModel)}`
             : "Расчёт по готовым правилам и живому складу"}
         </small>
@@ -3054,6 +3205,9 @@ function LedgerTable({
       if (["approval", "approve", "approved"].includes(stage)) {
         return "Руководитель";
       }
+      if (["review", "review-result", "review-fallback"].includes(stage)) {
+        return "Сильная модель";
+      }
       if (
         ["received", "fallback", "retry", "error", "recalculate"].includes(
           stage,
@@ -3075,7 +3229,13 @@ function LedgerTable({
       if (stage === "inventory") return "Проверка склада";
       if (stage === "market") return "Проверка цены";
       if (stage === "company-context") return "Сведения о компании";
-      if (stage === "review") return "Проверка ответа";
+      if (stage === "source-plan") return "Выбор данных";
+      if (["review", "review-result", "review-fallback"].includes(stage)) {
+        return "Проверка ответа";
+      }
+      if (["research", "research-result"].includes(stage)) {
+        return "Поиск сведений";
+      }
       if (stage === "decision") return "Решение агента";
       return "Шаг карточки";
     };
@@ -3182,14 +3342,14 @@ function LedgerTable({
         </div>
         <div className="ledger-actions">
           <a href={sheetUrl} target="_blank" rel="noreferrer">
-            Открыть общий журнал вебинара в Google Таблицах ↗
+            Открыть таблицу вебинара в Google Таблицах ↗
           </a>
           <small>
-            Лист «Заказы» собирает заявки, действия, решения, черновики,
-            изменения склада и отправки.
+            Лист «Заказы» получает те же строки, что дневная выгрузка:
+            заявки, действия, решения, письма, изменения склада и отправки.
           </small>
           <a href="/api/ledger?format=csv" download>
-            Скачать весь журнал для Google Таблиц
+            Скачать журнал за сегодня
           </a>
           <details className="sheet-setup">
             <summary>Подключить свою таблицу</summary>
@@ -3292,8 +3452,8 @@ function LedgerTable({
         </table>
       </div>
       <small className="ledger-footnote">
-        На экране — 30 последних действий. Полная история писем, решений и
-        изменений склада доступна в Google Таблице и выгрузке.
+        На экране — 30 последних действий. Дневная выгрузка для Google Таблиц
+        доступна по ссылке выше.
       </small>
     </section>
   );
@@ -3461,8 +3621,10 @@ function Modal({
         {name === "instructions" && (
           <>
             <p className="modal-lead">
-              Модель GPT-5.6 Sol подготовила и проверила инструкцию. Недорогая
-              модель получает цель, доступные данные и три правила продаж.
+              GPT-5.6 Sol подготовила и проверила инструкцию. Когда OpenCode
+              подключён, её выполняет выбранная недорогая модель. Когда
+              OpenCode отключён, заявку рассчитывает программа стенда по тем же
+              правилам и живому складу.
             </p>
             <ol className="plain-rules">
               <li>
@@ -3548,7 +3710,7 @@ function Modal({
               <article>
                 <span>Как обработано</span>
                 <strong>
-                  {order.mode === "opencode-live"
+                  {usesOpenCode(order.mode)
                     ? "Подключённая модель для заказов"
                     : "Расчёт по готовым правилам и живому складу"}
                 </strong>
@@ -3576,7 +3738,7 @@ function Modal({
                 <figcaption>
                   <strong>{attachmentFromOrder(order)?.name}</strong>
                   <span>
-                    {order.mode === "opencode-live"
+                    {usesOpenCode(order.mode)
                       ? "Модель для фото описала видимые детали. Агент использует это наблюдение и просит подтвердить материал и размеры."
                       : "Фото сохранено в карточке. Агент просит подтвердить материал и размеры."}
                   </span>

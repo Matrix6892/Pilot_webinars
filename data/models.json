@@ -4,17 +4,17 @@
     {
       "id": "opencode-go/deepseek-v4-flash",
       "label": "DeepSeek V4 Flash",
-      "note": "Быстрый исполнитель"
+      "note": "Быстро ведёт заказ"
     },
     {
       "id": "opencode-go/deepseek-v4-pro",
       "label": "DeepSeek V4 Pro",
-      "note": "Тщательная проверка"
+      "note": "Подробно ведёт заказ"
     },
     {
       "id": "opencode/gpt-5.6-sol",
       "label": "GPT-5.6 Sol",
-      "note": "Самая тщательная проверка"
+      "note": "Самый подробный разбор"
     }
   ]
 }

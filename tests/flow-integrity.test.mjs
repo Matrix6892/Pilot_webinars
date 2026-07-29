@@ -205,6 +205,19 @@ test("preserves confirmed company research while refreshing commercial facts", a
     preserveConfirmedResearch(previous, freshResearch),
     freshResearch,
   );
+
+  const unverifiedPrevious = {
+    ...previous,
+    research: {
+      checked: false,
+      summary: "Агент нашёл ссылки для проверки.",
+      sources: [confirmedSource],
+    },
+  };
+  assert.equal(
+    preserveConfirmedResearch(unverifiedPrevious, recalculated),
+    recalculated,
+  );
 });
 
 test("commits clarification and autonomous customer reply as complete transitions", async () => {

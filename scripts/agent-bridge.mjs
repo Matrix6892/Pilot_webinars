@@ -227,27 +227,176 @@ function extractJson(text) {
   }
 }
 
+function inventorySnapshotDetail(productCount, version) {
+  const normalizedVersion = String(version ?? "").trim();
+  if (/^\d+$/.test(normalizedVersion)) {
+    return `${productCount} товаров. Данные склада взяты из обновления № ${normalizedVersion}.`;
+  }
+  return `${productCount} товаров. Версия данных склада: ${
+    normalizedVersion || "исходная"
+  }.`;
+}
+
+function sourcePlanForJob(job) {
+  const website = String(job?.website ?? "").trim();
+  const shouldCheckCompany =
+    /(?:^|[^\p{L}])инн(?:[^\p{L}]|$)/iu.test(
+      `${job?.subject ?? ""}\n${job?.body ?? ""}`,
+    ) ||
+    (Boolean(website) &&
+      !/\.example(?:[/:?#]|$)/iu.test(website));
+  return shouldCheckCompany
+    ? {
+        title: "Агент решил проверить компанию",
+        detail:
+          "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
+      }
+    : {
+        title: "Для решения хватает данных заказа",
+        detail:
+          "Агент продолжает по письму, каталогу, складу и правилам продаж.",
+      };
+}
+
+function canonicalHttpUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""));
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
 function toolSummary(event) {
   const tool = String(event.part?.tool ?? "web");
-  const input = event.part?.state?.input ?? {};
-  const rawUrl = typeof input.url === "string" ? input.url : "";
+  const state = event.part?.state ?? {};
+  const input = state.input ?? {};
+  const rawUrls = [
+    input.url,
+    input.href,
+    ...(Array.isArray(input.urls) ? input.urls : []),
+  ];
+  const observedUrls = [
+    ...new Set(rawUrls.map(canonicalHttpUrl).filter(Boolean)),
+  ];
+  const status = String(state.status ?? "");
+  const completed =
+    !status || /^(?:completed|success|succeeded)$/iu.test(status);
+  const failed = /^(?:error|failed)$/iu.test(status);
+  const urls =
+    completed && !/search/iu.test(tool) ? observedUrls : [];
+  const query =
+    typeof input.query === "string" && input.query.trim()
+      ? input.query.trim()
+      : "";
+  const isWebAction =
+    observedUrls.length > 0 ||
+    query ||
+    /(?:web|search|fetch|browse|http)/iu.test(tool);
+  if (!isWebAction) return null;
+
   let host = "";
   try {
-    host = rawUrl ? new URL(rawUrl).hostname : "";
+    host = observedUrls[0] ? new URL(observedUrls[0]).hostname : "";
   } catch {
     host = "";
   }
   return {
     tool,
-    detail: host
-      ? `${tool}: ${host}`
-      : tool === "websearch"
-        ? "Выполнен поиск по публичным источникам"
-        : "Открыт публичный источник",
+    urls,
+    detail: failed && host
+      ? `Страница пока недоступна: ${host}`
+      : !completed && host
+        ? `Открывается страница: ${host}`
+        : host
+        ? `Открыта страница: ${host}`
+      : "Выполнен поиск по открытым источникам",
   };
 }
 
-async function runOpenCode({ model, prompt, title, agent, files = [] }) {
+function toolEventKey(event, summary) {
+  const callId =
+    event.part?.callID ?? event.part?.callId ?? event.part?.id ?? "";
+  return callId
+    ? `${summary.tool}:${String(callId)}`
+    : JSON.stringify([summary.tool, summary.detail]);
+}
+
+function createOpenCodeEventStream(onToolUse) {
+  let buffer = "";
+  const textParts = [];
+  const tools = [];
+  const toolIndexes = new Map();
+  let publicationQueue = Promise.resolve();
+  let publicationError;
+
+  function acceptLine(line) {
+    if (!line.trim()) return;
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "text" && typeof event.part?.text === "string") {
+        textParts.push(event.part.text);
+      }
+      if (event.type !== "tool_use") return;
+
+      const summary = toolSummary(event);
+      if (!summary) return;
+      const key = toolEventKey(event, summary);
+      const existingIndex = toolIndexes.get(key);
+      if (existingIndex !== undefined) {
+        if (!tools[existingIndex].urls.length && summary.urls.length) {
+          tools[existingIndex] = summary;
+        }
+        return;
+      }
+      if (tools.length >= 20) return;
+      toolIndexes.set(key, tools.length);
+      tools.push(summary);
+
+      if (typeof onToolUse === "function") {
+        publicationQueue = publicationQueue
+          .then(() => onToolUse(summary))
+          .catch((error) => {
+            publicationError ??= error;
+          });
+      }
+    } catch {
+      // Ignore non-event diagnostics.
+    }
+  }
+
+  function push(chunk) {
+    buffer += String(chunk);
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) acceptLine(line);
+  }
+
+  async function waitForPublished() {
+    await publicationQueue;
+    if (publicationError) throw publicationError;
+  }
+
+  async function complete() {
+    if (buffer.trim()) acceptLine(buffer);
+    buffer = "";
+    await waitForPublished();
+    return { textParts, tools };
+  }
+
+  return { push, waitForPublished, complete };
+}
+
+async function runOpenCode({
+  model,
+  prompt,
+  title,
+  agent,
+  files = [],
+  onToolUse,
+}) {
   const promptDirectory = await mkdtemp(join(tmpdir(), "koler-agent-"));
   const promptPath = join(promptDirectory, "request.md");
   await writeFile(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
@@ -277,11 +426,11 @@ async function runOpenCode({ model, prompt, title, agent, files = [] }) {
       },
     );
 
-    let stdout = "";
     let stderr = "";
     let finished = false;
     let timedOut = false;
     let forceKillTimer;
+    const eventStream = createOpenCodeEventStream(onToolUse);
 
     async function finish(error, value) {
       if (finished) return;
@@ -305,7 +454,7 @@ async function runOpenCode({ model, prompt, title, agent, files = [] }) {
     }, openCodeTimeoutMs);
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      eventStream.push(chunk.toString());
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -325,22 +474,8 @@ async function runOpenCode({ model, prompt, title, agent, files = [] }) {
         return;
       }
 
-      const textParts = [];
-      const tools = [];
-      for (const line of stdout.split(/\r?\n/)) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "text" && typeof event.part?.text === "string") {
-            textParts.push(event.part.text);
-          }
-          if (event.type === "tool_use") tools.push(toolSummary(event));
-        } catch {
-          // Ignore non-event diagnostics.
-        }
-      }
-
       try {
+        const { textParts, tools } = await eventStream.complete();
         await finish(null, {
           value: extractJson(textParts.join("\n")),
           tools,
@@ -439,8 +574,11 @@ ${visionBlock}
 - Верни один JSON-объект без Markdown.
 - Числа продукта возьми только из снимка склада внутри демонстрационных источников.
 - Пропусти веб-поиск для доменов .example и рутинной зелёной заявки.
+- Сайт и ИНН дают точное совпадение. По одному названию компании ищи осторожно и помечай каждый результат словами «Совпадение по названию».
+- Не запрашивай факты, которые клиент уже сообщил. Для забора отдельно проверь материал, размеры и число окрашиваемых сторон.
 - При реальном домене исследуй компанию, когда масштаб, профиль или надёжность могут изменить жёлтое или красное решение.
 - Сохрани до трёх публичных источников в research.sources.
+- Ставь research.checked=true, только когда открыл каждый сохранённый URL.
 - Пиши активным русским языком без оправданий и риторических противопоставлений.`;
 }
 
@@ -481,13 +619,20 @@ async function processJob(job) {
       job.id,
       "inventory",
       "Каталог и склад добавлены в задачу",
-      `${liveDemoData.products.length} товаров. Остаток на момент расчёта: ${inventoryVersion}.`,
+      inventorySnapshotDetail(liveDemoData.products.length, inventoryVersion),
     );
     await addEvent(
       job.id,
       "market",
       "Цены похожих предложений подготовлены",
       `${liveDemoData.market.length} предложений с датой проверки.`,
+    );
+    const sourcePlan = sourcePlanForJob(job);
+    await addEvent(
+      job.id,
+      "source-plan",
+      sourcePlan.title,
+      sourcePlan.detail,
     );
 
     const visionObservation = await visionObservationForJob(job);
@@ -496,24 +641,33 @@ async function processJob(job) {
       prompt: primaryPrompt(job, liveDemoData, visionObservation),
       title: `Колер · заказ ${job.id.slice(-6)}`,
       agent: "koler-sales",
+      onToolUse: (tool) =>
+        addEvent(
+          job.id,
+          "research",
+          tool.urls.length
+            ? "Агент открыл публичный источник"
+            : "Агент ищет открытые источники",
+          tool.detail,
+        ),
     });
 
-    for (const tool of primaryRun.tools) {
-      await addEvent(
-        job.id,
-        "research",
-        "Агент открыл публичный источник",
-        tool.detail,
-      );
-    }
-
-    let result = normalizeAgentResult(primaryRun.value, liveDemoData, job);
+    const guardedJob = {
+      ...job,
+      openedSourceUrls: primaryRun.tools.flatMap((tool) => tool.urls),
+    };
+    let result = normalizeAgentResult(
+      primaryRun.value,
+      liveDemoData,
+      guardedJob,
+    );
 
     await addEvent(
       job.id,
       "review",
       "Черновик передан сильной модели",
       `${modelLabel(reviewerModel)} проверяет объём, цену, источники и полномочия.`,
+      "active",
     );
 
     try {
@@ -528,8 +682,14 @@ async function processJob(job) {
         reviewRun.value,
         reviewerModel,
         liveDemoData,
-        job,
+        guardedJob,
       );
+      await addEvent(
+        job.id,
+        "review-result",
+        "Сильная модель завершила проверку",
+        result.review?.verdict || "Факты и границы полномочий подтверждены.",
+      ).catch(() => {});
     } catch (reviewError) {
       console.error(
         `[bridge] reviewer ${job.id}:`,
@@ -552,7 +712,7 @@ async function processJob(job) {
         },
         reviewerModel,
         liveDemoData,
-        job,
+        guardedJob,
       );
     }
 

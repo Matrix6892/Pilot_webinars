@@ -88,7 +88,7 @@ export async function POST(request: Request) {
   if (Number.isFinite(contentLength) && contentLength > MAX_MULTIPART_BYTES) {
     return errorResponse(
       413,
-      "Размер изображения не должен превышать 8 МБ.",
+      "Выберите фотографию до 8 МБ.",
       "file_too_large",
       { maxBytes: MAX_UPLOAD_BYTES },
     );
@@ -100,7 +100,7 @@ export async function POST(request: Request) {
   } catch {
     return errorResponse(
       400,
-      "Прикрепите изображение в поле file.",
+      "Добавьте фотографию в форму.",
       "invalid_form",
     );
   }
@@ -109,7 +109,7 @@ export async function POST(request: Request) {
   if (!(file instanceof File)) {
     return errorResponse(
       400,
-      "Прикрепите изображение в поле file.",
+      "Добавьте фотографию в форму.",
       "file_required",
     );
   }

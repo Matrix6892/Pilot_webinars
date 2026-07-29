@@ -62,13 +62,18 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /остаток на момент расчёта/);
   assert.match(stand, /Проверенные данные/);
   assert.match(stand, /Сведения о клиенте/);
-  assert.match(stand, /Журнал всех заказов/);
+  assert.match(stand, /Журнал и таблица/);
   assert.match(stand, /Google[- ]таблиц|Google Таблиц/iu);
   assert.match(stand, /Другой пример/);
   assert.match(stand, /type="file"/);
   assert.match(stand, /fetch\("\/api\/uploads"/);
   assert.match(stand, /Заменить фотографию/);
   assert.match(stand, /Убрать фотографию/);
+  assert.match(
+    stand,
+    /Boolean\(draft\.attachment\) && \(!product \|\| !routeQuantity\)/,
+  );
+  assert.match(stand, /Фотография останется в карточке/);
   assert.match(
     stand,
     /Заявка и фотография войдут в открытый журнал вебинара/,
@@ -80,11 +85,26 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Вариант согласован · ответ готов/);
   assert.match(stand, /Польза клиенту/);
   assert.match(stand, /Результат для завода/);
+  assert.match(
+    stand,
+    /humanizeText\(option\.businessResult \?\? ""\)/,
+  );
   assert.match(stand, /Что учесть/);
-  assert.match(stand, /Отправить на стенде/);
-  assert.match(stand, /Отправить вопросы на стенде/);
+  assert.match(stand, /Письмо по выбранному варианту/);
+  assert.match(stand, /Записать отправку/);
+  assert.match(stand, /Записать вопросы/);
   assert.match(stand, /Продолжить эту карточку/);
   assert.match(stand, /посчитает килограммы/);
+  assert.match(
+    stand,
+    /result\.calculation\.kind === "fence-area"/,
+  );
+  assert.match(
+    stand,
+    /result\.calculation\.source === "распознанное фото"/,
+  );
+  assert.match(stand, /данные из переписки/);
+  assert.match(stand, /% на запас/);
   assert.match(stand, /Новый остаток уже виден/);
   assert.match(stand, /40 кг · агент принесёт варианты/);
   assert.match(stand, /180 кг · агент подготовит письмо/);
@@ -95,6 +115,12 @@ test("ships the Колер product surface and removes the starter", async () =>
     stand,
     /savedRecalculation\.before\.result\?\.product\?\.stockKg[\s\S]*?savedRecalculation\.after\.result\?\.product\?\.stockKg/,
   );
+  assert.match(stand, /customerLetterForTransition/);
+  assert.match(
+    stand,
+    /option\.reply\.trim\(\) === result\.reply\.body\.trim\(\)/,
+  );
+  assert.match(stand, /вариант «\$\{visibleTransition\.beforeOptionTitle\}»/);
   assert.doesNotMatch(
     stand,
     /beforeStock:[\s\S]{0,220}zoneCopy\[savedRecalculation\.before\.zone\]\.name/,
@@ -113,6 +139,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Почему агент так решил/);
   assert.match(stand, /Что подтверждает вывод/);
   assert.match(stand, /Проверено по источникам/);
+  assert.match(stand, /Источники для проверки/);
   assert.match(stand, /Как недорогая модель ведёт заказ/);
   assert.match(stand, /Как программа ведёт заказ по готовым правилам/);
   assert.match(stand, /Расчёт по готовым правилам и живому складу/);
@@ -126,8 +153,8 @@ test("ships the Колер product surface and removes the starter", async () =>
     /Сильная модель предлагает правки, руководитель принимает/,
   );
   assert.match(stand, /Работа за сегодня в одной таблице/);
-  assert.match(stand, /Скачать весь журнал для Google Таблиц/);
-  assert.match(stand, /Открыть общий журнал вебинара в Google Таблицах/);
+  assert.match(stand, /Скачать журнал за сегодня/);
+  assert.match(stand, /Открыть таблицу вебинара в Google Таблицах/);
   assert.match(stand, /Скопировать формулу для Google Таблиц/);
   assert.match(stand, /disabled=\{!bridgeOnline\}/);
   assert.match(stand, /role="progressbar"/);
@@ -201,6 +228,18 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(
     ordersRoute,
+    /action === "recalculate"[\s\S]*?status:\s*"queued"[\s\S]*?mode:\s*"opencode-recalculate"/,
+  );
+  assert.match(
+    agentRoute,
+    /order\.mode === "opencode-recalculate"[\s\S]*?"Склад перечитан"[\s\S]*?inventory-model:/,
+  );
+  assert.match(
+    stand,
+    /Письмо до обновления склада[\s\S]*?visibleTransition\.beforeReply[\s\S]*?Письмо после обновления склада[\s\S]*?visibleTransition\.afterReply/,
+  );
+  assert.match(
+    ordersRoute,
     /action === "send"[\s\S]*?savedResultUsesOldInventory\(order\)/,
   );
   assert.match(
@@ -256,7 +295,7 @@ test("explains the stand calculation, manager role and saved recalculation", asy
   assert.match(stand, /Руководитель подтверждает обязательства/);
   assert.match(
     stand,
-    /При скидке, оплате после поставки или нехватке выбирает один\s+подготовленный вариант и открывает отправку письма/,
+    /При особой цене, оплате после поставки или частичном наличии\s+выбирает один подготовленный вариант и открывает отправку\s+письма/,
   );
   assert.match(
     stand,

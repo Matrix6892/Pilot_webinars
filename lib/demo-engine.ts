@@ -57,6 +57,7 @@ export type AgentOption = {
   rationale: string;
   tradeoff: string;
   reply: string;
+  businessResult?: string;
 };
 
 export type DecisionBasis = {
@@ -67,8 +68,15 @@ export type DecisionBasis = {
 };
 
 export type FenceCalculation = {
-  kind: "fence-area";
-  material: "дерево" | "металл";
+  kind: "fence-area" | "wall-area" | "floor-area";
+  surface: "забор" | "стена" | "пол";
+  material:
+    | "дерево"
+    | "металл"
+    | "бетон"
+    | "штукатурка"
+    | "гипсокартон";
+  source: "письмо клиента" | "распознанное фото";
   lengthM: number | null;
   heightM: number | null;
   areaPerSideM2: number;
@@ -82,6 +90,24 @@ export type FenceCalculation = {
   packages: number;
   roundedKg: number;
   explanation: string;
+};
+
+type SurfaceFacts = {
+  kind: "fence" | "wall" | "floor";
+  surface: "забор" | "стена" | "пол";
+  material:
+    | "дерево"
+    | "металл"
+    | "бетон"
+    | "штукатурка"
+    | "гипсокартон"
+    | "неясно";
+  lengthM: number | null;
+  heightM: number | null;
+  areaPerSideM2: number | null;
+  sides: number | null;
+  paintAreaM2: number | null;
+  source: "письмо клиента" | "распознанное фото";
 };
 
 export type AgentResult = {
@@ -296,7 +322,7 @@ function industryFor(text: string, industries: DemoIndustry[]) {
 }
 
 function productForFence(
-  material: "дерево" | "металл" | "неясно",
+  material: SurfaceFacts["material"],
   products: DemoProduct[],
 ) {
   if (material === "дерево") {
@@ -317,24 +343,137 @@ function productForFence(
   return null;
 }
 
-function fenceCalculation(
-  fence: FenceFacts,
+function decimalFromText(value: string | undefined) {
+  const parsed = Number(String(value ?? "").replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function areaFromText(value: string) {
+  const match = value.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:м\s*[²2]|кв(?:адратн\p{L}*)?\.?\s*м(?:етр\p{L}*)?|квадратн\p{L}*\s+метр\p{L}*)/iu,
+  );
+  return decimalFromText(match?.[1]);
+}
+
+function dimensionsFromText(value: string) {
+  const match = value.match(
+    /(\d+(?:[.,]\d+)?)\s*(?:м(?:етр\p{L}*)?\s*)?[×xх]\s*(\d+(?:[.,]\d+)?)\s*м(?:етр\p{L}*)?/iu,
+  );
+  return {
+    lengthM: decimalFromText(match?.[1]),
+    heightM: decimalFromText(match?.[2]),
+  };
+}
+
+function materialForSurface(
+  kind: "wall" | "floor",
+  value: string,
+): SurfaceFacts["material"] {
+  if (/гипсокартон|(?:^|[^\p{L}])гкл(?:[^\p{L}]|$)/iu.test(value)) {
+    return "гипсокартон";
+  }
+  if (/штукатур/iu.test(value)) return "штукатурка";
+  if (/бетон|стяжк|цемент/iu.test(value)) return "бетон";
+  if (kind === "floor" && /дерев|доск|паркет/iu.test(value)) return "дерево";
+  return "неясно";
+}
+
+function surfaceFactsFromEvidence(
+  fullText: string,
+  visualText: string,
+  fence: FenceFacts | null,
+): SurfaceFacts | null {
+  if (fence) {
+    return {
+      kind: "fence",
+      surface: "забор",
+      material: fence.material,
+      lengthM: fence.lengthM,
+      heightM: fence.heightM,
+      areaPerSideM2: fence.areaPerSideM2,
+      sides: fence.sides,
+      paintAreaM2: fence.paintAreaM2,
+      source:
+        !areaFromText(fullText) && areaFromText(visualText)
+          ? "распознанное фото"
+          : "письмо клиента",
+    };
+  }
+
+  const evidenceText = `${fullText}\n${visualText}`;
+  const hasWall = /(?:^|[^\p{L}])стен\p{L}*(?:[^\p{L}]|$)/iu.test(
+    evidenceText,
+  );
+  const hasFloor =
+    /(?:^|[^\p{L}])пол(?:а|у|ом|ы|ов|е)?(?:[^\p{L}]|$)/iu.test(evidenceText);
+  if (hasWall === hasFloor) return null;
+
+  const kind = hasWall ? "wall" : "floor";
+  const surface = hasWall ? "стена" : "пол";
+  const textArea = areaFromText(fullText);
+  const visualArea = areaFromText(visualText);
+  const paintAreaM2 = textArea ?? visualArea;
+  const dimensions = dimensionsFromText(
+    textArea ? fullText : visualArea ? visualText : evidenceText,
+  );
+
+  return {
+    kind,
+    surface,
+    material: materialForSurface(kind, evidenceText),
+    lengthM: dimensions.lengthM,
+    heightM: dimensions.heightM,
+    areaPerSideM2: paintAreaM2,
+    sides: paintAreaM2 ? 1 : null,
+    paintAreaM2,
+    source: textArea ? "письмо клиента" : "распознанное фото",
+  };
+}
+
+function productForSurface(
+  surface: SurfaceFacts | null,
+  products: DemoProduct[],
+) {
+  if (!surface || surface.material === "неясно") return null;
+  if (surface.kind === "fence") {
+    return productForFence(surface.material, products);
+  }
+  if (surface.kind === "wall") {
+    return (
+      products.find(
+        (product) =>
+          product.sku === "КР-004" &&
+          product.substrates.includes(surface.material),
+      ) ?? null
+    );
+  }
+  return surface.material === "бетон"
+    ? products.find(
+        (product) =>
+          product.sku === "КР-003" &&
+          product.substrates.includes(surface.material),
+      ) ?? null
+    : null;
+}
+
+function surfaceCalculation(
+  surface: SurfaceFacts,
   product: DemoProduct | null,
   reservePercent: number,
 ): FenceCalculation | undefined {
   if (
     !product ||
-    fence.material === "неясно" ||
-    !fence.areaPerSideM2 ||
-    !fence.paintAreaM2 ||
-    !fence.sides
+    surface.material === "неясно" ||
+    !surface.areaPerSideM2 ||
+    !surface.paintAreaM2 ||
+    !surface.sides
   ) {
     return undefined;
   }
 
   const coats = product.recommendedCoats;
   const estimatedKg =
-    fence.paintAreaM2 *
+    surface.paintAreaM2 *
     product.coverageKgPerM2PerCoat *
     coats *
     (1 + reservePercent / 100);
@@ -342,13 +481,20 @@ function fenceCalculation(
   const roundedKg = packages * product.packKg;
 
   return {
-    kind: "fence-area",
-    material: fence.material,
-    lengthM: fence.lengthM,
-    heightM: fence.heightM,
-    areaPerSideM2: fence.areaPerSideM2,
-    sides: fence.sides,
-    paintAreaM2: fence.paintAreaM2,
+    kind:
+      surface.kind === "fence"
+        ? "fence-area"
+        : surface.kind === "wall"
+          ? "wall-area"
+          : "floor-area",
+    surface: surface.surface,
+    material: surface.material,
+    source: surface.source,
+    lengthM: surface.lengthM,
+    heightM: surface.heightM,
+    areaPerSideM2: surface.areaPerSideM2,
+    sides: surface.sides,
+    paintAreaM2: surface.paintAreaM2,
     coverageKgPerM2PerCoat: product.coverageKgPerM2PerCoat,
     coats,
     reservePercent,
@@ -356,13 +502,15 @@ function fenceCalculation(
     packageKg: product.packKg,
     packages,
     roundedKg,
-    explanation: `${decimal.format(fence.paintAreaM2)} м² × ${coats} слоя × ${decimal.format(
+    explanation: `${decimal.format(surface.paintAreaM2)} м² × ${coats} слоя × ${decimal.format(
       product.coverageKgPerM2PerCoat,
     )} кг/м² + ${reservePercent}% запаса = ${decimal.format(
       estimatedKg,
     )} кг. Берём ${packages} ${packages === 1 ? "упаковку" : packages < 5 ? "упаковки" : "упаковок"} по ${decimal.format(
       product.packKg,
-    )} кг: ${decimal.format(roundedKg)} кг.`,
+    )} кг: ${decimal.format(roundedKg)} кг. Площадь и материал получены из ${
+      surface.source === "распознанное фото" ? "описания фото" : "письма"
+    }.`,
   };
 }
 
@@ -387,9 +535,9 @@ function marketView(product: DemoProduct | null, items: DemoMarketItem[]) {
       checked: true,
       summary: `Цена ${money.format(
         product.pricePerKg,
-      )} ₽/кг взята из карточки товара. Минимальная цена с прибылью — ${money.format(
+      )} ₽/кг взята из карточки товара. Завод зарабатывает при цене от ${money.format(
         product.minPricePerKg,
-      )} ₽/кг. Разница ${money.format(priceRoom)} ₽/кг сохраняет прибыль завода.`,
+      )} ₽/кг; разница составляет ${money.format(priceRoom)} ₽/кг.`,
       position: `Цена ${money.format(
         product.pricePerKg,
       )} ₽/кг подтверждена карточкой товара.`,
@@ -425,11 +573,9 @@ function marketView(product: DemoProduct | null, items: DemoMarketItem[]) {
       Math.round(Math.abs(difference)),
     )} ₽ ниже средней цены других поставщиков.`;
   } else {
-    position = `Наша цена ${money.format(
+    position = `Наша цена выше большинства показанных предложений: ${money.format(
       product.pricePerKg,
-    )} ₽/кг на ${money.format(
-      Math.round(difference),
-    )} ₽ выше средней цены других поставщиков. Весь объём есть на складе, срок подтверждён.`;
+    )} ₽/кг. Весь объём и срок поставки подтверждены.`;
   }
 
   const priceRoom = marketMax - product.pricePerKg;
@@ -438,7 +584,7 @@ function marketView(product: DemoProduct | null, items: DemoMarketItem[]) {
       ? `В следующем предложении можно попробовать цену до ${money.format(
           marketMax,
         )} ₽/кг: другие поставщики уже предлагают такую цену. Журнал покажет, как изменится результат.`
-      : "Наша цена одна из самых высоких среди показанных. Дополнительную прибыль могут дать крупный заказ или удобные условия поставки.";
+      : "Заработать больше поможет крупный заказ или удобный график поставки.";
 
   return {
     checked: true,
@@ -515,6 +661,46 @@ function researchFor(profile: DemoCompanyProfile | null) {
   };
 }
 
+function commercialEstimateFor(
+  profile: DemoCompanyProfile | null,
+  requestedKg: number,
+) {
+  const estimate = profile?.commercialEstimate;
+  if (!estimate) return null;
+
+  const possibleMainKg =
+    estimate.productionUnits * estimate.paintKgPerUnit;
+  const possibleMainTons = possibleMainKg / 1000;
+  const trialUnits =
+    requestedKg > 0 ? requestedKg / estimate.paintKgPerUnit : 0;
+  const trialScale =
+    trialUnits > 0
+      ? `Партия ${money.format(
+          requestedKg,
+        )} кг равна рабочему ориентиру для ${decimal.format(
+          trialUnits,
+        )} ${trialUnits === 1 ? "машины" : "машин"}.`
+      : "";
+
+  return {
+    possibleMainKg,
+    text: `Проверенный ориентир выпуска: ${money.format(
+      estimate.productionUnits,
+    )} машин за ${estimate.productionYear} год. ${estimate.paintBasis} Расчёт масштаба возможной основной закупки: ${money.format(
+      estimate.productionUnits,
+    )} × ${money.format(estimate.paintKgPerUnit)} кг = ${money.format(
+      possibleMainKg,
+    )} кг, или ${decimal.format(
+      possibleMainTons,
+    )} т в год при таком выпуске и расходе. ${trialScale} Текущий план выпуска и фактический расход подтвердит клиент. Следующий ход: ${estimate.nextMove}`,
+    basis: `${money.format(
+      estimate.productionUnits,
+    )} машин × ${money.format(estimate.paintKgPerUnit)} кг на одну машину = ${money.format(
+      possibleMainKg,
+    )} кг возможной годовой потребности. Выпуск относится к ${estimate.productionYear} году, расход служит рабочим ориентиром. Оба значения агент предложит проверить у клиента.`,
+  };
+}
+
 function productResult(
   product: DemoProduct | null,
   requestedKg: number,
@@ -540,10 +726,18 @@ function clarificationQuestion(item: string) {
       "Напишите длину и среднюю высоту забора. Можно указать готовую площадь.",
     "стороны покраски": "Красим одну сторону забора или обе?",
     "цвет забора": "Какой цвет хотите получить?",
+    "материал стены":
+      "Из чего сделана стена: штукатурка, бетон или гипсокартон?",
+    "площадь стен": "Напишите площадь стен в квадратных метрах.",
+    "материал пола":
+      "Из чего сделан пол? Для этого расчёта нужен бетон или цементная стяжка.",
+    "площадь пола": "Напишите площадь пола в квадратных метрах.",
     "объём заказа": "Сколько килограммов краски нужно?",
     "условия эксплуатации": "Где будете красить: на улице или в помещении?",
     "цвет или номер RAL":
-      "Какой цвет нужен? Если знаете номер по каталогу RAL, добавьте его.",
+      "Какой цвет нужен? Можно описать его словами или указать номер из каталога цветов RAL.",
+    "приложите фотографию":
+      "Приложите фотографию, которую упомянули в письме.",
     "назначение краски": "Что и из какого материала будете красить?",
     "совместимость покрытия":
       "Что будет попадать на окрашенную поверхность: масло, вода или моющие средства? Будет ли по ней ездить техника?",
@@ -555,25 +749,31 @@ function clarificationQuestion(item: string) {
 
 function replyWithQuestions(
   missing: string[],
-  isFence: boolean,
+  surface: SurfaceFacts | null,
   mentionsPhoto: boolean,
   product: DemoProduct | null,
+  calculation?: FenceCalculation,
 ) {
-  const intro = isFence
+  const intro = surface
     ? mentionsPhoto
-      ? "Фото приложено к заявке. Подберём краску для забора и рассчитаем количество."
-      : "Задачу поняли: нужно подобрать краску для забора."
+      ? `Фото приложено к заявке. Подберём краску для поверхности «${surface.surface}» и рассчитаем количество.`
+      : `Задачу поняли: нужно подобрать краску для поверхности «${surface.surface}».`
     : "Запрос принят. Соберём точный подбор и расчёт.";
   const questions = missing
     .map((item) => `— ${clarificationQuestion(item)}`)
     .join("\n");
+  const closing = calculation
+    ? `Количество уже рассчитано: ${decimal.format(
+        calculation.roundedKg,
+      )} кг, или ${calculation.packages} ${calculation.packages === 1 ? "упаковка" : calculation.packages < 5 ? "упаковки" : "упаковок"}. После ответа подтвердим подбор и наличие.`
+    : "По ответу рассчитаем расход, округлим до целых упаковок и проверим наличие.";
   return {
     subject: product
       ? `Короткое уточнение по заказу: ${product.name}`
-      : isFence
-        ? "Уточнение для расчёта краски на забор"
+      : surface
+        ? `Уточнение для расчёта краски: ${surface.surface}`
         : "Короткое уточнение по заказу краски",
-    body: `Добрый день!\n\n${intro}\n\n${questions}\n\nПо ответу рассчитаем расход, округлим до целых упаковок и проверим наличие.`,
+    body: `Добрый день!\n\n${intro}\n\n${questions}\n\n${closing}`,
   };
 }
 
@@ -583,9 +783,13 @@ export function buildDemoResult(
 ): AgentResult {
   const catalog = resolveCatalog(snapshot);
   const fullText = `${input.subject}\n${input.body}`;
-  const businessText = `${fullText}\n${input.company ?? ""}`;
   const hasAttachedPhoto = Boolean(input.attachment?.src);
-  const facts = orderFactsFromText(fullText);
+  const visualText = hasAttachedPhoto
+    ? `${input.attachment?.name ?? ""}\n${input.attachment?.alt ?? ""}`
+    : "";
+  const evidenceText = `${fullText}\n${visualText}`;
+  const businessText = `${evidenceText}\n${input.company ?? ""}`;
+  const facts = orderFactsFromText(evidenceText);
   const fence: FenceFacts | null = facts.fence
     ? {
         ...facts.fence,
@@ -596,14 +800,15 @@ export function buildDemoResult(
             : "неясно",
       }
     : null;
+  const surface = surfaceFactsFromEvidence(fullText, visualText, fence);
   const explicitRequestedKg = quantityFromText(fullText);
-  const matchedProduct = matchProduct(fullText, catalog.products);
+  const matchedProduct = matchProduct(evidenceText, catalog.products);
   const product =
     matchedProduct ??
-    (fence ? productForFence(fence.material, catalog.products) : null);
-  const calculation = fence
-    ? fenceCalculation(
-        fence,
+    productForSurface(surface, catalog.products);
+  const calculation = surface
+    ? surfaceCalculation(
+        surface,
         product,
         catalog.rules.calculationReservePercent,
       )
@@ -616,7 +821,25 @@ export function buildDemoResult(
     if (fence.material === "неясно") missing.push("материал забора");
     if (!fence.areaPerSideM2) missing.push("размер забора");
     if (!fence.sides) missing.push("стороны покраски");
-    if (!hasColor(fullText)) missing.push("цвет забора");
+    if (!hasColor(evidenceText)) missing.push("цвет забора");
+  } else if (surface?.kind === "wall" && !explicitRequestedKg) {
+    if (surface.material === "неясно") missing.push("материал стены");
+    if (!surface.paintAreaM2) missing.push("площадь стен");
+    if (!hasUsableEnvironment(evidenceText)) {
+      missing.push("условия эксплуатации");
+    }
+    if (!hasColor(evidenceText)) {
+      missing.push("цвет или номер RAL");
+    }
+  } else if (surface?.kind === "floor" && !explicitRequestedKg) {
+    if (surface.material === "неясно") missing.push("материал пола");
+    if (!surface.paintAreaM2) missing.push("площадь пола");
+    if (!hasUsableEnvironment(evidenceText)) {
+      missing.push("условия эксплуатации");
+    }
+    if (!hasColor(evidenceText)) {
+      missing.push("цвет или номер RAL");
+    }
   } else {
     if (unknownSku) {
       missing.push("товар из каталога");
@@ -624,15 +847,22 @@ export function buildDemoResult(
       missing.push("назначение краски");
     }
     if (!requestedKg) missing.push("объём заказа");
-    if (!hasUsableEnvironment(fullText)) {
+    if (!hasUsableEnvironment(evidenceText)) {
       missing.push("условия эксплуатации");
     }
-    if (!hasColor(fullText)) {
+    if (!hasColor(evidenceText)) {
       missing.push("цвет или номер RAL");
     }
   }
-  if (asksCompatibility(fullText)) {
+  if (asksCompatibility(evidenceText)) {
     missing.push("совместимость покрытия");
+  }
+  const mentionedAttachment =
+    /(?:вот|(?:прилаг|приклад|прилож|прикреп)\p{L}*)\s+(?:к\s+письму\s+)?(?:фото|фотограф\p{L}*|снимок)|(?:фото|фотограф\p{L}*|снимок)\s+(?:(?:прилаг|приклад|прилож|прикреп)\p{L}*|во\s+вложени\p{L}*|вложен\p{L}*)/iu.test(
+      fullText,
+    );
+  if (mentionedAttachment && !hasAttachedPhoto) {
+    missing.push("приложите фотографию");
   }
 
   const hardRed =
@@ -643,11 +873,12 @@ export function buildDemoResult(
       quotedUnitPrices(fullText).some(
         (price) => price < (product?.minPricePerKg ?? 0),
       ));
-  const fenceNeedsDetails = Boolean(
-    fence &&
-      (fence.material === "неясно" ||
-        !fence.areaPerSideM2 ||
-        !fence.sides),
+  const surfaceNeedsDetails = Boolean(
+    surface &&
+      (surface.kind === "fence" || !explicitRequestedKg) &&
+      (surface.material === "неясно" ||
+        !surface.paintAreaM2 ||
+        !surface.sides),
   );
   const profile = profileFor(facts.inn, catalog.companyProfiles);
   const baseMarketView = marketView(product, catalog.market);
@@ -661,7 +892,15 @@ export function buildDemoResult(
     likelyTrialOrder && product
       ? `Для первой небольшой партии сохраняем цену ${money.format(
           product.pricePerKg,
-        )} ₽/кг. Сразу спрашиваем, что клиент проверяет и какой объём понадобится после успешной пробы.`
+        )} ₽/кг. ${
+          profile?.commercialEstimate
+            ? `Партия ${money.format(
+                requestedKg,
+              )} кг равна рабочему ориентиру для ${decimal.format(
+                requestedKg / profile.commercialEstimate.paintKgPerUnit,
+              )} ${requestedKg === profile.commercialEstimate.paintKgPerUnit ? "машины" : "машин"}. `
+            : ""
+        }Сразу предлагаем измерить фактический расход и запросить план выпуска.`
       : "";
   const view =
     trialProfitOpportunity
@@ -672,12 +911,15 @@ export function buildDemoResult(
         }
       : baseMarketView;
   const research = researchFor(profile);
+  const commercialEstimate = commercialEstimateFor(profile, requestedKg);
   const industry = industryFor(businessText, catalog.industries);
   const understood = [
     input.company ? `Компания: ${input.company}` : "Компания: уточним при заказе",
     ...(facts.inn ? [`ИНН: ${facts.inn}`] : []),
-    fence
-      ? "Задача: покрасить забор"
+    surface
+      ? surface.kind === "fence"
+        ? "Задача: покрасить забор"
+        : `Задача: покрасить поверхность «${surface.surface}»`
       : product
         ? `Краска: ${product.name}`
         : "Задача: подобрать краску",
@@ -696,13 +938,13 @@ export function buildDemoResult(
 
   if (
     !product ||
-    fenceNeedsDetails ||
+    surfaceNeedsDetails ||
     (missing.length > 0 && !hardRed)
   ) {
     const decisionBasis: DecisionBasis[] = [
       {
-        fact: fence
-          ? "Клиент хочет покрасить забор и просит помочь с подбором и количеством."
+        fact: surface
+          ? `Клиент хочет покрасить поверхность «${surface.surface}» и просит помочь с подбором и количеством.`
           : "Агент сохранил задачу клиента и все уже известные детали.",
         source: "Письмо клиента",
         checkedAt: today,
@@ -711,6 +953,16 @@ export function buildDemoResult(
         ? [stockBasis(product, requestedKg, catalog)]
         : []),
     ];
+    if (calculation) {
+      decisionBasis.unshift({
+        fact: calculation.explanation,
+        source:
+          calculation.source === "распознанное фото"
+            ? "Распознанные сведения о фото и расчёт расхода"
+            : "Расчёт расхода и упаковок",
+        checkedAt: today,
+      });
+    }
     const visibleMarketBasis = marketBasis(view);
     if (visibleMarketBasis && product) decisionBasis.push(visibleMarketBasis);
 
@@ -725,15 +977,29 @@ export function buildDemoResult(
       ...(calculation ? { calculation } : {}),
       market: view,
       research,
-      businessContext: fence
-        ? "Фото дополняет заявку и помогает обсудить состояние поверхности. Материал, размеры и стороны покраски подтверждает клиент; эти данные определяют краску и количество упаковок."
+      businessContext: surface
+        ? calculation
+          ? `Агент получил площадь и материал из ${
+              calculation.source === "распознанное фото"
+                ? "описания фото"
+                : "письма"
+            }, сам подобрал краску и рассчитал ${money.format(
+              calculation.roundedKg,
+            )} кг. Клиенту осталось ответить только на вопросы, которые меняют предложение.`
+          : surface.kind === "fence"
+            ? "Фото дополняет заявку и помогает обсудить состояние поверхности. Материал, размеры и стороны покраски подтверждает клиент; эти данные определяют краску и количество упаковок."
+            : "Фото и описание задачи помогают определить поверхность. Материал, площадь и условия подтверждает клиент; эти данные определяют краску и количество упаковок."
         : product
           ? `Краска «${product.name}» найдена в каталоге. Короткий ответ клиента завершит расчёт.`
           : "Агент сохранил известные факты и подготовил самый короткий путь к точному предложению.",
-      zoneReason: fence
+      zoneReason: surface
         ? hasAttachedPhoto
-          ? "Фото приложено к заявке. Клиент подтвердит материал и размеры, затем агент рассчитает расход и упаковки."
-          : "Клиент описал задачу своими словами. После короткого ответа о материале и размерах агент рассчитает расход и упаковки."
+          ? calculation
+            ? "Фото содержит материал и площадь. Агент уже рассчитал расход и спрашивает только недостающие условия."
+            : "Фото приложено к заявке. Клиент подтвердит недостающие сведения, затем агент рассчитает расход и упаковки."
+          : calculation
+            ? "Клиент назвал поверхность, материал и площадь. Агент уже рассчитал расход и спрашивает только недостающие условия."
+            : "Клиент описал задачу своими словами. После короткого ответа агент рассчитает расход и упаковки."
         : unknownSku
           ? "Код краски нужно сверить с каталогом. Описание поверхности поможет сразу найти подходящую краску."
           : "Агент понял основную потребность и спрашивает только данные, которые меняют подбор или расчёт.",
@@ -742,9 +1008,10 @@ export function buildDemoResult(
       options: [],
       reply: replyWithQuestions(
         missing,
-        Boolean(fence),
+        surface,
         hasAttachedPhoto,
         product,
+        calculation,
       ),
       checks: [
         "Потребность клиента сохранена в карточке",
@@ -780,14 +1047,23 @@ export function buildDemoResult(
   const customerPrice = customerPrices.find(
     (price) => price < product.minPricePerKg,
   );
-  const standardBusinessContext = industry
-    ? `Клиенту важно: ${industry.risk}. Что предлагает агент: ${industry.play}.`
-    : `Подбор опирается на свойства краски: ${product.features.join(", ")}.`;
+  const standardBusinessContext = calculation
+    ? `Клиент назвал поверхность, материал и площадь. Агент сам подобрал краску и перевёл ${decimal.format(
+        calculation.paintAreaM2,
+      )} м² в ${decimal.format(
+        calculation.roundedKg,
+      )} кг с округлением до целых упаковок. Клиенту достаточно описать задачу обычными словами.`
+    : industry
+      ? `Клиенту важно: ${industry.risk}. Что предлагает агент: ${industry.play}.`
+      : `Подбор опирается на свойства краски: ${product.features.join(", ")}.`;
   const businessContext = profile
     ? likelyTrialOrder
-      ? `${profile.summary} Агент предполагает: пробная партия на ${money.format(
+      ? `${profile.summary} Агент предполагает: заказ на ${money.format(
           requestedKg,
-        )} кг нужна клиенту для проверки краски перед основной закупкой. Агент спросит, какие свойства проверяют и какой объём понадобится дальше.`
+        )} кг служит пробной партией. ${
+          commercialEstimate?.text ??
+          "Агент предложит измерить фактический расход и уточнить объём следующей закупки."
+        }`
       : `${profile.summary} Заказ на ${money.format(
           requestedKg,
         )} кг равен ${money.format(
@@ -800,9 +1076,9 @@ export function buildDemoResult(
     {
       fact: `Цена ${money.format(
         product.pricePerKg,
-      )} ₽/кг; минимальная цена, при которой завод зарабатывает, — ${money.format(
+      )} ₽/кг. Завод зарабатывает при цене от ${money.format(
         product.minPricePerKg,
-      )} ₽/кг. По этой цене завод зарабатывает на заказе.`,
+      )} ₽/кг.`,
       source: "Карточка товара и второе правило о цене",
       checkedAt: today,
     },
@@ -818,7 +1094,17 @@ export function buildDemoResult(
   if (calculation) {
     decisionBasis.unshift({
       fact: calculation.explanation,
-      source: "Расчёт расхода и упаковок",
+      source:
+        calculation.source === "распознанное фото"
+          ? "Распознанные сведения о фото и расчёт расхода"
+          : "Расчёт расхода и упаковок",
+      checkedAt: today,
+    });
+  }
+  if (commercialEstimate) {
+    decisionBasis.push({
+      fact: commercialEstimate.basis,
+      source: "Расчёт возможной основной закупки",
       checkedAt: today,
     });
   }
@@ -867,6 +1153,8 @@ export function buildDemoResult(
             )} кг отправим сейчас, ${money.format(remainder)} кг — через ${
               product.replenishmentDays
             } дней. Клиент начинает работу раньше.`,
+            businessResult:
+              "Завод продаёт доступную партию сейчас и сохраняет заказ на оставшийся объём.",
             tradeoff: "Вторая партия потребует отдельной доставки.",
             reply: firstReply,
           },
@@ -880,6 +1168,8 @@ export function buildDemoResult(
                   )} кг клиент оплачивает перед первой отгрузкой. Для оставшихся ${money.format(
                     remainder,
                   )} кг руководитель согласует оплату после поставки.`,
+                  businessResult:
+                    "Завод получает оплату за первую партию до отгрузки и отдельно согласует оплату оставшегося объёма.",
                   tradeoff:
                     "Договор зафиксирует сумму и срок оплаты для каждой партии.",
                   reply: `Добрый день!\n\nПредлагаем поставить заказ двумя партиями и закрепить оплату отдельно для каждой. Первые ${money.format(
@@ -888,7 +1178,7 @@ export function buildDemoResult(
                     remainder,
                   )} кг — через ${
                     product.replenishmentDays
-                  } дней. Для второй партии рассмотрим оплату через 90 дней после поставки.`,
+                  } дней. Для второй партии рассмотрим оплату после поставки и закрепим срок в договоре.`,
                 },
               ]
             : []),
@@ -899,13 +1189,15 @@ export function buildDemoResult(
                   title: `Закрыть объём краской «${compatibleAlternative.name}»`,
                   rationale: `${money.format(
                     requestedKg,
-                  )} кг есть на складе. Технолог подтвердит применение перед резервом.`,
+                  )} кг есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
+                  businessResult:
+                    "Завод закрывает полный заказ товаром со склада и получает оплату за весь заказ сразу.",
                   tradeoff: `Цена составит ${money.format(
                     compatibleAlternative.pricePerKg,
                   )} ₽/кг.`,
                   reply: `Добрый день!\n\nМожем закрыть весь объём краской «${compatibleAlternative.name}» по цене ${money.format(
                     compatibleAlternative.pricePerKg,
-                  )} ₽/кг. Весь объём есть на складе. Перед резервом технолог подтвердит применение для вашей поверхности.`,
+                  )} ₽/кг. Весь объём есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
                 },
               ]
             : []),
@@ -914,6 +1206,8 @@ export function buildDemoResult(
             title: "Добавить краску в ближайший выпуск",
             rationale:
               "Зарезервировать доступную партию и добавить недостающий объём в ближайший выпуск.",
+            businessResult:
+              "Завод сохраняет полный заказ и заранее планирует ближайший выпуск.",
             tradeoff: "Производство подтвердит дату второй отгрузки.",
             reply: `Добрый день!\n\nЗарезервируем ${money.format(
               product.stockKg,
@@ -926,6 +1220,8 @@ export function buildDemoResult(
             title: "Собрать удобный график",
             rationale:
               "Узнать объём для старта работ и нужную дату второй партии.",
+            businessResult:
+              "Завод получает реалистичный график заказа и планирует производство под срок клиента.",
             tradeoff: "Клиент ответит на два коротких вопроса.",
             reply:
               "Добрый день!\n\nНапишите, какой объём нужен для начала работ и к какой дате потребуется остальная краска. По ответу закрепим удобный график поставки.",
@@ -938,6 +1234,8 @@ export function buildDemoResult(
               title: "Сохранить цену при оплате до отгрузки",
               rationale:
                 "Клиент получает весь подтверждённый объём и твёрдую дату отгрузки.",
+              businessResult:
+                "Завод получает оплату до отгрузки и зарабатывает на заказе.",
               tradeoff:
                 "Клиент меняет желаемый порядок оплаты.",
               reply: `Добрый день!\n\nНа складе есть ${money.format(
@@ -951,6 +1249,8 @@ export function buildDemoResult(
               title: "Разрешить оплату после поставки за план закупок",
               rationale:
                 "Клиент получает желаемый порядок оплаты и заранее закрепляет объём следующих поставок.",
+              businessResult:
+                "Завод получает план закупок и заранее готовит нужный объём.",
               tradeoff:
                 "Потребуется согласовать объём на квартал и условия договора.",
               reply: `Добрый день!\n\nГотовы рассмотреть оплату после поставки, если заранее согласуем объём закупок на квартал. Цена текущей партии — ${money.format(
@@ -962,6 +1262,8 @@ export function buildDemoResult(
               title: "Разделить оплату на два этапа",
               rationale:
                 "Клиент оплачивает часть до отгрузки, остаток — после получения товара.",
+              businessResult:
+                "Завод получает часть оплаты до отгрузки и фиксирует срок оставшегося платежа.",
               tradeoff:
                 "Руководитель закрепит доли и срок второй оплаты в договоре.",
               reply: `Добрый день!\n\nПредлагаем разделить оплату на два этапа: часть до отгрузки, остаток после получения товара. Весь объём ${money.format(
@@ -975,7 +1277,10 @@ export function buildDemoResult(
             title: "Предложить обычные условия",
             rationale:
               "Подтвердить наличие, цену и обычный порядок оплаты и поставки.",
-            tradeoff: "Клиент оценит предложение по действующим условиям.",
+            businessResult:
+              "Завод продаёт по текущей цене, зарабатывает на заказе и быстро переходит к отгрузке.",
+            tradeoff:
+              "Вариант сохраняет текущую цену и обычную оплату до отгрузки.",
             reply: firstReply,
           },
           {
@@ -983,6 +1288,8 @@ export function buildDemoResult(
             title: "Дать лучшую цену за план закупок",
             rationale:
               "Клиент заранее согласует объём на квартал и вносит предоплату.",
+            businessResult:
+              "Завод получает предсказуемый объём следующих заказов и планирует выпуск заранее.",
             tradeoff: "Клиент заранее согласует объём закупок.",
             reply: `Добрый день!\n\nГотовы обсудить лучшую цену, если согласуем закупки на квартал и предоплату. Обычная цена текущей партии — ${money.format(
               product.pricePerKg,
@@ -993,6 +1300,8 @@ export function buildDemoResult(
             title: "Спросить, что важнее клиенту",
             rationale:
               "Выяснить, что важнее: срок, цена или порядок оплаты, и собрать выполнимое предложение.",
+            businessResult:
+              "Завод узнаёт главный приоритет клиента и собирает условия, при которых зарабатывает на заказе.",
             tradeoff: "Понадобится один короткий ответ клиента.",
             reply:
               "Добрый день!\n\nЧто для вас важнее в этой поставке: срок, цена или порядок оплаты? По ответу подготовим подходящий вариант.",
@@ -1012,21 +1321,32 @@ export function buildDemoResult(
       research,
       businessContext,
       zoneReason: shortage
-        ? paymentAfterDelivery
-          ? `Склад подтверждает ${money.format(
+        ? [
+            `Склад подтверждает ${money.format(
               product.stockKg,
-            )} кг сейчас и ${money.format(
+            )} кг сейчас и ${money.format(remainder)} кг после пополнения.`,
+            paymentAfterDelivery
+              ? "Клиент просит оплату после поставки."
+              : "",
+            belowMinimum
+              ? `Цена клиента — ${money.format(
+                  customerPrice ?? 0,
+                )} ₽/кг. Завод зарабатывает при цене от ${money.format(
+                  product.minPricePerKg,
+                )} ₽/кг.`
+              : "",
+            `Руководитель выбирает способ закрыть оставшиеся ${money.format(
               remainder,
-            )} кг после пополнения. Клиент просит оплату через 90 дней после поставки. Руководитель выбирает график поставки и оплаты.`
-          : `Склад подтверждает ${money.format(
-              product.stockKg,
-            )} кг сейчас. Руководитель выбирает способ закрыть оставшиеся ${money.format(
-              remainder,
-            )} кг.`
+            )} кг${paymentAfterDelivery ? " и график оплаты" : ""}.`,
+          ]
+            .filter(Boolean)
+            .join(" ")
         : belowMinimum
-          ? `Клиент предложил ${money.format(
+          ? `Цена клиента — ${money.format(
               customerPrice ?? 0,
-            )} ₽/кг. Руководитель выбирает условия, при которых завод заработает на заказе, а клиент получит подходящую поставку.`
+            )} ₽/кг. Завод зарабатывает при цене от ${money.format(
+              product.minPricePerKg,
+            )} ₽/кг. Агент подготовил варианты для руководителя.`
           : "Агент подготовил три выполнимых варианта по особым условиям клиента.",
       managerNote: profile
         ? likelyTrialOrder
@@ -1049,7 +1369,7 @@ export function buildDemoResult(
         "Письмо собрано по правилам завода",
         view.items.length
           ? "Сравнение цен содержит дату"
-          : "Цена сверена с карточкой товара и минимальной ценой с прибылью",
+          : "Цена сверена с карточкой товара и правилом заработка",
       ],
       sources: [
         "Письмо клиента",
@@ -1087,7 +1407,13 @@ export function buildDemoResult(
       ? businessContext
       : `Весь объём доступен. ${standardBusinessContext}`,
     zoneReason: likelyTrialOrder
-      ? "Склад подтверждает весь объём. Заказ выглядит пробной партией. Агент спросит, какие свойства краски клиент проверяет и какой объём понадобится после успешной пробы."
+      ? `Склад подтверждает весь объём. Заказ выглядит пробной партией. ${
+          commercialEstimate
+            ? `Рабочий расчёт даёт ориентир ${money.format(
+                commercialEstimate.possibleMainKg,
+              )} кг возможной годовой потребности при историческом выпуске и выбранном ориентире расхода. `
+            : ""
+        }Агент предложит измерить фактический расход и уточнить текущий план выпуска.`
       : "Весь объём подтверждён складом. По этой цене завод зарабатывает на заказе. Письмо готово.",
     managerNote: profile
       ? likelyTrialOrder
@@ -1109,7 +1435,7 @@ export function buildDemoResult(
           : ""
       }${
         likelyTrialOrder
-          ? "\n\nПодскажите, какие свойства краски проверяете на первой партии и какой объём планируете после успешной пробы. Подготовим следующую поставку заранее."
+          ? "\n\nПодскажите, какие свойства краски проверяете на первой партии. Предлагаем записать фактический расход на одну машину и сверить его с текущим планом выпуска. По этим данным рассчитаем возможный объём и график следующей закупки."
           : ""
       }`,
     },
@@ -1119,7 +1445,7 @@ export function buildDemoResult(
       "Письмо собрано по правилам завода",
       view.items.length
         ? "Сравнение цен содержит дату"
-        : "Цена сверена с карточкой товара и минимальной ценой с прибылью",
+        : "Цена сверена с карточкой товара и правилом заработка",
     ],
     sources: [
       "Письмо клиента",

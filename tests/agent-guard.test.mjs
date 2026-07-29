@@ -306,7 +306,7 @@ test("replaces an all-caps model reason with a calm fallback", () => {
   assert.equal(result.zoneReason, "Краска, объём и цена подтверждены.");
 });
 
-test("keeps a completed research check visible when no sources were found", () => {
+test("does not mark a search as source-checked without an opened URL", () => {
   const draft = agentDraft();
   draft.research = {
     checked: true,
@@ -316,13 +316,18 @@ test("keeps a completed research check visible when no sources were found", () =
 
   const result = normalizeAgentResult(draft, demoData, {
     company: "Завод",
+    website: "zavod.example.ru",
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
 
-  assert.equal(result.research.checked, true);
+  assert.equal(result.research.checked, false);
   assert.deepEqual(result.research.sources, []);
   assert.match(result.research.summary, /поиск завершён/i);
+  assert.match(
+    result.research.summary,
+    /решение опирается на письмо и внутренние данные/iu,
+  );
 });
 
 test("keeps a public source with a Latin date label", () => {
@@ -342,12 +347,128 @@ test("keeps a public source with a Latin date label", () => {
 
   const result = normalizeAgentResult(draft, demoData, {
     company: "Завод",
+    website: "zavod.example.ru",
+    openedSourceUrls: ["https://example.com/company"],
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
 
+  assert.equal(result.research.checked, true);
   assert.equal(result.research.sources.length, 1);
   assert.equal(result.research.sources[0].checkedAt, "28 Jul 2026");
+});
+
+test("allows a cautious company-name match and labels it explicitly", () => {
+  const draft = agentDraft();
+  draft.research = {
+    checked: true,
+    summary: "Модель нашла компанию с похожим названием.",
+    sources: [
+      {
+        title: "Компания с похожим названием",
+        url: "https://example.com/company",
+        checkedAt: "2026-07-29",
+        fact: "Факт относится к другой организации.",
+      },
+    ],
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Учебная компания",
+    openedSourceUrls: ["https://example.com/company"],
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.equal(result.research.checked, true);
+  assert.equal(result.research.sources.length, 1);
+  assert.match(result.research.summary, /совпадение по названию/iu);
+  assert.match(
+    result.research.sources[0].fact,
+    /совпадение по названию/iu,
+  );
+});
+
+test("keeps an unopened model link out of conclusions", () => {
+  const draft = agentDraft();
+  draft.businessContext = "Выручка клиента — 50 млрд рублей.";
+  draft.zoneReason = "Крупный клиент получит особые условия.";
+  draft.reply.body = "Для крупного клиента согласовали особые условия.";
+  draft.research = {
+    checked: true,
+    summary: "Компания выпускает тысячу станков в год.",
+    sources: [
+      {
+        title: "Карточка компании",
+        url: "https://example.com/company",
+        checkedAt: "2026-07-29",
+        fact: "Выручка клиента — 50 млрд рублей.",
+      },
+    ],
+  };
+  draft.decisionBasis = [
+    {
+      fact: "Клиент крупный.",
+      source: "Карточка компании",
+      checkedAt: "2026-07-29",
+    },
+  ];
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Завод",
+    website: "zavod.ru",
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.equal(result.research.checked, false);
+  assert.match(
+    result.research.sources[0].fact,
+    /решение опирается на письмо, каталог и склад/iu,
+  );
+  assert.doesNotMatch(
+    `${result.businessContext} ${result.zoneReason} ${result.reply.body}`,
+    /50 млрд|тысяч[ау] станков|крупн.*клиент|особые условия/iu,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(result.decisionBasis),
+    /карточка компании|клиент крупный/iu,
+  );
+});
+
+test("does not hide a dropped source behind one opened URL", () => {
+  const draft = agentDraft();
+  draft.businessContext = "Компания открывает пять новых заводов.";
+  draft.research = {
+    checked: true,
+    summary: "Компания открывает пять новых заводов.",
+    sources: [
+      {
+        title: "Открытая карточка",
+        url: "https://example.com/company",
+        checkedAt: "2026-07-29",
+        fact: "Компания выпускает оборудование.",
+      },
+      {
+        title: "Неподходящая ссылка",
+        url: "javascript:alert(1)",
+        checkedAt: "2026-07-29",
+        fact: "Компания открывает пять новых заводов.",
+      },
+    ],
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Завод",
+    website: "zavod.ru",
+    openedSourceUrls: ["https://example.com/company"],
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.equal(result.research.checked, false);
+  assert.doesNotMatch(result.businessContext, /пять новых заводов/iu);
+  assert.doesNotMatch(result.reply.body, /пять новых заводов/iu);
 });
 
 test("clips a long research summary at a word boundary", () => {
@@ -355,11 +476,20 @@ test("clips a long research summary at a word boundary", () => {
   draft.research = {
     checked: true,
     summary: `${"Подтверждённый факт. ".repeat(40)}НезавершённоеСлово`,
-    sources: [],
+    sources: [
+      {
+        title: "Карточка компании",
+        url: "https://example.com/company",
+        checkedAt: "2026-07-29",
+        fact: "Компания выпускает оборудование.",
+      },
+    ],
   };
 
   const result = normalizeAgentResult(draft, demoData, {
     company: "Завод",
+    website: "zavod.example.ru",
+    openedSourceUrls: ["https://example.com/company"],
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
@@ -427,10 +557,49 @@ test("keeps a fence photo request human and asks only for useful details", () =>
   assert.match(questions, /длин[а-яё]*.*высот/isu);
   assert.match(questions, /(?:одн|обе)[а-яё]*\s+сторон/iu);
   assert.match(questions, /цвет/iu);
+  assert.doesNotMatch(questions, /приложите\s+(?:фото|фотограф|снимок)/iu);
   assert.doesNotMatch(
     questions,
     /килограмм|(?:^|[^\p{L}])кг(?:[^\p{L}]|$)|объ[её]м|услови[а-яё]*\s+эксплуатац|улиц|помещ/iu,
   );
+});
+
+test("turns a mistaken red fence draft into exact yellow questions", () => {
+  const job = {
+    company: "Дачный посёлок",
+    subject: "Краска для забора",
+    body: "Забор примерно 120 метров, высота 2 метра. Фото прилагаю. Помогите выбрать краску.",
+  };
+  const reviewed = applyReviewerResult(
+    agentDraft({ zone: "red" }),
+    {
+      approved: false,
+      verdict: "Нужно уточнить задачу",
+      notes: [],
+      blockingIssues: ["Для подбора краски нужны сведения клиента"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.equal(reviewed.zone, "yellow");
+  assert.equal(reviewed.decision, "clarify");
+  assert.equal(reviewed.route, "needs_info");
+  assert.deepEqual(reviewed.missing, [
+    "материал забора",
+    "стороны покраски",
+    "желаемый цвет",
+    "приложите фотографию",
+  ]);
+  assert.match(reviewed.reply.body, /из чего сделан забор/iu);
+  assert.match(reviewed.reply.body, /одну сторону забора или обе/iu);
+  assert.match(reviewed.reply.body, /какой цвет/iu);
+  assert.match(
+    reviewed.reply.body,
+    /приложите фотографию, которую упомянули в письме/iu,
+  );
+  assert.doesNotMatch(reviewed.reply.body, /длин[а-яё]*.*высот/isu);
 });
 
 test("grounds a clarified fence in the wood paint and whole packages", () => {
@@ -475,6 +644,11 @@ test("grounds a clarified fence in the wood paint and whole packages", () => {
     company: "Сад у озера",
     subject: "Хочу покрасить забор",
     body: "Добрый день! Хочу покрасить забор. Прикладываю фото.",
+    attachment: {
+      name: "забор.jpg",
+      src: "/fence-demo.jpg",
+      alt: "Забор на даче",
+    },
     conversation: [
       {
         role: "customer",
@@ -513,6 +687,107 @@ test("grounds a clarified fence in the wood paint and whole packages", () => {
     Math.abs((result.calculation?.estimatedKg ?? 0) - 27.72) < 1e-9,
   );
   assert.match(result.calculation?.explanation ?? "", /3 упаковки по 10 кг/iu);
+});
+
+test("grounds wall and floor area calculations without asking for kilograms", () => {
+  const cases = [
+    {
+      sku: "КР-004",
+      subject: "Краска для стен",
+      body: "Красим 120 м² стен по штукатурке в помещении, цвет белый.",
+      kind: "wall-area",
+      material: "штукатурка",
+      roundedKg: 42,
+      packages: 3,
+    },
+    {
+      sku: "КР-003",
+      subject: "Краска для пола",
+      body: "Красим 80 м² бетонного пола в помещении, цвет серый.",
+      kind: "floor-area",
+      material: "бетон",
+      roundedKg: 80,
+      packages: 4,
+    },
+  ];
+
+  for (const item of cases) {
+    const draft = agentDraft({ sku: item.sku, requestedKg: 1 });
+    draft.calculation = {
+      kind: item.kind,
+      material: item.material,
+      areaPerSideM2: 1,
+      sides: 1,
+      paintAreaM2: 1,
+      coverageKgPerM2PerCoat: 99,
+      coats: 9,
+      reservePercent: 90,
+      estimatedKg: 1,
+      packageKg: 1,
+      packages: 1,
+      roundedKg: 1,
+      explanation: "Недостоверный расчёт модели.",
+    };
+
+    const job = {
+      company: "Учебный объект",
+      subject: item.subject,
+      body: item.body,
+    };
+    const result = applyReviewerResult(
+      normalizeAgentResult(draft, demoData, job),
+      {
+        approved: true,
+        verdict: "Факты и расчёт подтверждены",
+        notes: [],
+        blockingIssues: [],
+      },
+      "opencode/gpt-5.6-sol",
+      demoData,
+      job,
+    );
+
+    assert.equal(result.zone, "green");
+    assert.equal(result.route, "ready");
+    assert.deepEqual(result.missing, []);
+    assert.equal(result.product?.sku, item.sku);
+    assert.equal(result.product?.requestedKg, item.roundedKg);
+    assert.equal(result.calculation?.kind, item.kind);
+    assert.equal(result.calculation?.material, item.material);
+    assert.equal(result.calculation?.roundedKg, item.roundedKg);
+    assert.equal(result.calculation?.packages, item.packages);
+    assert.equal(isCompleteAgentResult(result), true);
+  }
+});
+
+test("rejects a wall calculation when the client did not provide an area", () => {
+  const draft = agentDraft({ sku: "КР-004", requestedKg: 42 });
+  draft.calculation = {
+    kind: "wall-area",
+    material: "штукатурка",
+    areaPerSideM2: 120,
+    sides: 1,
+    paintAreaM2: 120,
+    coverageKgPerM2PerCoat: 0.15,
+    coats: 2,
+    reservePercent: 10,
+    estimatedKg: 39.6,
+    packageKg: 14,
+    packages: 3,
+    roundedKg: 42,
+    explanation: "Расчёт модели без площади в письме.",
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Учебный объект",
+    subject: "Краска для стен",
+    body: "Красим стены по штукатурке в помещении, цвет белый.",
+  });
+
+  assert.equal(result.zone, "yellow");
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.calculation, undefined);
+  assert.match(result.missing.join(" "), /площадь стен/iu);
 });
 
 test("records a fence photo only when the live order contains an attachment", () => {
@@ -610,6 +885,10 @@ test("recomputes material gaps from the letter and removes the model quote", () 
   assert.doesNotMatch(
     result.reply.body,
     /подтверждаем|349 ₽\/кг|совместимость покрытия/i,
+  );
+  assert.match(
+    result.reply.body,
+    /можно описать его словами или указать номер из каталога цветов RAL/iu,
   );
 });
 
@@ -1013,7 +1292,7 @@ test("offers only an explicitly approved stocked analogue", () => {
   assert.ok(alternative);
   assert.match(
     alternative.reply,
-    /Перед поставкой технолог подтвердит, что краска подходит/iu,
+    /Специалист подтвердит, что краска подходит/iu,
   );
   assert.equal(product.analogues.includes(approvedAnalogue.sku), true);
 });
@@ -1163,8 +1442,9 @@ test("removes unsupported business conclusions after a negative review", () => {
   );
   assert.match(
     reviewed.businessContext,
-    /(?=.*письм)(?=.*каталог)(?=.*склад)(?=.*открыт[^.]*источник)(?=.*решени)/isu,
+    /(?=.*письм)(?=.*каталог)(?=.*склад)(?=.*ссылк)(?=.*решени)/isu,
   );
+  assert.equal(reviewed.research.checked, false);
   assert.equal(reviewed.research.sources.length, 1);
   assert.equal(
     reviewed.research.sources[0].fact,
@@ -1176,6 +1456,18 @@ test("removes unsupported business conclusions after a negative review", () => {
   );
   assert.doesNotMatch(reviewed.understood.join(" "), /выручк|50 млрд/i);
   assert.doesNotMatch(reviewed.managerNote, /выручк|принять риск/i);
+  assert.doesNotMatch(
+    `${reviewed.zoneReason} ${reviewed.managerNote}`,
+    /проверенн[а-яё]*\s+факт/iu,
+  );
+  assert.match(
+    reviewed.zoneReason,
+    /письм.*каталог.*склад.*подтвержд/iu,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(reviewed.decisionBasis),
+    /обрабатывает металлические изделия|50 млрд|риск неплатежа/iu,
+  );
   assert.ok(
     reviewed.understood
       .join(" ")
@@ -1276,6 +1568,7 @@ test("mentions the catalogue when product is known and quantity is missing", () 
 test("explains a completed public search with no confirmed sources", () => {
   const job = {
     company: "ГородПроект",
+    website: "gorodproekt.example.ru",
     subject: "Белая краска для офиса",
     body: "Нужно 200 кг продукта КР-004 для внутренних стен офиса, цвет белый.",
   };
@@ -1432,7 +1725,7 @@ test("requires blockingIssues to be an explicit empty array", () => {
   assert.equal(reviewed.decision, "escalate");
 });
 
-test("keeps a negative review red when the product is still unknown", () => {
+test("keeps a safe clarification yellow after a negative review", () => {
   const job = {
     company: "РегионСклад",
     subject: "Краска для нового цеха",
@@ -1462,10 +1755,66 @@ test("keeps a negative review red when the product is still unknown", () => {
     job,
   );
 
-  assert.equal(reviewed.zone, "red");
-  assert.equal(reviewed.decision, "escalate");
-  assert.equal(reviewed.options.length, 3);
+  assert.equal(reviewed.zone, "yellow");
+  assert.equal(reviewed.decision, "clarify");
+  assert.equal(reviewed.route, "needs_info");
+  assert.equal(reviewed.options.length, 0);
+  assert.match(reviewed.reply.body, /уточните/iu);
 });
+
+for (const [boundary, job] of [
+  [
+    "a stock shortage",
+    {
+      company: "Завод",
+      subject: "Заказ КР-001",
+      body: "Нужно 800 кг КР-001.",
+    },
+  ],
+  [
+    "special terms",
+    {
+      company: "Завод",
+      subject: "Заказ с отсрочкой",
+      body: "Нужно 200 кг КР-001. Просим отсрочку 60 дней.",
+    },
+  ],
+  [
+    "a client price below the profitable price",
+    {
+      company: "Завод",
+      subject: "Цена заказа",
+      body: "Нужно 200 кг КР-001 по 320 ₽/кг.",
+    },
+  ],
+  [
+    "an unknown explicit product code",
+    {
+      company: "Завод",
+      subject: "Заказ КР-099",
+      body: "Нужно 200 кг КР-099.",
+    },
+  ],
+]) {
+  test(`keeps ${boundary} with the manager after a negative review`, () => {
+    const reviewed = applyReviewerResult(
+      agentDraft({ zone: "red" }),
+      {
+        approved: false,
+        verdict: "Руководитель выбирает следующий шаг",
+        notes: [],
+        blockingIssues: ["Условие требует решения"],
+      },
+      "opencode/gpt-5.6-sol",
+      demoData,
+      job,
+    );
+
+    assert.equal(reviewed.zone, "red");
+    assert.equal(reviewed.decision, "escalate");
+    assert.equal(reviewed.route, "manager");
+  });
+}
 
 test("accepts complete grounded live results on all three routes", () => {
   const greenJob = {

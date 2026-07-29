@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   asksCompatibility,
   asksPaymentAfterDelivery,
+  calculatedSurfaceQuantityFromText,
   explicitSkuFromText,
   fenceMaterialFromText,
   fenceMeasurementsFromText,
@@ -127,6 +128,37 @@ test("does not read packaging or a unit-price request as order volume", () => {
   assert.equal(quantityFromText("Объём 5 т.к. график ещё обсуждаем."), 0);
 });
 
+test("calculates a complete wall or floor request from area", () => {
+  const wallPaint = demoData.products.find((product) => product.sku === "КР-004");
+  const floorPaint = demoData.products.find((product) => product.sku === "КР-003");
+  const reserve = demoData.rules.calculationReservePercent;
+
+  assert.equal(
+    calculatedSurfaceQuantityFromText(
+      "Красим 120 м² стен по штукатурке в помещении, цвет белый.",
+      wallPaint,
+      reserve,
+    ),
+    42,
+  );
+  assert.equal(
+    calculatedSurfaceQuantityFromText(
+      "Нужно покрасить 80 м² бетонного пола в помещении, цвет серый.",
+      floorPaint,
+      reserve,
+    ),
+    80,
+  );
+  assert.equal(
+    calculatedSurfaceQuantityFromText(
+      "Красим стены по штукатурке в помещении, цвет белый.",
+      wallPaint,
+      reserve,
+    ),
+    0,
+  );
+});
+
 test("treats a short mistyped SKU as an explicit unknown identifier", () => {
   assert.equal(explicitSkuFromText("Нужно 200 кг КР-99."), "КР-99");
   assert.equal(
@@ -223,6 +255,22 @@ test("reads compact fence dimensions without confusing length and height", () =>
       sides: 2,
       areaPerSideM2: 40,
       paintAreaM2: 80,
+    },
+  );
+});
+
+test("understands natural fence length before a labelled height", () => {
+  assert.deepEqual(
+    fenceMeasurementsFromText(
+      "Забор примерно 120 метров, высота 2 метра. Красим одну сторону.",
+    ),
+    {
+      lengthM: 120,
+      heightM: 2,
+      areaM2: null,
+      sides: 1,
+      areaPerSideM2: 240,
+      paintAreaM2: 240,
     },
   );
 });

@@ -110,6 +110,10 @@ test("exports the incoming request and prepared agent email as separate full-tex
 });
 
 test("keeps the decision and reply before and after a live stock change", () => {
+  const splitLetter =
+    "Добрый день!\n\n40 кг отгрузим завтра, ещё 60 кг — через пять дней.";
+  const productionLetter =
+    "Добрый день!\n\nДобавим 60 кг в ближайший выпуск и закрепим срок.";
   const csv = buildLedgerCsv({
     orders: [
       {
@@ -137,7 +141,22 @@ test("keeps the decision and reply before and after a live stock change", () => 
         replySubject: "Варианты поставки",
         replyBody: "40 кг сейчас, остаток после выпуска.",
         zoneReason: "На складе 40 кг.",
-        optionsJson: "[]",
+        optionsJson: JSON.stringify([
+          {
+            id: "split",
+            title: "Разделить поставку",
+            rationale: "Первая партия уже на складе.",
+            tradeoff: "Вторую партию клиент получит через пять дней.",
+            reply: splitLetter,
+          },
+          {
+            id: "production",
+            title: "Добавить в ближайший выпуск",
+            rationale: "Производство готово принять объём.",
+            tradeoff: "Руководитель закрепит срок.",
+            reply: productionLetter,
+          },
+        ]),
         createdAt: "2026-07-29T10:01:00.000Z",
       },
       {
@@ -168,6 +187,22 @@ test("keeps the decision and reply before and after a live stock change", () => 
   assert.ok(rows.some((row) => row["Полный текст"].includes("40 кг")));
   assert.ok(rows.some((row) => row["Полный текст"].includes("100 кг")));
   assert.ok(rows.every((row) => row["Компания"] === "Столярная мастерская"));
+  const beforeStockChange = rows.find(
+    (row) => row["Решение агента"] === "Решает руководитель",
+  );
+  assert.ok(beforeStockChange);
+  assert.equal(
+    beforeStockChange["Предложенные варианты"],
+    [
+      "Разделить поставку",
+      "Основание: Первая партия уже на складе. Вторую партию клиент получит через пять дней.",
+      `Письмо клиенту:\n${splitLetter}`,
+      "",
+      "Добавить в ближайший выпуск",
+      "Основание: Производство готово принять объём. Руководитель закрепит срок.",
+      `Письмо клиенту:\n${productionLetter}`,
+    ].join("\n"),
+  );
 });
 
 test("keeps every conversation message and manager decision on its own timed row", () => {
@@ -437,6 +472,130 @@ test("assigns a readable record type and sender to every known event stage", () 
     assert.ok(row, `missing CSV row for ${stage}`);
     assert.equal(row["Тип записи"], recordType, stage);
     assert.equal(row["Отправитель"], sender, stage);
+  }
+});
+
+test("gives every OpenCode step a specific Russian presentation", () => {
+  const cases = [
+    [
+      "model",
+      "Выбор модели",
+      "Выбор модели для заявки",
+      "OpenCode",
+      "Агент отдела продаж",
+      "Завершено",
+    ],
+    [
+      "research",
+      "Поиск сведений",
+      "Поиск сведений в открытых источниках",
+      "Агент отдела продаж",
+      "Открытый источник",
+      "Завершено",
+    ],
+    [
+      "research-result",
+      "Результат поиска",
+      "Сведения для решения собраны",
+      "Агент отдела продаж",
+      "Карточка заказа",
+      "Завершено",
+    ],
+    [
+      "review-result",
+      "Результат проверки",
+      "Проверка сильной моделью завершена",
+      "Сильная модель",
+      "Агент отдела продаж",
+      "Завершено",
+    ],
+    [
+      "review-fallback",
+      "Передача руководителю",
+      "Передача решения руководителю",
+      "Программа проверки",
+      "Руководитель",
+      "Передано руководителю",
+    ],
+    [
+      "vision",
+      "Осмотр фотографии",
+      "Осмотр фотографии",
+      "Модель для фотографий",
+      "Вложение клиента",
+      "Завершено",
+    ],
+    [
+      "vision-result",
+      "Результат осмотра фотографии",
+      "Признаки на фотографии собраны",
+      "Модель для фотографий",
+      "Агент отдела продаж",
+      "Завершено",
+    ],
+    [
+      "vision-fallback",
+      "Вопросы по фотографии",
+      "Подготовка вопросов по фотографии",
+      "Программа стенда",
+      "Агент отдела продаж",
+      "Продолжено с уточняющими вопросами",
+    ],
+  ];
+  const csv = buildLedgerCsv({
+    orders: [
+      {
+        id: "opencode-order",
+        company: "Частный покупатель",
+        subject: "Фото забора",
+        body: "Хочу покрасить забор.",
+        status: "processing",
+        conversationJson: "[]",
+        createdAt: "2026-07-29T10:00:00.000Z",
+        updatedAt: "2026-07-29T10:00:00.000Z",
+      },
+    ],
+    events: cases.map(([stage], index) => ({
+      id: index + 101,
+      orderId: "opencode-order",
+      stage,
+      title: `Событие ${stage}`,
+      detail: `Подробное описание шага ${stage}`,
+      state:
+        stage === "review-fallback" || stage === "vision-fallback"
+          ? "error"
+          : "done",
+      createdAt: `2026-07-29T10:${String(index + 1).padStart(2, "0")}:00.000Z`,
+    })),
+  });
+  const rows = parseCsv(csv);
+
+  for (const [
+    stage,
+    recordType,
+    stageLabel,
+    sender,
+    recipient,
+    state,
+  ] of cases) {
+    const eventId =
+      cases.findIndex(([candidate]) => candidate === stage) + 101;
+    const row = rows.find(
+      (item) => item["Внутренний номер записи"] === `event:${eventId}`,
+    );
+    assert.ok(row, `missing CSV row for ${stage}`);
+    assert.equal(row["Тип записи"], recordType, stage);
+    assert.equal(row["Этап агента"], stageLabel, stage);
+    assert.equal(row["Отправитель"], sender, stage);
+    assert.equal(row["Получатель"], recipient, stage);
+    assert.equal(row["Состояние записи"], state, stage);
+    assert.equal(
+      row["Полный текст"],
+      `Подробное описание шага ${stage}`,
+      stage,
+    );
+    assert.notEqual(row["Тип записи"], "Событие агента", stage);
+    assert.notEqual(row["Этап агента"], "Работа агента", stage);
   }
 });
 

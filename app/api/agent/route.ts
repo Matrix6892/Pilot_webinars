@@ -14,6 +14,23 @@ function resultStatus(result: AgentResult) {
   return "ready_to_send";
 }
 
+function resultRoute(result: AgentResult | null) {
+  if (!result) return "";
+  if (result.route) return result.route;
+  if (result.zone === "red") return "manager";
+  if (result.zone === "yellow") return "needs_info";
+  return "ready";
+}
+
+function storedResult(value: string | null) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as AgentResult;
+  } catch {
+    return null;
+  }
+}
+
 function expectedToken() {
   return (env as unknown as { BRIDGE_TOKEN?: string }).BRIDGE_TOKEN?.trim() ?? "";
 }
@@ -108,7 +125,9 @@ export async function POST(request: Request) {
     .select({
       id: orders.id,
       status: orders.status,
+      mode: orders.mode,
       roundNo: orders.roundNo,
+      resultJson: orders.resultJson,
       inventorySnapshotJson: orders.inventorySnapshotJson,
     })
     .from(orders)
@@ -146,6 +165,14 @@ export async function POST(request: Request) {
     const reviewerModel = String(
       payload.reviewerModel ?? "OpenCode reviewer",
     ).slice(0, 120);
+    const previousResult = storedResult(order.resultJson);
+    const isInventoryRecalculation = order.mode === "opencode-recalculate";
+    const historyReason = isInventoryRecalculation
+      ? "Склад перечитан"
+      : "Решение рабочей модели";
+    const sourceKey = isInventoryRecalculation
+      ? `inventory-model:${order.roundNo}`
+      : `model:${order.roundNo}`;
     const transitionGuard = and(
       eq(orders.id, orderId),
       eq(orders.status, "processing"),
@@ -158,8 +185,8 @@ export async function POST(request: Request) {
         roundNo: order.roundNo,
         result: agentResult,
         status,
-        reason: "Решение рабочей модели",
-        sourceKey: `model:${order.roundNo}`,
+        reason: historyReason,
+        sourceKey,
         inventorySnapshot: order.inventorySnapshotJson ?? undefined,
         agentModel,
         reviewerModel,
@@ -182,7 +209,10 @@ export async function POST(request: Request) {
         orderId,
         stage: "decision",
         title:
-          status === "ready_to_send"
+          isInventoryRecalculation &&
+          resultRoute(previousResult) !== resultRoute(agentResult)
+            ? "Свежий склад изменил решение"
+            : status === "ready_to_send"
             ? "Следующий шаг: готов ответить"
             : status === "clarification_ready"
               ? "Следующий шаг: нужны детали"

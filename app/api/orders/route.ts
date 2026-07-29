@@ -110,7 +110,11 @@ export function preserveConfirmedResearch(
 ) {
   const previousSources = previous?.research?.sources ?? [];
   const recalculatedSources = recalculated.research?.sources ?? [];
-  if (!previousSources.length || recalculatedSources.length) {
+  if (
+    previous?.research?.checked !== true ||
+    !previousSources.length ||
+    recalculatedSources.length
+  ) {
     return recalculated;
   }
 
@@ -910,8 +914,7 @@ export async function PATCH(request: Request) {
     ) {
       return Response.json(
         {
-          error:
-            "Карточка уже использует свежий склад. Дополнительный пересчёт не требуется.",
+          error: "Карточка уже рассчитана по свежему складу.",
         },
         { status: 409 },
       );
@@ -924,18 +927,10 @@ export async function PATCH(request: Request) {
       order.resultJson,
       null,
     );
-    const { result: recalculatedResult, inventorySnapshot } =
-      await processAutonomously(
-        order,
-        conversation,
-      );
-    const result = preserveConfirmedResearch(
-      previousResult,
-      recalculatedResult,
-    );
-    const nextStatus = statusForResult(result);
-    const currentItem = inventorySnapshot.items.find(
-      (item) => item.sku === result.product?.sku,
+    const liveData = await getDemoDataWithInventory();
+    const inventorySnapshot = snapshotFromDemoData(liveData);
+    const currentItemForPreviousResult = inventorySnapshot.items.find(
+      (item) => item.sku === previousResult?.product?.sku,
     );
     const previousItems = storedJson<{
       items?: Array<{ sku?: string; stockKg?: number }>;
@@ -944,9 +939,80 @@ export async function PATCH(request: Request) {
       (item) => item.sku === previousResult?.product?.sku,
     );
     const stockChange =
-      previousItem && currentItem
-        ? `Остаток: ${previousItem.stockKg ?? "—"} → ${currentItem.stockKg} кг.`
+      previousItem && currentItemForPreviousResult
+        ? `Остаток: ${previousItem.stockKg ?? "—"} → ${currentItemForPreviousResult.stockKg} кг.`
         : `Склад перечитан по свежим данным.`;
+    const live = await bridgeOnline();
+
+    if (live) {
+      const transitionGuard = and(
+        eq(orders.id, id),
+        eq(orders.status, order.status),
+        sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
+        sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
+          order.inventorySnapshotJson ?? ""
+        }`,
+        sql`${orders.sentAt} is null`,
+      )!;
+      const recalculateEventQuery = insertOrderEventWhen(
+        db,
+        {
+          orderId: id,
+          stage: "recalculate",
+          title: "Новый остаток передан агенту",
+          detail: `${stockChange} OpenCode заново готовит решение, письмо и варианты для руководителя.`,
+          state: "active",
+        },
+        transitionGuard,
+      );
+      const updateOrderQuery = db
+        .update(orders)
+        .set({
+          status: "queued",
+          inventorySnapshotJson: JSON.stringify(inventorySnapshot),
+          roundNo: order.roundNo + 1,
+          mode: "opencode-recalculate",
+          managerDecision: null,
+          managerOptionId: null,
+          managerDecidedAt: null,
+          updatedAt: sql`CURRENT_TIMESTAMP`,
+        })
+        .where(transitionGuard)
+        .returning({ id: orders.id });
+      const [, queuedOrders] = await db.batch([
+        recalculateEventQuery,
+        updateOrderQuery,
+      ]);
+      const [queuedOrder] = queuedOrders;
+      if (!queuedOrder) {
+        return Response.json(
+          {
+            error:
+              "Карточка уже получила свежие данные. Показываем последнее решение.",
+          },
+          { status: 409 },
+        );
+      }
+      return Response.json({
+        ok: true,
+        status: "queued",
+        inventoryVersion: inventorySnapshot.version,
+        bridgeOnline: true,
+      });
+    }
+
+    const recalculatedResult = buildDemoResult(
+      inputWithConversation(order, conversation),
+      liveData,
+    );
+    const result = preserveConfirmedResearch(
+      previousResult,
+      recalculatedResult,
+    );
+    const nextStatus = statusForResult(result);
+    const currentItem = inventorySnapshot.items.find(
+      (item) => item.sku === result.product?.sku,
+    );
     const decisionChange = previousResult
       ? `Было: ${routeLabel(previousResult)}. Стало: ${routeLabel(result)}.`
       : `Теперь: ${routeLabel(result)}.`;
