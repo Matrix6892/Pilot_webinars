@@ -213,7 +213,7 @@ test("removes CJK fragments from every visible model field", () => {
     JSON.stringify(result),
     /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/u,
   );
-  assert.match(result.reply.body, /Подтвердили 200 кг/);
+  assert.match(result.reply.body, /Подтверждаем наличие: 200 кг/);
   assert.equal("unexpected" in result, false);
 });
 
@@ -234,6 +234,64 @@ test("turns an internal profit-floor phrase into customer-facing Russian", () =>
     /цена, от которой завод зарабатывает на заказе: 278 ₽\/кг/iu,
   );
   assert.doesNotMatch(result.understood.join(" "), /минимальн|с прибылью/iu);
+});
+
+test("keeps a complete green letter aligned with the customer's color and delivery", () => {
+  const job = {
+    company: "Посёлок «Сосны»",
+    subject: "Краска для деревянных конструкций",
+    body: "Добрый день! Нужны 100 кг коричневой краски для деревянных конструкций на улице. Доставка в Тверь через две недели. Просим подтвердить наличие и подготовить предложение.",
+  };
+  const draft = agentDraft({
+    sku: "КР-005",
+    requestedKg: 100,
+  });
+  draft.understood = [
+    "Клиент — компания «Посёлок «Сосны»",
+    "Доставка: Тверь, срок 14 дней",
+    "Клиент просит доставку через две недели",
+  ];
+  draft.reply.body =
+    "Подтвердили 100 кг краски. Подготовим отгрузку после подтверждения адреса.";
+
+  const result = applyReviewerResult(
+    normalizeAgentResult(draft, demoData, job),
+    {
+      approved: true,
+      verdict: "Ответ можно отправить после уточнения формулировок",
+      notes: ["Добавьте в письмо цвет и срок доставки."],
+      blockingIssues: [],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.match(result.understood.join(" "), /Клиент: Посёлок «Сосны»/u);
+  assert.doesNotMatch(
+    result.understood.join(" "),
+    /компания «Посёлок «Сосны»/u,
+  );
+  assert.match(
+    result.understood.join(" "),
+    /Клиент просит доставку через две недели/u,
+  );
+  assert.match(result.reply.body, /цвет — коричневый/iu);
+  assert.match(result.reply.body, /доставка в Тверь через две недели/iu);
+  assert.match(result.reply.body, /точный адрес разгрузки/iu);
+  assert.equal(result.review.verdict, "Ответ проверен и готов к отправке");
+  assert.match(
+    result.review.notes.join(" "),
+    /нижней выгодной границы 278 ₽\/кг — заказ приносит прибыль/iu,
+  );
+  assert.match(
+    result.review.notes.join(" "),
+    /письмо повторяет цвет и условия поставки из заявки/iu,
+  );
+  assert.doesNotMatch(
+    `${result.review.verdict} ${result.review.notes.join(" ")}`,
+    /после уточнения|добавьте в письмо/iu,
+  );
 });
 
 test("replaces client rhetoric that violates the Russian copy contract", () => {

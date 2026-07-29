@@ -56,7 +56,7 @@ export async function POST(request: Request) {
   if (!uploads) {
     return errorResponse(
       503,
-      "Загрузка фото временно недоступна.",
+      "Продолжите без фото или повторите загрузку через минуту.",
       "uploads_unavailable",
     );
   }
@@ -156,7 +156,7 @@ export async function GET(request: Request) {
   if (!uploads) {
     return errorResponse(
       503,
-      "Загрузка фото временно недоступна.",
+      "Продолжите без фото или повторите загрузку через минуту.",
       "uploads_unavailable",
     );
   }
@@ -165,7 +165,7 @@ export async function GET(request: Request) {
   if (!validateUploadKey(key)) {
     return errorResponse(
       400,
-      "Некорректная ссылка на изображение.",
+      "Ссылка на фото не открылась. Загрузите фотографию ещё раз.",
       "invalid_upload_key",
     );
   }

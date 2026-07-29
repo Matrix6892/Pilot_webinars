@@ -248,6 +248,24 @@ test("a live stock change alters the next decision and records its revision", ()
   );
 });
 
+test("builds a complete green letter from the client order", () => {
+  const result = buildDemoResult({
+    company: "Посёлок «Сосны»",
+    subject: "Краска для деревянных конструкций",
+    body: "Нужны 100 кг коричневой краски для деревянных конструкций на улице. Доставка в Тверь через две недели.",
+  });
+
+  assert.equal(result.route, "ready");
+  assert.match(result.reply.body, /предложение для компании Посёлок «Сосны»/u);
+  assert.match(
+    result.reply.body,
+    /100 кг краски «Краска для дерева на улице», цвет — коричневый/iu,
+  );
+  assert.match(result.reply.body, /296 ₽\/кг, сумма — 29\s*600 ₽/u);
+  assert.match(result.reply.body, /доставка в Тверь через две недели/iu);
+  assert.match(result.reply.body, /точный адрес разгрузки/iu);
+});
+
 test("calculates a sourced trial-order opportunity and labels estimates", () => {
   const result = buildDemoResult({
     company: "АО «Петербургский тракторный завод»",

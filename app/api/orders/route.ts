@@ -1313,7 +1313,7 @@ export async function PATCH(request: Request) {
       roundNo: order.roundNo,
       result,
       status: "ready_to_send",
-      reason: "Вариант руководителя согласован",
+      reason: "Вариант руководителя подтверждён",
       sourceKey: `approval:${order.roundNo}:${option.id}`,
       inventorySnapshot: order.inventorySnapshotJson ?? undefined,
       agentModel: order.agentModel,

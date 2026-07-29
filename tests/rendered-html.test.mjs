@@ -137,6 +137,13 @@ test("ships the Колер product surface and removes the starter", async () =>
     /Нажмите на пунктирную фразу/,
   );
   assert.match(stand, /Почему агент так решил/);
+  assert.match(stand, /карточк\[аи\]\.\*продолж\|тем же номером/);
+  assert.match(stand, /Карточка и история переписки/);
+  assert.match(
+    stand,
+    /Исходное письмо, вопросы и ответы клиента сохраняются под одним номером заявки/,
+  );
+  assert.match(stand, /checkedAt: "при этом расчёте"/);
   assert.match(stand, /Что подтверждает вывод/);
   assert.match(stand, /Проверено по источникам/);
   assert.match(stand, /Источники для проверки/);

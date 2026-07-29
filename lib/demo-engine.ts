@@ -777,6 +777,35 @@ function replyWithQuestions(
   };
 }
 
+function orderColorLabel(value: string) {
+  const colorNames: Array<[RegExp, string]> = [
+    [/т[её]мно[-\s]?сер\p{L}*/iu, "тёмно-серый"],
+    [/светло[-\s]?сер\p{L}*/iu, "светло-серый"],
+    [/коричнев\p{L}*/iu, "коричневый"],
+    [/бел\p{L}*/iu, "белый"],
+    [/сер(?:ый|ая|ое|ые|ого|ой|ую|ым|ом)/iu, "серый"],
+    [/ч[её]рн\p{L}*/iu, "чёрный"],
+    [/зел[её]н\p{L}*/iu, "зелёный"],
+  ];
+  const colorName = colorNames.find(([pattern]) => pattern.test(value))?.[1];
+  const ral = value.match(/\bRAL\s*\d{4}\b/iu)?.[0].replace(/\s+/g, " ");
+  return [colorName, ral?.toUpperCase()].filter(Boolean).join(", ");
+}
+
+function orderLogisticsLine(value: string) {
+  const sentence = value
+    .split(/[.!?\n]+/u)
+    .map((item) => item.trim())
+    .find((item) => /достав|поставк|отгруз|забер|самовывоз/iu.test(item));
+  if (!sentence) return "";
+
+  const normalized = sentence
+    .replace(/\s+/g, " ")
+    .replace(/^забер[её]м\b/iu, "вы заберёте")
+    .replace(/^готовы\s+забрать\b/iu, "вы готовы забрать");
+  return `${normalized.charAt(0).toLocaleLowerCase("ru-RU")}${normalized.slice(1)}`;
+}
+
 export function buildDemoResult(
   input: OrderInput,
   snapshot?: DemoCatalogSnapshot | null,
@@ -1043,6 +1072,11 @@ export function buildDemoResult(
   }
 
   const total = requestedKg * product.pricePerKg;
+  const requestedColor = orderColorLabel(fullText);
+  const logistics = orderLogisticsLine(fullText);
+  const nextStep = /забер|самовывоз/iu.test(logistics)
+    ? "Подтвердите время самовывоза — подготовим заказ к выдаче."
+    : "Пришлите точный адрес разгрузки — и мы поставим отгрузку в план.";
   const shortage = requestedKg > product.stockKg;
   const specialTerms = hasSpecialTerms(fullText);
   const paymentAfterDelivery = asksPaymentAfterDelivery(fullText);
@@ -1429,21 +1463,30 @@ export function buildDemoResult(
     options: [],
     reply: {
       subject: `Коммерческое предложение: ${product.name}`,
-      body: `Добрый день!\n\nПодтверждаем поставку ${money.format(
-        requestedKg,
-      )} кг краски «${product.name}» по цене ${money.format(
-        product.pricePerKg,
-      )} ₽/кг. Стоимость партии — ${money.format(
-        total,
-      )} ₽ без доставки.\n\nВесь объём есть на складе. После подтверждения заказа отложим партию для вас и направим график отгрузки.${
+      body: [
+        "Добрый день!",
+        input.company
+          ? `Подготовили предложение для компании ${input.company}.`
+          : "",
+        `Подтверждаем наличие: ${money.format(
+          requestedKg,
+        )} кг краски «${product.name}»${
+          requestedColor ? `, цвет — ${requestedColor}` : ""
+        }. Цена — ${money.format(
+          product.pricePerKg,
+        )} ₽/кг, сумма — ${money.format(total)} ₽.`,
+        "Весь объём есть на складе.",
+        logistics ? `Учли условия из заявки: ${logistics}.` : "",
+        nextStep,
         calculation
-          ? `\n\nРасчёт количества: ${calculation.explanation}`
-          : ""
-      }${
+          ? `Расчёт количества: ${calculation.explanation}`
+          : "",
         likelyTrialOrder
-          ? "\n\nПодскажите, какие свойства краски проверяете на первой партии. Предлагаем записать фактический расход на одну машину и сверить его с текущим планом выпуска. По этим данным рассчитаем возможный объём и график следующей закупки."
-          : ""
-      }`,
+          ? "Подскажите, какие свойства краски проверяете на первой партии. Предлагаем записать фактический расход на одну машину и сверить его с текущим планом выпуска. По этим данным рассчитаем возможный объём и график следующей закупки."
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     },
     checks: [
       "По этой цене завод зарабатывает на заказе",
