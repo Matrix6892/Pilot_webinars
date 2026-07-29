@@ -82,7 +82,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Готов ответить/);
   assert.match(stand, /Нужны детали/);
   assert.match(stand, /Решает руководитель/);
-  assert.match(stand, /Вариант подтверждён · ответ готов/);
+  assert.match(stand, /Вариант подтверждён · подготовьте резерв/);
   assert.match(stand, /Польза клиенту/);
   assert.match(stand, /Результат для завода/);
   assert.match(
@@ -305,10 +305,57 @@ test("explains the stand calculation, manager role and saved recalculation", asy
   assert.match(stand, /Руководитель выбирает особые условия/);
   assert.match(
     stand,
-    /Согласует цену, оплату после поставки, срочный срок или\s+частичную поставку/,
+    /Подтверждает цену, оплату после поставки, срочный срок или\s+частичную поставку/,
   );
   assert.match(
     stand,
     /Обе версии сохранились в карточке и журнале\.\s+Свежее письмо ждёт\s+вашего подтверждения\./,
+  );
+});
+
+test("prepares a contract reserve before the stand send", async () => {
+  const stand = await readFile(
+    new URL("../app/order-stand.tsx", import.meta.url),
+    "utf8",
+  );
+  const reserveAction = sourceBetween(
+    stand,
+    "const prepareReserve",
+    "const sendReply",
+  );
+
+  assert.match(reserveAction, /setReserving\(true\)/);
+  assert.match(
+    reserveAction,
+    /JSON\.stringify\(\{ id: orderId, action: "reserve" \}\)/,
+  );
+  assert.match(reserveAction, /setReserving\(false\)/);
+  assert.match(
+    stand,
+    /order\.status === "ready_to_send"[\s\S]*?canSend = canManageOrder && reserved && !inventoryChanged/,
+  );
+  assert.match(stand, /Резерв под договор подготовлен/);
+  assert.match(stand, /Подготовить резерв под договор/);
+  assert.match(
+    stand,
+    /Рабочая\s+система передаст запись в учётную систему компании/,
+  );
+  assert.match(stand, /Путь ответа клиенту/);
+  assert.match(
+    stand,
+    /Ответ готов[\s\S]*?Резерв под договор[\s\S]*?Отправка/,
+  );
+  assert.match(
+    stand,
+    /После действующих резервов на складе осталось/,
+  );
+  assert.match(stand, /Руководитель подтвердил выбранный вариант/);
+  assert.match(
+    stand,
+    /Завод зарабатывает при цене от \$\{floor\.trim\(\)\} ₽\/кг/,
+  );
+  assert.match(
+    stand,
+    /\.replace\(\/руководитель согласует\/gi, "руководитель подтверждает"\)/,
   );
 });

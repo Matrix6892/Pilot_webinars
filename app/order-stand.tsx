@@ -280,6 +280,34 @@ function formatDateTime(value?: string | null) {
 function humanizeText(value: string) {
   return value
     .replace(
+      /(\d[\d\s]*)\s*кг\s+остал(?:ось|ись)\s+после\s+резервов/giu,
+      (_, quantity: string) =>
+        `После действующих резервов на складе осталось ${quantity.trim()} кг`,
+    )
+    .replace(/после резервов/gi, "после действующих резервов")
+    .replace(
+      /вариант руководителя согласован/gi,
+      "Руководитель подтвердил выбранный вариант",
+    )
+    .replace(
+      /после согласования руководителя/gi,
+      "после подтверждения руководителя",
+    )
+    .replace(
+      /жд[её]т согласования руководителя/gi,
+      "ждёт подтверждения руководителя",
+    )
+    .replace(
+      /согласование руководителя/gi,
+      "подтверждение руководителя",
+    )
+    .replace(/руководитель согласует/gi, "руководитель подтверждает")
+    .replace(
+      /цена\s+([\d\s]+)\s*₽\/кг\s+выше\s+(?:нижней\s+)?выгодной\s+границы\s+([\d\s]+)\s*₽\/кг\s*[—-]\s*заказ\s+приносит\s+прибыль\.?/giu,
+      (_, price: string, floor: string) =>
+        `Цена ${price.trim()} ₽/кг. Завод зарабатывает при цене от ${floor.trim()} ₽/кг.`,
+    )
+    .replace(
       /цена\s+([\d\s]+)\s*₽\/кг\s+в\s+пределах\s+minPricePerKg\s+([\d\s]+)\s*₽\/кг\s*[—-]\s*нарушени[яй]\s+нет/giu,
       (_, price: string, floor: string) =>
         `Цена ${price.trim()} ₽/кг. Завод зарабатывает при цене от ${floor.trim()} ₽/кг.`,
@@ -611,7 +639,8 @@ function statusLabel(status: string) {
       clarification_ready: "Вопросы готовы к отправке",
       awaiting_customer: "Ожидаем ответ клиента",
       awaiting_approval: "Руководитель выбирает вариант",
-      ready_to_send: "Ответ готов к отправке",
+      ready_to_send: "Ответ готов · подготовьте резерв",
+      reserved: "Резерв подготовлен · можно отправить",
       completed: "Ответ готов к отправке",
       sent: "Отправка записана",
       error: "Можно запустить снова",
@@ -646,6 +675,7 @@ export function OrderStand() {
   const [bridgeOnline, setBridgeOnline] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [approving, setApproving] = useState("");
+  const [reserving, setReserving] = useState(false);
   const [sending, setSending] = useState(false);
   const [clarifying, setClarifying] = useState(false);
   const [continuing, setContinuing] = useState(false);
@@ -970,6 +1000,35 @@ export function OrderStand() {
       );
     } finally {
       setApproving("");
+    }
+  };
+
+  const prepareReserve = async () => {
+    if (!orderId) return;
+    setReserving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/orders", {
+        method: "PATCH",
+        headers: orderActionHeaders(),
+        body: JSON.stringify({ id: orderId, action: "reserve" }),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(
+          data.error ?? "Обновите карточку и подготовьте резерв снова.",
+        );
+      }
+      await loadOrder(orderId);
+      await Promise.all([loadStats(), loadLedger()]);
+    } catch (reserveError) {
+      setError(
+        reserveError instanceof Error
+          ? reserveError.message
+          : "Обновите карточку и подготовьте резерв снова.",
+      );
+    } finally {
+      setReserving(false);
     }
   };
 
@@ -1337,7 +1396,8 @@ export function OrderStand() {
   const progress = useMemo(() => {
     if (!orderId) return 0;
     if (order?.status === "sent") return 100;
-    if (order?.status === "ready_to_send") return 96;
+    if (order?.status === "reserved") return 98;
+    if (order?.status === "ready_to_send") return 94;
     if (order?.status === "awaiting_customer") return 72;
     if (order?.status === "clarification_ready") return 64;
     if (order?.status === "awaiting_approval") return 88;
@@ -1470,7 +1530,7 @@ export function OrderStand() {
               <li>
                 <strong>Руководитель выбирает особые условия</strong>
                 <small>
-                  Согласует цену, оплату после поставки, срочный срок или
+                  Подтверждает цену, оплату после поставки, срочный срок или
                   частичную поставку.
                 </small>
               </li>
@@ -1945,6 +2005,7 @@ export function OrderStand() {
                     result={result}
                     order={order}
                     approving={approving}
+                    reserving={reserving}
                     sending={sending}
                     clarifying={clarifying}
                     continuing={continuing}
@@ -1956,6 +2017,7 @@ export function OrderStand() {
                       Boolean(orderActionKey) || adminAuthenticated
                     }
                     onApprove={approve}
+                    onReserve={prepareReserve}
                     onSend={sendReply}
                     onSendClarification={sendClarification}
                     onContinue={continueOrder}
@@ -2151,6 +2213,7 @@ function ResultPanel({
   result,
   order,
   approving,
+  reserving,
   sending,
   clarifying,
   continuing,
@@ -2160,6 +2223,7 @@ function ResultPanel({
   resultHistory,
   canManageOrder,
   onApprove,
+  onReserve,
   onSend,
   onSendClarification,
   onContinue,
@@ -2170,6 +2234,7 @@ function ResultPanel({
   result: AgentResult;
   order: OrderRecord;
   approving: string;
+  reserving: boolean;
   sending: boolean;
   clarifying: boolean;
   continuing: boolean;
@@ -2179,6 +2244,7 @@ function ResultPanel({
   resultHistory: ResultHistoryEntry[];
   canManageOrder: boolean;
   onApprove: (id: string) => Promise<void>;
+  onReserve: () => Promise<void>;
   onSend: () => Promise<void>;
   onSendClarification: () => Promise<void>;
   onContinue: () => Promise<void>;
@@ -2198,6 +2264,7 @@ function ResultPanel({
   } | null>(null);
   const zone = zoneCopy[result.zone];
   const sent = order.status === "sent";
+  const reserved = order.status === "reserved";
   const savedItem = result.product
     ? snapshotItems(order.inventorySnapshot).find(
         (item) => item.sku === result.product?.sku,
@@ -2216,11 +2283,16 @@ function ResultPanel({
     result.route === "needs_info" &&
     order.status === "clarification_ready";
   const waitingForCustomer = order.status === "awaiting_customer";
-  const canSend =
+  const canReserve =
     canManageOrder &&
     order.status === "ready_to_send" &&
     result.route !== "needs_info" &&
     !inventoryChanged;
+  const canSend = canManageOrder && reserved && !inventoryChanged;
+  const responsePrepared = ["ready_to_send", "reserved", "sent"].includes(
+    order.status,
+  );
+  const reservePrepared = ["reserved", "sent"].includes(order.status);
   const selectedManagerOption =
     result.options.find((option) => option.id === selectedOption) ?? null;
   const checks = positiveChecks(result);
@@ -2791,11 +2863,17 @@ function ResultPanel({
             <span>Ответ</span>
             <small>Запись в общий журнал</small>
           </div>
-          <div className={`reply-status ${sent ? "is-sent" : ""}`}>
+          <div
+            className={`reply-status ${
+              sent || (reserved && !inventoryChanged) ? "is-sent" : ""
+            }`}
+          >
             {sent
               ? "Отправка записана"
               : inventoryChanged
                 ? "Склад обновился · обновите черновик"
+              : reserved
+                ? "Резерв под договор подготовлен"
               : waitingForCustomer
                 ? "Вопросы записаны · ожидаем ответ"
                 : canClarify
@@ -2803,10 +2881,43 @@ function ResultPanel({
                 : order.status === "awaiting_approval"
                 ? "Руководитель выбирает вариант"
                 : order.managerDecision
-                  ? "Вариант подтверждён · ответ готов"
-                  : "Ответ проверен и готов"}
+                  ? "Вариант подтверждён · подготовьте резерв"
+                  : "Ответ проверен · подготовьте резерв"}
           </div>
         </div>
+        {responsePrepared && (
+          <ol className="reply-steps" aria-label="Путь ответа клиенту">
+            <li
+              className={responsePrepared ? "is-done" : "is-current"}
+              aria-current={!responsePrepared ? "step" : undefined}
+            >
+              <span>1</span>
+              <strong>Ответ готов</strong>
+            </li>
+            <li
+              className={
+                reservePrepared
+                  ? "is-done"
+                  : order.status === "ready_to_send"
+                    ? "is-current"
+                    : ""
+              }
+              aria-current={
+                order.status === "ready_to_send" ? "step" : undefined
+              }
+            >
+              <span>2</span>
+              <strong>Резерв под договор</strong>
+            </li>
+            <li
+              className={sent ? "is-done" : reserved ? "is-current" : ""}
+              aria-current={reserved ? "step" : undefined}
+            >
+              <span>3</span>
+              <strong>Отправка</strong>
+            </li>
+          </ol>
+        )}
         <strong className="reply-subject">
           {humanizeText(result.reply.subject)}
         </strong>
@@ -2825,6 +2936,19 @@ function ResultPanel({
             <small>
               Кнопка добавляет вопросы в общий журнал. В рабочей системе письмо
               уйдёт через почту компании.
+            </small>
+          </div>
+        )}
+        {canReserve && (
+          <div className="reply-action">
+            <button type="button" onClick={onReserve} disabled={reserving}>
+              {reserving
+                ? "Готовим резерв под договор…"
+                : "Подготовить резерв под договор"}
+            </button>
+            <small>
+              Стенд подготовит запись резерва и сохранит её в журнале. Рабочая
+              система передаст запись в учётную систему компании.
             </small>
           </div>
         )}

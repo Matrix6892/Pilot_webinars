@@ -1640,6 +1640,77 @@ main {
   white-space: pre-line;
 }
 
+.reply-steps {
+  display: grid;
+  padding: 0;
+  margin: 0 0 16px;
+  list-style: none;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reply-steps li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-right: 0;
+  color: var(--muted);
+  gap: 7px;
+}
+
+.reply-steps li:first-child {
+  border-radius: 10px 0 0 10px;
+}
+
+.reply-steps li:last-child {
+  border-right: 1px solid var(--line);
+  border-radius: 0 10px 10px 0;
+}
+
+.reply-steps span {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  background: #efede7;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.reply-steps strong {
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.reply-steps .is-current {
+  border-color: rgb(156 92 34 / 42%);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.reply-steps .is-current + li {
+  border-left-color: rgb(156 92 34 / 42%);
+}
+
+.reply-steps .is-current span {
+  background: var(--accent);
+  color: #fff;
+}
+
+.reply-steps .is-done {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.reply-steps .is-done span {
+  background: var(--green);
+  color: #fff;
+}
+
 .reply-action {
   display: flex;
   align-items: center;

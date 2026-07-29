@@ -323,7 +323,7 @@ export async function GET(request: Request) {
     const [stats] = await db
       .select({
         total: sql<number>`count(*)`,
-        completed: sql<number>`coalesce(sum(case when ${orders.status} in ('ready_to_send', 'sent') then 1 else 0 end), 0)`,
+        completed: sql<number>`coalesce(sum(case when ${orders.status} in ('ready_to_send', 'reserved', 'sent') then 1 else 0 end), 0)`,
         awaitingApproval: sql<number>`coalesce(sum(case when ${orders.status} = 'awaiting_approval' then 1 else 0 end), 0)`,
         awaitingCustomer: sql<number>`coalesce(sum(case when ${orders.status} in ('clarification_ready', 'awaiting_customer') then 1 else 0 end), 0)`,
         sent: sql<number>`coalesce(sum(case when ${orders.status} = 'sent' then 1 else 0 end), 0)`,
@@ -1189,10 +1189,83 @@ export async function PATCH(request: Request) {
     });
   }
 
-  if (action === "send") {
+  if (action === "reserve") {
     if (order.status !== "ready_to_send" || order.sentAt) {
       return Response.json(
-        { error: "Письмо ждёт следующий шаг в карточке." },
+        { error: "Резерв уже подготовлен или карточка перешла дальше." },
+        { status: 409 },
+      );
+    }
+    if (await savedResultUsesOldInventory(order)) {
+      return Response.json(
+        {
+          error:
+            "Склад обновился. Пересчитайте карточку — агент сразу подготовит свежий объём для резерва.",
+        },
+        { status: 409 },
+      );
+    }
+    const result = storedJson<AgentResult | null>(order.resultJson, null);
+    if (!result?.product) {
+      return Response.json(
+        { error: "Дождитесь готового подбора краски и объёма." },
+        { status: 409 },
+      );
+    }
+
+    const now = new Date().toISOString();
+    const transitionGuard = and(
+      eq(orders.id, id),
+      eq(orders.status, "ready_to_send"),
+      sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
+      sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
+        order.inventorySnapshotJson ?? ""
+      }`,
+      sql`${orders.sentAt} is null`,
+    )!;
+    const reserveEventQuery = insertOrderEventWhen(
+      db,
+      {
+        orderId: id,
+        stage: "reserve",
+        title: "Резерв под договор подготовлен",
+        detail: `${result.product.requestedKg} кг краски «${result.product.name}» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.`,
+        createdAt: now,
+      },
+      transitionGuard,
+    );
+    const updateOrderQuery = db
+      .update(orders)
+      .set({
+        status: "reserved",
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .where(transitionGuard)
+      .returning({ id: orders.id });
+    const [, reservedOrders] = await db.batch([
+      reserveEventQuery,
+      updateOrderQuery,
+    ]);
+    const [reservedOrder] = reservedOrders;
+    if (!reservedOrder) {
+      return Response.json(
+        { error: "Карточка уже обновилась. Показываем свежие данные." },
+        { status: 409 },
+      );
+    }
+
+    return Response.json({ ok: true, status: "reserved", reservedAt: now });
+  }
+
+  if (action === "send") {
+    if (order.status !== "reserved" || order.sentAt) {
+      return Response.json(
+        {
+          error:
+            order.status === "ready_to_send"
+              ? "Сначала подготовьте резерв под договор."
+              : "Письмо ждёт следующий шаг в карточке.",
+        },
         { status: 409 },
       );
     }
@@ -1209,7 +1282,7 @@ export async function PATCH(request: Request) {
     const now = new Date().toISOString();
     const transitionGuard = and(
       eq(orders.id, id),
-      eq(orders.status, "ready_to_send"),
+      eq(orders.status, "reserved"),
       sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
       sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
         order.inventorySnapshotJson ?? ""

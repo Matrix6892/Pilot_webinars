@@ -93,7 +93,10 @@ test("exports the incoming request and prepared agent email as separate full-tex
   assert.equal(rows.length, 2);
   assert.equal(incoming["Полный текст"], longBody);
   assert.equal(incoming["Состояние записи"], "Получено");
-  assert.equal(incoming["Состояние карточки"], "Готово к отправке");
+  assert.equal(
+    incoming["Состояние карточки"],
+    "Готово к подготовке резерва",
+  );
   assert.match(incoming["Номер записи"], /^№\d{4} · входящее письмо$/);
   assert.match(incoming["Заявка"], /^№\d{4}$/);
   assert.equal(
@@ -430,6 +433,7 @@ test("assigns a readable record type and sender to every known event stage", () 
     ["approve", "Решение руководителя", "Руководитель"],
     ["approved", "Решение руководителя", "Руководитель"],
     ["approval", "Решение руководителя", "Руководитель"],
+    ["reserve", "Резерв под договор", "Агент отдела продаж"],
     ["sent", "Отправка на стенде", "Агент отдела продаж"],
     ["clarification-sent", "Отправка на стенде", "Агент отдела продаж"],
     ["customer-reply", "Ответ клиента", "Клиент"],
@@ -473,6 +477,75 @@ test("assigns a readable record type and sender to every known event stage", () 
     assert.equal(row["Тип записи"], recordType, stage);
     assert.equal(row["Отправитель"], sender, stage);
   }
+});
+
+test("rewrites old internal phrases into clear ledger copy", () => {
+  const csv = buildLedgerCsv({
+    orders: [
+      {
+        id: "legacy-copy",
+        company: "ООО «Радуга»",
+        subject: "Заказ",
+        body: "Нужно 100 кг краски.",
+        status: "reserved",
+        resultJson: null,
+        conversationJson: "[]",
+        roundNo: 1,
+        createdAt: "2026-07-29T10:00:00.000Z",
+        updatedAt: "2026-07-29T10:04:00.000Z",
+      },
+    ],
+    events: [
+      {
+        id: 31,
+        orderId: "legacy-copy",
+        stage: "approval",
+        title: "Вариант руководителя согласован",
+        detail:
+          "Цена 296 ₽/кг выше нижней выгодной границы 278 ₽/кг — заказ приносит прибыль.",
+        state: "done",
+        createdAt: "2026-07-29T10:03:00.000Z",
+      },
+    ],
+    inventoryChanges: [
+      {
+        id: 9,
+        sku: "КР-005",
+        revision: 2,
+        beforeStockKg: 180,
+        afterStockKg: 40,
+        reason: "40 кг осталось после резервов",
+        actor: "Ведущий",
+        createdAt: "2026-07-29T10:02:00.000Z",
+      },
+    ],
+  });
+  const rows = parseCsv(csv);
+  const incoming = rows.find(
+    (row) => row["Тип записи"] === "Входящее письмо",
+  );
+  const approval = rows.find(
+    (row) =>
+      row["Название события"] ===
+      "Руководитель подтвердил выбранный вариант",
+  );
+  const stockChange = rows.find(
+    (row) => row["Тип записи"] === "Изменение склада",
+  );
+
+  assert.equal(
+    incoming["Состояние карточки"],
+    "Резерв под договор подготовлен",
+  );
+  assert.equal(
+    approval["Полный текст"],
+    "Цена 296 ₽/кг. Завод зарабатывает при цене от 278 ₽/кг.",
+  );
+  assert.equal(
+    stockChange["Причина изменения склада"],
+    "После действующих резервов на складе осталось 40 кг",
+  );
+  assert.doesNotMatch(csv, /согласован|после резервов|выгодной границы/iu);
 });
 
 test("gives every model step a specific Russian presentation", () => {

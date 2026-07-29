@@ -106,7 +106,7 @@ test("guards recalculation with fresh-stock and compare-and-set checks", async (
   );
   const branch = route.slice(
     route.indexOf('if (action === "recalculate")'),
-    route.indexOf('if (action === "send")'),
+    route.indexOf('if (action === "reserve")'),
   );
 
   assert.match(branch, /savedResultUsesOldInventory\(order\)/);
@@ -313,6 +313,10 @@ test("commits critical order transitions together with their ledger rows", async
   );
   const recalculation = ordersRoute.slice(
     ordersRoute.indexOf('if (action === "recalculate")'),
+    ordersRoute.indexOf('if (action === "reserve")'),
+  );
+  const reservation = ordersRoute.slice(
+    ordersRoute.indexOf('if (action === "reserve")'),
     ordersRoute.indexOf('if (action === "send")'),
   );
   const send = ordersRoute.slice(
@@ -323,7 +327,13 @@ test("commits critical order transitions together with their ledger rows", async
     ordersRoute.lastIndexOf("const now = new Date().toISOString()"),
   );
 
-  for (const branch of [liveResult, recalculation, send, approval]) {
+  for (const branch of [
+    liveResult,
+    recalculation,
+    reservation,
+    send,
+    approval,
+  ]) {
     assert.match(branch, /await db\.batch\(/);
     assert.match(branch, /const transitionGuard = and\(/);
   }
@@ -336,8 +346,12 @@ test("commits critical order transitions together with their ledger rows", async
     /insertResultHistoryWhen\([\s\S]*?transitionEvents\.map\([\s\S]*?await db\.batch\(\[\s*historyQuery,\s*\.\.\.eventQueries,\s*updateOrderQuery,\s*\]\)/,
   );
   assert.match(
+    reservation,
+    /eq\(orders\.status, "ready_to_send"\)[\s\S]*?stage:\s*"reserve"[\s\S]*?status:\s*"reserved"[\s\S]*?await db\.batch\(\[\s*reserveEventQuery,\s*updateOrderQuery,\s*\]\)/,
+  );
+  assert.match(
     send,
-    /insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*sentEventQuery,\s*updateOrderQuery,\s*\]\)/,
+    /eq\(orders\.status, "reserved"\)[\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*sentEventQuery,\s*updateOrderQuery,\s*\]\)/,
   );
   assert.match(
     approval,
