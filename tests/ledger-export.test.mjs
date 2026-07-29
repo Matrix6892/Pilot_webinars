@@ -435,7 +435,7 @@ test("assigns a readable record type and sender to every known event stage", () 
     ["customer-reply", "Ответ клиента", "Клиент"],
     ["inventory", "Проверка склада", "Агент отдела продаж"],
     ["recalculate", "Пересчёт заказа", "Программа расчёта"],
-    ["market", "Проверка рынка", "Агент отдела продаж"],
+    ["market", "Сравнение цен других поставщиков", "Агент отдела продаж"],
     ["review", "Проверка ответа", "Программа проверки"],
     ["understanding", "Анализ заявки", "Агент отдела продаж"],
     ["received", "Приём заявки", "Программа стенда"],
@@ -475,13 +475,13 @@ test("assigns a readable record type and sender to every known event stage", () 
   }
 });
 
-test("gives every OpenCode step a specific Russian presentation", () => {
+test("gives every model step a specific Russian presentation", () => {
   const cases = [
     [
       "model",
       "Выбор модели",
       "Выбор модели для заявки",
-      "OpenCode",
+      "Программа запуска моделей",
       "Агент отдела продаж",
       "Завершено",
     ],
@@ -492,6 +492,22 @@ test("gives every OpenCode step a specific Russian presentation", () => {
       "Агент отдела продаж",
       "Открытый источник",
       "Завершено",
+    ],
+    [
+      "source-plan",
+      "Выбор данных",
+      "Выбор данных для решения",
+      "Агент отдела продаж",
+      "Карточка заказа",
+      "Завершено",
+    ],
+    [
+      "research-fallback",
+      "Продолжение работы",
+      "Продолжение по данным заказа",
+      "Программа запуска моделей",
+      "Агент отдела продаж",
+      "Продолжено по данным заказа",
     ],
     [
       "research-result",

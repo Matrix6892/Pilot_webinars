@@ -282,7 +282,7 @@ function humanizeText(value: string) {
     .replace(
       /цена\s+([\d\s]+)\s*₽\/кг\s+в\s+пределах\s+minPricePerKg\s+([\d\s]+)\s*₽\/кг\s*[—-]\s*нарушени[яй]\s+нет/giu,
       (_, price: string, floor: string) =>
-        `Цена ${price.trim()} ₽/кг выше ${floor.trim()} ₽/кг — суммы, от которой завод зарабатывает на заказе`,
+        `Цена ${price.trim()} ₽/кг. Завод зарабатывает при цене от ${floor.trim()} ₽/кг.`,
     )
     .replaceAll(
       "minPricePerKg",
@@ -459,7 +459,7 @@ function optionBusinessResult(
     return "Завод получает часть денег до отгрузки и быстрее получает остальную оплату.";
   }
   if (/замен|alternative|аналог/.test(key)) {
-    return "Завод закрывает весь заказ товаром, который уже есть на складе.";
+    return "Завод выполняет весь заказ товаром, который уже есть на складе.";
   }
   if (/две-постав|раздел|первая партия/.test(key)) {
     return "Завод продаёт доступную партию сейчас и сохраняет заказ на остаток.";
@@ -541,7 +541,7 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
       label: "Похоже: решает руководитель",
       reason: special
         ? "В письме есть условие, для которого агент подготовит варианты."
-        : `Склад подтверждает ${formatMoney(availableKg)} кг сейчас. Агент предложит способ закрыть остальной объём.`,
+        : `Склад подтверждает ${formatMoney(availableKg)} кг сейчас. Агент предложит способ поставить остальной объём.`,
     } as const;
   }
 
@@ -650,6 +650,7 @@ export function OrderStand() {
   const [clarifying, setClarifying] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [customerAnswer, setCustomerAnswer] = useState("");
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [photoMessage, setPhotoMessage] = useState("");
@@ -674,6 +675,7 @@ export function OrderStand() {
   const [modal, setModal] = useState<ModalName>(null);
   const [error, setError] = useState("");
   const inventoryLoadedRef = useRef(false);
+  const lastOrderStatusRef = useRef<string | null>(null);
   const closeModal = useCallback(() => setModal(null), []);
   const orderActionHeaders = useCallback(
     () => ({
@@ -745,20 +747,34 @@ export function OrderStand() {
     }
   }, []);
 
-  const loadOrder = useCallback(async (id: string) => {
-    const response = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, {
-      cache: "no-store",
-    });
-    if (!response.ok) return;
-    const data = (await response.json()) as {
-      order: OrderRecord;
-      events: EventRow[];
-      resultHistory?: ResultHistoryEntry[];
-    };
-    setOrder(data.order);
-    setEvents(data.events);
-    setOrderResultHistory(data.resultHistory ?? []);
-  }, []);
+  const loadOrder = useCallback(
+    async (id: string) => {
+      const response = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const data = (await response.json()) as {
+        order: OrderRecord;
+        events: EventRow[];
+        resultHistory?: ResultHistoryEntry[];
+      };
+      const previousStatus = lastOrderStatusRef.current;
+      lastOrderStatusRef.current = data.order.status;
+      setOrder(data.order);
+      setEvents(data.events);
+      setOrderResultHistory(data.resultHistory ?? []);
+
+      if (
+        previousStatus &&
+        ["queued", "processing"].includes(previousStatus) &&
+        !["queued", "processing"].includes(data.order.status)
+      ) {
+        void loadStats();
+        void loadLedger();
+      }
+    },
+    [loadLedger, loadStats],
+  );
 
   useEffect(() => {
     const refreshSharedState = () => {
@@ -1084,6 +1100,38 @@ export function OrderStand() {
     }
   };
 
+  const retryOrder = async () => {
+    if (!orderId || order?.status !== "error") return;
+    setRetrying(true);
+    setError("");
+    try {
+      const response = await fetch("/api/orders", {
+        method: "POST",
+        headers: orderActionHeaders(),
+        body: JSON.stringify({
+          id: orderId,
+          action: "retry",
+        }),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(
+          data.error ?? "Обновите карточку и повторите запуск.",
+        );
+      }
+      await loadOrder(orderId);
+      await Promise.all([loadStats(), loadLedger()]);
+    } catch (retryError) {
+      setError(
+        retryError instanceof Error
+          ? retryError.message
+          : "Обновите карточку и повторите запуск.",
+      );
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const signInAdmin = async (event: React.FormEvent) => {
     event.preventDefault();
     setAdminBusy(true);
@@ -1214,7 +1262,9 @@ export function OrderStand() {
           loadStats(),
         ]);
         setInventoryMessage(
-          `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент пересчитал заказ, новое решение и письмо сохранились в истории.`,
+          bridgeOnline
+            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент пересчитывает ту же карточку; новое решение и письмо появятся здесь.`
+            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Новое решение и письмо сохранились в той же карточке.`,
         );
       } else {
         setInventoryMessage(
@@ -1274,6 +1324,7 @@ export function OrderStand() {
     setOrderActionKey("");
     setOrder(null);
     setEvents([]);
+    lastOrderStatusRef.current = null;
     setError("");
     document
       .getElementById("compose")
@@ -1313,7 +1364,7 @@ export function OrderStand() {
           <span>
             {bridgeOnline
               ? "Модель для заказов подключена"
-              : "Считает программа стенда по живому складу"}
+              : "Агент ведёт заказ по готовой инструкции"}
           </span>
         </div>
         <a className="topbar-link" href="#day-result">
@@ -1326,71 +1377,15 @@ export function OrderStand() {
           <div className="hero-intro">
             <p className="eyebrow">Живой путь одного заказа</p>
             <h1 id="main-title">
-              Клиент пишет своими словами. Агент ведёт заказ до ответа
+              Клиент пишет своими словами. Агент ведёт заказ до письма клиенту
             </h1>
             <p className="hero-lead">
-              На стенде заявку создаёт форма ниже. В рабочей системе цепочку
-              запускает письмо клиента. Система понимает задачу, проверяет
-              живой склад и цены других поставщиков, собирает сведения о
-              компании, предлагает следующий шаг и сохраняет всю работу. В
-              живом режиме модели сами изучают фото и открывают источники.
+              Агент понимает задачу, проверяет живой склад и цены других
+              поставщиков, собирает сведения о компании, предлагает следующий
+              шаг и сохраняет всю работу. В живом режиме модели сами изучают
+              фото и открывают источники. На стенде заявку создаёт форма ниже;
+              в рабочей системе цепочку запускает письмо клиента.
             </p>
-          </div>
-
-          <div className="hero-status">
-            <span>Кто за что отвечает</span>
-            <ul className="hero-roles">
-              <li>
-                <strong>
-                  {bridgeOnline
-                    ? "Недорогая модель ведёт заказ"
-                    : "Программа рассчитывает заявку по подготовленным правилам"}
-                </strong>
-                <small>
-                  {bridgeOnline
-                    ? "Читает письмо, выбирает источники и готовит ответ."
-                    : "Программа применяет те же правила к живому складу и заявке."}
-                </small>
-              </li>
-              <li>
-                <strong>Модель для фото подключается отдельно</strong>
-                <small>
-                  В живом режиме описывает видимые детали. Материал подтверждает
-                  клиент.
-                </small>
-              </li>
-              <li>
-                <strong>Сильная модель задала правила работы</strong>
-                <small>
-                  Заранее написала инструкцию для недорогой модели. После показа
-                  команда передаст ей журнал и получит предложения по правкам.
-                </small>
-              </li>
-              <li>
-                <strong>Программа держит факты</strong>
-                <small>
-                  Сверяет цены и остатки, передаёт особые условия руководителю.
-                </small>
-              </li>
-              <li>
-                <strong>Руководитель подтверждает обязательства</strong>
-                <small>
-                  При особой цене, оплате после поставки или частичном наличии
-                  выбирает один подготовленный вариант и открывает отправку
-                  письма.
-                </small>
-              </li>
-            </ul>
-            <details className="technical-layer">
-              <summary>Как стенд запущен сейчас</summary>
-              <p>
-                {bridgeOnline
-                  ? "На компьютере ведущего программа OpenCode запускает выбранную модель. База хранит карточки и журнал."
-                  : "Стенд выполняет тот же путь по готовой инструкции и живым данным. При необходимости ведущий подключает OpenCode — программу для запуска выбранной модели."}{" "}
-                Корпоративная версия получает и отправляет письма через почтовый
-                ящик компании.
-              </p>
-            </details>
           </div>
 
           <div className="system-map" aria-label="Путь заказа">
@@ -1420,7 +1415,7 @@ export function OrderStand() {
             <i aria-hidden="true">→</i>
             <article>
               <span>05</span>
-              <strong>Что делать дальше</strong>
+              <strong>Ответ или решение руководителя</strong>
               <small>Ответ, уточнение или решение руководителя</small>
             </article>
             <i aria-hidden="true">→</i>
@@ -1435,6 +1430,61 @@ export function OrderStand() {
               <strong>Журнал и таблица</strong>
               <small>Каждый шаг виден команде и попадает в дневную выгрузку</small>
             </article>
+          </div>
+
+          <div className="hero-status">
+            <span>Кто ведёт заказ</span>
+            <ul className="hero-roles">
+              <li>
+                <strong>
+                  {bridgeOnline
+                    ? "Недорогая модель ведёт заказ"
+                    : "Агент ведёт заказ по готовой инструкции"}
+                </strong>
+                <small>
+                  {bridgeOnline
+                    ? "Читает письмо, выбирает источники и готовит ответ."
+                    : "Программа стенда применяет правила сильной модели к заявке и живому складу."}
+                </small>
+              </li>
+              <li>
+                <strong>Модель для фото описывает видимое</strong>
+                <small>
+                  Описывает видимые детали. Материал и размеры подтверждает
+                  клиент.
+                </small>
+              </li>
+              <li>
+                <strong>Сильная модель готовит правила</strong>
+                <small>
+                  Пишет инструкцию, проверяет решения и предлагает улучшения по
+                  журналу.
+                </small>
+              </li>
+              <li>
+                <strong>Программа держит точные данные</strong>
+                <small>
+                  Сверяет цены и остатки перед каждым обещанием клиенту.
+                </small>
+              </li>
+              <li>
+                <strong>Руководитель выбирает особые условия</strong>
+                <small>
+                  Согласует цену, оплату после поставки, срочный срок или
+                  частичную поставку.
+                </small>
+              </li>
+            </ul>
+            <details className="technical-layer">
+              <summary>Как стенд запущен сейчас</summary>
+              <p>
+                {bridgeOnline
+                  ? "На компьютере ведущего программа OpenCode запускает выбранную модель. База хранит карточки и журнал."
+                  : "Стенд выполняет тот же путь по готовой инструкции и живым данным. При необходимости ведущий подключает OpenCode — программу для запуска выбранной модели."}{" "}
+                Корпоративная версия получает и отправляет письма через почтовый
+                ящик компании.
+              </p>
+            </details>
           </div>
 
           <div className="source-dock" aria-label="Источники и правила стенда">
@@ -1531,8 +1581,8 @@ export function OrderStand() {
               </div>
 
               <div className="mail-line">
-                <span>На стенде</span>
-                <strong>Демонстрационная заявка</strong>
+                <span>Кому</span>
+                <strong>Отдел продаж «Колер»</strong>
               </div>
               <label className="mail-field">
                 <span>Компания</span>
@@ -1682,7 +1732,7 @@ export function OrderStand() {
                 <small>
                   {bridgeOnline
                     ? "Выбранная недорогая модель выполнит инструкцию, которую подготовила и проверила сильная модель."
-                    : "Сейчас программа рассчитывает заявку по подготовленным правилам. После подключения ведущий выбирает модель для заказов."}
+                    : "Сейчас агент ведёт заказ по подготовленным правилам. Подключение моделей доступно ведущему."}
                 </small>
               </div>
 
@@ -1785,7 +1835,7 @@ export function OrderStand() {
                       type="button"
                       onClick={() => setModal("order")}
                     >
-                      Заявка {orderNumber(orderId)} ↗
+                      Исходное письмо · заявка {orderNumber(orderId)} ↗
                     </button>
                     <h2>{order?.subject ?? "Принимаем заказ…"}</h2>
                     <small>
@@ -1799,6 +1849,13 @@ export function OrderStand() {
                           )
                         : "Расчёт по готовой инструкции"}
                     </small>
+                    {order?.body && (
+                      <p className="order-card-preview">
+                        {order.body.length > 180
+                          ? `${order.body.slice(0, 177)}…`
+                          : order.body}
+                      </p>
+                    )}
                   </div>
                   <div
                     className={`zone-badge ${
@@ -1864,11 +1921,20 @@ export function OrderStand() {
                     <div>
                       <strong>Работу можно продолжить</strong>
                       <p>
-                        Письмо и журнал сохранены. Запустите карточку ещё раз.
+                        Письмо, номер карточки, переписка и история сохранены.
                       </p>
                     </div>
-                    <button type="button" onClick={reset}>
-                      Вернуться к письму
+                    <button
+                      type="button"
+                      onClick={() => void retryOrder()}
+                      disabled={
+                        retrying ||
+                        (!orderActionKey && !adminAuthenticated)
+                      }
+                    >
+                      {retrying
+                        ? "Запускаем карточку снова…"
+                        : "Повторить эту карточку"}
                     </button>
                   </div>
                 )}
@@ -1914,7 +1980,7 @@ export function OrderStand() {
             <p className="eyebrow">
               {bridgeOnline
                 ? "Как недорогая модель ведёт заказ"
-                : "Как программа ведёт заказ по готовым правилам"}
+                : "Как агент ведёт заказ по готовым правилам"}
             </p>
             <h2>
               {bridgeOnline
@@ -1924,7 +1990,7 @@ export function OrderStand() {
             <p>
               {bridgeOnline
                 ? "Недорогая модель выполняет понятную инструкцию. Сильная модель проверяет факты и обещания, затем отмечает решения для руководителя. Программа подтверждает цены и остатки перед каждым действием."
-                : "Сейчас программа читает заявку, сверяет склад и собирает ответ по подготовленным правилам. OpenCode подключает модель для заказов и сильную проверку."}
+                : "Сейчас агент стенда читает заявку, сверяет склад и собирает ответ по подготовленным правилам. При подключении программа запускает модель для заказов и сильную проверку."}
             </p>
           </div>
           <div className="control-grid">
@@ -1933,7 +1999,7 @@ export function OrderStand() {
               <strong>
                 {bridgeOnline
                   ? "Недорогая модель ведёт заказ"
-                  : "Программа выполняет готовую инструкцию"}
+                  : "Агент выполняет готовую инструкцию"}
               </strong>
               <p>
                 {bridgeOnline
@@ -2020,7 +2086,7 @@ export function OrderStand() {
               <small>ответ подготовлен</small>
             </article>
             <article>
-              <span>Согласование</span>
+              <span>Ждут руководителя</span>
               <strong>{stats.awaitingApproval}</strong>
               <small>ждут решения</small>
             </article>
@@ -2288,8 +2354,8 @@ function ResultPanel({
               {formatMoney(liveItem.stockKg)} кг.
             </strong>
             <small>
-              Новый остаток уже виден. Обновите черновик, чтобы сравнить новое
-              решение с прежним.
+              Заказ собран по прежнему остатку. Агент перечитает склад, соберёт
+              новое письмо и покажет обе версии рядом.
             </small>
           </div>
           <button
@@ -2298,8 +2364,8 @@ function ResultPanel({
             disabled={recalculating || !canManageOrder}
           >
             {recalculating
-              ? "Обновляем черновик…"
-              : "Обновить черновик по новому остатку"}
+              ? "Агент пересчитывает заказ…"
+              : "Пересчитать заказ по новому остатку"}
           </button>
         </section>
       )}
@@ -2313,7 +2379,10 @@ function ResultPanel({
         >
           <div className="transition-heading">
             <span>Склад изменил решение</span>
-            <strong>Один новый факт изменил следующий шаг и письмо</strong>
+            <strong>
+              Новый остаток — {visibleTransition.afterStock} вместо{" "}
+              {visibleTransition.beforeStock} — изменил следующий шаг и письмо
+            </strong>
           </div>
           <div className="transition-comparison">
             <article>
@@ -2362,8 +2431,7 @@ function ResultPanel({
             </article>
           </div>
           <small>
-            Во время пересчёта согласование и отправка оставались закрытыми.
-            Обе версии сохранились в карточке и журнале. Теперь письмо ждёт
+            Обе версии сохранились в карточке и журнале. Свежее письмо ждёт
             вашего подтверждения.
           </small>
         </section>
@@ -2409,9 +2477,11 @@ function ResultPanel({
             <span>Что делать дальше</span>
             <p>
               {humanizeText(
-                result.route === "ready" && !result.research?.checked
-                  ? "Проверьте готовое письмо и отправьте его клиенту."
-                  : result.managerNote,
+                result.route === "manager"
+                  ? "Выберите один вариант ниже. Агент покажет готовое письмо и последствия для клиента и завода."
+                  : result.route === "ready" && !result.research?.checked
+                    ? "Проверьте готовое письмо и отправьте его клиенту."
+                    : result.managerNote,
               )}
             </p>
           </article>
@@ -2489,8 +2559,7 @@ function ResultPanel({
             {!usesOpenCode(order.mode) && (
               <small className="research-mode-note">
                 Карточка уже содержит проверенные источники. При подключении
-                OpenCode модель открывает страницы и сохраняет ссылки во время
-                работы.
+                модель для заказов открывает страницы и сохраняет ссылки.
               </small>
             )}
           </div>
@@ -2588,7 +2657,7 @@ function ResultPanel({
             <span>На складе</span>
             <strong>{formatMoney(result.product.stockKg)} кг</strong>
             <small>
-              Остаток учтён {formatDateTime(savedItem?.updatedAt)}
+              Склад проверен {formatDateTime(savedItem?.updatedAt)}
             </small>
           </div>
           <div>
@@ -2701,7 +2770,7 @@ function ResultPanel({
               !canManageOrder
             }
           >
-            {approving ? "Согласуем решение…" : "Согласовать выбранный вариант"}
+            {approving ? "Подтверждаем решение…" : "Подтвердить выбранный вариант"}
           </button>
         </div>
       )}
@@ -2710,7 +2779,7 @@ function ResultPanel({
         <div className="approval-stamp">
           <span>✓</span>
           <div>
-            <small>Согласованный вариант</small>
+            <small>Подтверждённый вариант</small>
             <strong>{humanizeText(order.managerDecision)}</strong>
           </div>
         </div>
@@ -2734,7 +2803,7 @@ function ResultPanel({
                 : order.status === "awaiting_approval"
                 ? "Руководитель выбирает вариант"
                 : order.managerDecision
-                  ? "Вариант согласован · ответ готов"
+                  ? "Вариант подтверждён · ответ готов"
                   : "Ответ проверен и готов"}
           </div>
         </div>
@@ -2750,8 +2819,8 @@ function ResultPanel({
               disabled={clarifying}
             >
               {clarifying
-                ? "Записываем вопросы…"
-                : "Записать вопросы"}
+                ? "Отправляем вопросы на стенде…"
+                : "Отправить вопросы на стенде"}
             </button>
             <small>
               Кнопка добавляет вопросы в общий журнал. В рабочей системе письмо
@@ -2762,7 +2831,9 @@ function ResultPanel({
         {canSend && (
           <div className="reply-action">
             <button type="button" onClick={onSend} disabled={sending}>
-              {sending ? "Записываем отправку…" : "Записать отправку"}
+              {sending
+                ? "Отправляем ответ на стенде…"
+                : "Отправить ответ на стенде"}
             </button>
             <small>
               Кнопка добавляет письмо в общий журнал. В рабочей системе оно
@@ -2849,18 +2920,22 @@ function DecisionProofs({
 
   const basisFor = (insight: string, index: number) => {
     const patterns =
-      index === 0
-        ? [/поставщик/i, /похож|рын|предложен/i, /цен|прибыл/i]
-        : /склад|остат|объ[её]м|поставк/i.test(insight)
-          ? [/склад|остат|объ[её]м|поставк/i]
-          : /цен|прибыл/i.test(insight)
-            ? [
-                /сохраняет нужную прибыль|завод зарабатывает|карточк[аи] товара/i,
-                /цен/i,
-              ]
-            : /правил|инструк|письм/i.test(insight)
-              ? [/три правила продаж/i, /правил|инструк|письм/i]
-              : [];
+      /карточк.*(?:номер|продолж)|тем же номер/i.test(insight)
+        ? [/карточк|истори.*переписк/i]
+        : /ответ клиент|вопрос|подбор|расч[её]т|детал/i.test(insight)
+          ? [/письмо клиента|расч[её]т|заявк/i]
+          : /поставщик|рын|средн.*цен|цен.*(?:выше|ниже|близк)/i.test(insight)
+            ? [/поставщик/i, /похож|рын|предложен/i]
+            : /склад|остат|объ[её]м|поставк/i.test(insight)
+              ? [/склад|остат|объ[её]м|поставк/i]
+              : /цен|зарабатывает|прибыл/i.test(insight)
+                ? [
+                    /завод зарабатывает|карточк[аи] товара/i,
+                    /цен/i,
+                  ]
+                : /правил|инструк|письм/i.test(insight)
+                  ? [/три правила продаж/i, /правил|инструк|письм/i]
+                  : [];
 
     for (const pattern of patterns) {
       const match = bases.find((basis) =>
@@ -3006,11 +3081,11 @@ function LiveInventoryPanel({
           Ведущий меняет остаток — агент сам пересчитывает заказ
         </h2>
         <p>
-          Новый остаток сразу появляется в открытой карточке. Агент сам
-          пересчитывает заказ и показывает прежнее и новое решения рядом.
-          Ведущий может поставить 40 кг, получить варианты для руководителя,
-          затем вернуть 180 кг и получить готовое письмо. Обе версии
-          сохранятся в истории.
+          Новый остаток сразу появляется в открытой карточке. У ведущего
+          пересчёт запускается сам, в другой вкладке участник запускает его
+          одной кнопкой. Ведущий может поставить 40 кг, получить варианты для
+          руководителя, затем вернуть 180 кг и получить готовое письмо.
+          Прежнее и новое решения сохранятся рядом.
         </p>
         <button type="button" onClick={onOpenCatalog}>
           Открыть каталог и весь склад
@@ -3102,7 +3177,7 @@ function LiveInventoryPanel({
                       type="button"
                       onClick={() => {
                         onStockChange("40");
-                        onReasonChange("40 кг осталось после резервов");
+                        onReasonChange("40 кг осталось после других заказов");
                       }}
                     >
                       40 кг · агент принесёт варианты
@@ -3621,10 +3696,10 @@ function Modal({
         {name === "instructions" && (
           <>
             <p className="modal-lead">
-              GPT-5.6 Sol подготовила и проверила инструкцию. Когда OpenCode
-              подключён, её выполняет выбранная недорогая модель. Когда
-              OpenCode отключён, заявку рассчитывает программа стенда по тем же
-              правилам и живому складу.
+              GPT-5.6 Sol подготовила и проверила инструкцию. Когда модель для
+              заказов подключена, инструкцию выполняет она. Когда подключения
+              нет, агент стенда рассчитывает заявку по тем же правилам и
+              живому складу.
             </p>
             <ol className="plain-rules">
               <li>

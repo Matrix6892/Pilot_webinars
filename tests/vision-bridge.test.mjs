@@ -18,7 +18,12 @@ function bridgeStreamHelpers(source) {
   assert.ok(start >= 0 && end > start);
   return runInNewContext(
     `${source.slice(start, end)}
-({ inventorySnapshotDetail, sourcePlanForJob, createOpenCodeEventStream })`,
+({
+  inventorySnapshotDetail,
+  sourcePlanForJob,
+  createOpenCodeEventStream,
+  runPrimaryWithOfflineRetry
+})`,
     { URL },
   );
 }
@@ -185,6 +190,7 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
   assert.deepEqual(
     { ...sourcePlanForJob({ website: "kirovets-ptz.com", body: "" }) },
     {
+      allowsPublicSearch: true,
       title: "Агент решил проверить компанию",
       detail:
         "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
@@ -193,6 +199,7 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
   assert.deepEqual(
     { ...sourcePlanForJob({ website: "buyer.example", body: "Нужна краска" }) },
     {
+      allowsPublicSearch: false,
       title: "Для решения хватает данных заказа",
       detail:
         "Агент продолжает по письму, каталогу, складу и правилам продаж.",
@@ -266,7 +273,7 @@ test("shows live research and strong-model review as distinct event states", asy
   assert.doesNotMatch(bridge, /for \(const tool of primaryRun\.tools\)/);
   assert.match(
     bridge,
-    /onToolUse:\s*\(tool\)\s*=>\s*addEvent\([\s\S]*?"research"/,
+    /onToolUse:\s*publishResearch[\s\S]*?addEvent\([\s\S]*?"research"/,
   );
   assert.match(
     bridge,
@@ -276,4 +283,102 @@ test("shows live research and strong-model review as distinct event states", asy
     bridge,
     /result = applyReviewerResult\([\s\S]*?"review-result"[\s\S]*?result\.review\?\.verdict/,
   );
+});
+
+test("keeps routine orders offline and retries one timed-out run without tools", async () => {
+  const [bridge, localAgent] = await Promise.all([
+    readFile(new URL("../scripts/agent-bridge.mjs", import.meta.url), "utf8"),
+    readFile(
+      new URL(
+        "../.opencode/agents/koler-sales-local.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ]);
+
+  assert.match(
+    bridge,
+    /sourcePlan\.allowsPublicSearch\s*\?\s*"koler-sales"\s*:\s*"koler-sales-local"/,
+  );
+  assert.match(
+    bridge,
+    /runPrimaryWithOfflineRetry\(\{[\s\S]*?initialRun:[\s\S]*?onRetry:[\s\S]*?"primary-retry"[\s\S]*?offlineRun:[\s\S]*?"koler-sales-local"/,
+  );
+  assert.match(
+    bridge,
+    /Сразу собери итоговый JSON по письму, каталогу, свежему снимку склада и правилам\./,
+  );
+  assert.match(bridge, /Не вызывай веб-поиск и другие инструменты\./);
+  assert.match(localAgent, /"\*": deny/);
+  assert.match(localAgent, /Не вызывай инструменты/);
+});
+
+test("retries a timed-out primary run exactly once and exposes the second failure", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { runPrimaryWithOfflineRetry } = bridgeStreamHelpers(bridge);
+  const attempts = [];
+  const events = [];
+
+  const completed = await runPrimaryWithOfflineRetry({
+    initialRun: async () => {
+      attempts.push("первый запуск");
+      throw new Error("OpenCode timed out for model");
+    },
+    onRetry: async () => {
+      events.push("продолжение");
+    },
+    offlineRun: async () => {
+      attempts.push("продолжение");
+      return { value: { status: "готово" } };
+    },
+  });
+
+  assert.deepEqual(attempts, ["первый запуск", "продолжение"]);
+  assert.deepEqual(events, ["продолжение"]);
+  assert.equal(completed.value.status, "готово");
+
+  let offlineAttempts = 0;
+  await assert.rejects(
+    runPrimaryWithOfflineRetry({
+      initialRun: async () => {
+        throw new Error("OpenCode timed out for model");
+      },
+      onRetry: async () => {},
+      offlineRun: async () => {
+        offlineAttempts += 1;
+        throw new Error("OpenCode timed out for model again");
+      },
+    }),
+    /timed out for model again/,
+  );
+  assert.equal(offlineAttempts, 1);
+});
+
+test("does not retry a primary failure unrelated to time", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { runPrimaryWithOfflineRetry } = bridgeStreamHelpers(bridge);
+  let retryStarted = false;
+
+  await assert.rejects(
+    runPrimaryWithOfflineRetry({
+      initialRun: async () => {
+        throw new Error("Model returned no JSON object");
+      },
+      onRetry: async () => {
+        retryStarted = true;
+      },
+      offlineRun: async () => {
+        retryStarted = true;
+      },
+    }),
+    /no JSON object/,
+  );
+  assert.equal(retryStarted, false);
 });

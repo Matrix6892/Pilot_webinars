@@ -534,6 +534,96 @@ export async function POST(request: Request) {
   const website = clean(payload.website, 240);
   const selectedModel = requestedModel(payload.model);
   const attachment = safeAttachment(payload.attachment);
+  const action = clean(payload.action, 40);
+
+  if (action === "retry") {
+    const retryId = clean(payload.id, 80);
+    if (!retryId) {
+      return Response.json(
+        { error: "Укажите номер карточки." },
+        { status: 400 },
+      );
+    }
+
+    const db = getDb();
+    const [failedOrder] = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, retryId))
+      .limit(1);
+    if (!failedOrder) {
+      return Response.json(
+        { error: "Карточка не найдена. Создайте новый заказ." },
+        { status: 404 },
+      );
+    }
+    if (!(await canChangeOrder(request, failedOrder.actionTokenHash))) {
+      return Response.json(
+        {
+          error:
+            "Откройте карточку из того же окна, где вы её создали, или войдите в пульт ведущего.",
+        },
+        { status: 403 },
+      );
+    }
+
+    const transitionGuard = and(
+      eq(orders.id, retryId),
+      eq(orders.status, "error"),
+      sql`coalesce(${orders.resultJson}, '') = ${
+        failedOrder.resultJson ?? ""
+      }`,
+      sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
+        failedOrder.inventorySnapshotJson ?? ""
+      }`,
+      sql`${orders.roundNo} = ${failedOrder.roundNo}`,
+      sql`${orders.sentAt} is null`,
+    )!;
+    const retryEventQuery = insertOrderEventWhen(
+      db,
+      {
+        orderId: retryId,
+        stage: "retry",
+        title: "Карточка снова поставлена в очередь",
+        detail:
+          "Номер карточки, переписка, прежние решения и снимок склада сохранены.",
+      },
+      transitionGuard,
+    );
+    const retryOrderQuery = db
+      .update(orders)
+      .set({
+        status: "queued",
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .where(transitionGuard)
+      .returning({
+        id: orders.id,
+        status: orders.status,
+        roundNo: orders.roundNo,
+      });
+    const [, retriedOrders] = await db.batch([
+      retryEventQuery,
+      retryOrderQuery,
+    ]);
+    const [retriedOrder] = retriedOrders;
+    if (!retriedOrder) {
+      return Response.json(
+        {
+          error:
+            "Карточка уже продолжила работу. Показываем последнее состояние.",
+        },
+        { status: 409 },
+      );
+    }
+
+    return Response.json({
+      ok: true,
+      id: retriedOrder.id,
+      status: retriedOrder.status,
+      roundNo: retriedOrder.roundNo,
+    });
+  }
 
   if (subject.length < 5 || body.length < 20) {
     return Response.json(
@@ -960,7 +1050,7 @@ export async function PATCH(request: Request) {
           orderId: id,
           stage: "recalculate",
           title: "Новый остаток передан агенту",
-          detail: `${stockChange} OpenCode заново готовит решение, письмо и варианты для руководителя.`,
+          detail: `${stockChange} Модель для заказов заново готовит решение, письмо и варианты для руководителя.`,
           state: "active",
         },
         transitionGuard,

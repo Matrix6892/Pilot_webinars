@@ -88,7 +88,7 @@ export async function GET(request: Request) {
   await db.insert(orderEvents).values({
     orderId: claimedJob.id,
     stage: "understanding",
-    title: "OpenCode разбирает письмо",
+    title: "Модель для заказов разбирает письмо",
     detail:
       "Агент собирает задачу клиента, выбирает источники и читает снимок склада этой карточки.",
     state: "active",

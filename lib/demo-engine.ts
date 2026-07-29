@@ -949,6 +949,12 @@ export function buildDemoResult(
         source: "Письмо клиента",
         checkedAt: today,
       },
+      {
+        fact:
+          "Ответ клиента сохранится в этой карточке вместе с письмом, вопросами и новым расчётом.",
+        source: "Карточка и история переписки",
+        checkedAt: today,
+      },
       ...(product && requestedKg
         ? [stockBasis(product, requestedKg, catalog)]
         : []),
@@ -1068,7 +1074,7 @@ export function buildDemoResult(
           requestedKg,
         )} кг равен ${money.format(
           Math.ceil(requestedKg / product.packKg),
-        )} упаковкам. Агент уточнит график следующих закупок, чтобы заранее зарезервировать производство и поставку.`
+        )} упаковкам. Агент уточнит график следующих закупок, чтобы заранее согласовать выпуск и доставку.`
     : standardBusinessContext;
   const stockDecisionBasis = stockBasis(product, requestedKg, catalog);
   const decisionBasis: DecisionBasis[] = [
@@ -1084,7 +1090,7 @@ export function buildDemoResult(
     },
     {
       fact:
-        "Письмо предлагает только подтверждённый складом объём. Особые условия передаются руководителю вместе с готовыми вариантами.",
+        "Письмо предлагает объём, подтверждённый складом. Особые условия передаются руководителю вместе с готовыми вариантами.",
       source: "Три правила продаж",
       checkedAt: today,
     },
@@ -1126,8 +1132,8 @@ export function buildDemoResult(
         candidate.stockKg >= requestedKg,
     );
     const colorRequest = hasColor(fullText)
-      ? "После выбора варианта зарезервируем доступную партию."
-      : "Назовите точный цвет, и мы зарезервируем доступную партию.";
+      ? "После выбора варианта отложим доступную партию для вас."
+      : "Назовите точный цвет, и мы отложим доступную партию для вас.";
     const firstReply = shortage
       ? `Добрый день!\n\nПодобрали «${product.name}». Готовы отгрузить ${money.format(
           product.stockKg,
@@ -1155,7 +1161,7 @@ export function buildDemoResult(
             } дней. Клиент начинает работу раньше.`,
             businessResult:
               "Завод продаёт доступную партию сейчас и сохраняет заказ на оставшийся объём.",
-            tradeoff: "Вторая партия потребует отдельной доставки.",
+            tradeoff: "Вторую партию доставим отдельно.",
             reply: firstReply,
           },
           ...(paymentAfterDelivery
@@ -1186,16 +1192,16 @@ export function buildDemoResult(
             ? [
                 {
                   id: "замена-краски",
-                  title: `Закрыть объём краской «${compatibleAlternative.name}»`,
+                  title: `Поставить весь объём краской «${compatibleAlternative.name}»`,
                   rationale: `${money.format(
                     requestedKg,
                   )} кг есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
                   businessResult:
-                    "Завод закрывает полный заказ товаром со склада и получает оплату за весь заказ сразу.",
+                    "Завод выполняет весь заказ товаром со склада и получает оплату за весь заказ сразу.",
                   tradeoff: `Цена составит ${money.format(
                     compatibleAlternative.pricePerKg,
                   )} ₽/кг.`,
-                  reply: `Добрый день!\n\nМожем закрыть весь объём краской «${compatibleAlternative.name}» по цене ${money.format(
+                  reply: `Добрый день!\n\nМожем поставить весь объём краской «${compatibleAlternative.name}» по цене ${money.format(
                     compatibleAlternative.pricePerKg,
                   )} ₽/кг. Весь объём есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
                 },
@@ -1205,11 +1211,11 @@ export function buildDemoResult(
             id: "приоритет-производства",
             title: "Добавить краску в ближайший выпуск",
             rationale:
-              "Зарезервировать доступную партию и добавить недостающий объём в ближайший выпуск.",
+              "Отложить доступную партию для клиента и добавить недостающий объём в ближайший выпуск.",
             businessResult:
               "Завод сохраняет полный заказ и заранее планирует ближайший выпуск.",
             tradeoff: "Производство подтвердит дату второй отгрузки.",
-            reply: `Добрый день!\n\nЗарезервируем ${money.format(
+            reply: `Добрый день!\n\nОтложим для вас ${money.format(
               product.stockKg,
             )} кг на складе и поставим оставшиеся ${money.format(
               remainder,
@@ -1335,7 +1341,7 @@ export function buildDemoResult(
                   product.minPricePerKg,
                 )} ₽/кг.`
               : "",
-            `Руководитель выбирает способ закрыть оставшиеся ${money.format(
+            `Руководитель выбирает способ поставить оставшиеся ${money.format(
               remainder,
             )} кг${paymentAfterDelivery ? " и график оплаты" : ""}.`,
           ]
@@ -1351,7 +1357,7 @@ export function buildDemoResult(
       managerNote: profile
         ? likelyTrialOrder
           ? profile.suggestedMove
-          : "Уточнить график следующих закупок и заранее согласовать резерв производства и поставки."
+          : "Уточнить график следующих закупок и заранее согласовать выпуск и доставку."
         : industry
           ? `Что предлагает агент: ${industry.play}. По этой цене завод зарабатывает на заказе.`
           : "Выберите вариант, который сохраняет срок клиента и заработок завода.",
@@ -1418,7 +1424,7 @@ export function buildDemoResult(
     managerNote: profile
       ? likelyTrialOrder
         ? profile.suggestedMove
-        : "Уточнить график следующих закупок и заранее согласовать резерв производства и поставки."
+        : "Уточнить график следующих закупок и заранее согласовать выпуск и доставку."
       : view.profitOpportunity,
     options: [],
     reply: {
@@ -1429,7 +1435,7 @@ export function buildDemoResult(
         product.pricePerKg,
       )} ₽/кг. Стоимость партии — ${money.format(
         total,
-      )} ₽ без доставки.\n\nВесь объём есть на складе. После подтверждения заказа зарезервируем партию и направим график отгрузки.${
+      )} ₽ без доставки.\n\nВесь объём есть на складе. После подтверждения заказа отложим партию для вас и направим график отгрузки.${
         calculation
           ? `\n\nРасчёт количества: ${calculation.explanation}`
           : ""

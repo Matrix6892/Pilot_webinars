@@ -48,12 +48,12 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(page, /<OrderStand \/>/);
   assert.match(
     stand,
-    /Клиент пишет своими словами\.\s*Агент ведёт заказ до ответа/,
+    /Клиент пишет своими словами\.\s*Агент ведёт заказ до письма клиенту/,
   );
   assert.match(stand, /На стенде заявку создаёт форма/);
   assert.match(stand, /Письмо или фото/);
   assert.match(stand, /Модель для фото описала видимые детали/);
-  assert.match(stand, /Модель для фото подключается отдельно/);
+  assert.match(stand, /Модель для фото описывает видимое/);
   assert.match(
     stand,
     /Поставка двумя партиями опирается на подтверждённый остаток/,
@@ -82,7 +82,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Готов ответить/);
   assert.match(stand, /Нужны детали/);
   assert.match(stand, /Решает руководитель/);
-  assert.match(stand, /Вариант согласован · ответ готов/);
+  assert.match(stand, /Вариант подтверждён · ответ готов/);
   assert.match(stand, /Польза клиенту/);
   assert.match(stand, /Результат для завода/);
   assert.match(
@@ -91,8 +91,8 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /Что учесть/);
   assert.match(stand, /Письмо по выбранному варианту/);
-  assert.match(stand, /Записать отправку/);
-  assert.match(stand, /Записать вопросы/);
+  assert.match(stand, /Отправить ответ на стенде/);
+  assert.match(stand, /Отправить вопросы на стенде/);
   assert.match(stand, /Продолжить эту карточку/);
   assert.match(stand, /посчитает килограммы/);
   assert.match(
@@ -105,12 +105,12 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /данные из переписки/);
   assert.match(stand, /% на запас/);
-  assert.match(stand, /Новый остаток уже виден/);
+  assert.match(stand, /Агент перечитает склад/);
   assert.match(stand, /40 кг · агент принесёт варианты/);
   assert.match(stand, /180 кг · агент подготовит письмо/);
-  assert.match(stand, /Агент сам\s+пересчитывает заказ/);
+  assert.match(stand, /пересчёт запускается сам/);
   assert.match(stand, /Живой склад обновлён/);
-  assert.match(stand, /Обновить черновик по новому остатку/);
+  assert.match(stand, /Пересчитать заказ по новому остатку/);
   assert.match(
     stand,
     /savedRecalculation\.before\.result\?\.product\?\.stockKg[\s\S]*?savedRecalculation\.after\.result\?\.product\?\.stockKg/,
@@ -141,7 +141,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Проверено по источникам/);
   assert.match(stand, /Источники для проверки/);
   assert.match(stand, /Как недорогая модель ведёт заказ/);
-  assert.match(stand, /Как программа ведёт заказ по готовым правилам/);
+  assert.match(stand, /Как агент ведёт заказ по готовым правилам/);
   assert.match(stand, /Расчёт по готовым правилам и живому складу/);
   assert.ok(
     modelData.options.some((model) => model.label === "DeepSeek V4 Flash"),
@@ -213,6 +213,9 @@ test("ships the Колер product surface and removes the starter", async () =>
     /eq\(orderEvents\.state, "active"\)[\s\S]*?set\(\{ state: "done" \}\)|set\(\{ state: "done" \}\)[\s\S]*?eq\(orderEvents\.state, "active"\)/,
   );
   assert.match(ordersRoute, /Карточка продолжила работу/);
+  assert.match(stand, /Повторить эту карточку/);
+  assert.match(stand, /Запускаем карточку снова/);
+  assert.match(stand, /action:\s*"retry"/);
   assert.match(ordersRoute, /datetime\('now', '-1 minute'\)/);
   assert.match(
     ordersRoute,
@@ -276,7 +279,7 @@ test("prioritizes the specific source for market and rules proofs", async () => 
 
   assert.match(
     decisionProofs,
-    /index === 0\s*\?\s*\[\s*\/поставщик\/i\s*,/,
+    /\/поставщик\|рын\|средн\.\*цен\|цен\.\*\(\?:выше\|ниже\|близк\)\/i\.test\(insight\)[\s\S]*?\[\s*\/поставщик\/i,\s*\/похож\|рын\|предложен\/i\s*\]/,
   );
   assert.match(
     decisionProofs,
@@ -290,15 +293,15 @@ test("explains the stand calculation, manager role and saved recalculation", asy
     "utf8",
   );
 
-  assert.match(stand, /Считает программа стенда по живому складу/);
+  assert.match(stand, /Агент ведёт заказ по готовой инструкции/);
   assert.match(stand, /Расчёт по готовым правилам и живому складу/);
-  assert.match(stand, /Руководитель подтверждает обязательства/);
+  assert.match(stand, /Руководитель выбирает особые условия/);
   assert.match(
     stand,
-    /При особой цене, оплате после поставки или частичном наличии\s+выбирает один подготовленный вариант и открывает отправку\s+письма/,
+    /Согласует цену, оплату после поставки, срочный срок или\s+частичную поставку/,
   );
   assert.match(
     stand,
-    /Во время пересчёта согласование и отправка оставались закрытыми\.\s+Обе версии сохранились в карточке и журнале\.\s+Теперь письмо ждёт\s+вашего подтверждения\./,
+    /Обе версии сохранились в карточке и журнале\.\s+Свежее письмо ждёт\s+вашего подтверждения\./,
   );
 });

@@ -70,6 +70,7 @@ const strongReviewer =
 const visionModel = "opencode-go/mimo-v2.5";
 const agentApiTimeoutMs = 12_000;
 const openCodeTimeoutMs = 120_000;
+const openCodeSearchTimeoutMs = 70_000;
 const openCodeTerminationGraceMs = 5_000;
 
 let stopped = false;
@@ -239,23 +240,46 @@ function inventorySnapshotDetail(productCount, version) {
 
 function sourcePlanForJob(job) {
   const website = String(job?.website ?? "").trim();
+  const mentionsInn = /(?:^|[^\p{L}])инн(?:[^\p{L}]|$)/iu.test(
+    `${job?.subject ?? ""}\n${job?.body ?? ""}`,
+  );
   const shouldCheckCompany =
-    /(?:^|[^\p{L}])инн(?:[^\p{L}]|$)/iu.test(
-      `${job?.subject ?? ""}\n${job?.body ?? ""}`,
-    ) ||
+    mentionsInn ||
     (Boolean(website) &&
       !/\.example(?:[/:?#]|$)/iu.test(website));
   return shouldCheckCompany
     ? {
+        allowsPublicSearch: true,
         title: "Агент решил проверить компанию",
         detail:
           "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
       }
     : {
+        allowsPublicSearch: false,
         title: "Для решения хватает данных заказа",
         detail:
           "Агент продолжает по письму, каталогу, складу и правилам продаж.",
       };
+}
+
+function isOpenCodeTimeout(error) {
+  return /OpenCode timed out/iu.test(
+    String(error instanceof Error ? error.message : error ?? ""),
+  );
+}
+
+async function runPrimaryWithOfflineRetry({
+  initialRun,
+  offlineRun,
+  onRetry,
+}) {
+  try {
+    return await initialRun();
+  } catch (error) {
+    if (!isOpenCodeTimeout(error)) throw error;
+    await onRetry();
+    return offlineRun();
+  }
 }
 
 function canonicalHttpUrl(value) {
@@ -396,6 +420,7 @@ async function runOpenCode({
   agent,
   files = [],
   onToolUse,
+  timeoutMs = openCodeTimeoutMs,
 }) {
   const promptDirectory = await mkdtemp(join(tmpdir(), "koler-agent-"));
   const promptPath = join(promptDirectory, "request.md");
@@ -451,7 +476,7 @@ async function runOpenCode({
       forceKillTimer = setTimeout(() => {
         child.kill("SIGKILL");
       }, openCodeTerminationGraceMs);
-    }, openCodeTimeoutMs);
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk) => {
       eventStream.push(chunk.toString());
@@ -495,7 +520,7 @@ async function visionObservationForJob(job) {
   await addEvent(
     job.id,
     "vision",
-    "Модель зрения смотрит фото",
+    "Модель для фото изучает снимок",
     "Отдельная модель отмечает только видимые признаки.",
     "active",
   );
@@ -636,20 +661,61 @@ async function processJob(job) {
     );
 
     const visionObservation = await visionObservationForJob(job);
-    const primaryRun = await runOpenCode({
-      model: primaryModel,
-      prompt: primaryPrompt(job, liveDemoData, visionObservation),
-      title: `Колер · заказ ${job.id.slice(-6)}`,
-      agent: "koler-sales",
-      onToolUse: (tool) =>
+    const prompt = primaryPrompt(job, liveDemoData, visionObservation);
+    const runPrimary = ({
+      agent,
+      timeoutMs,
+      runPrompt = prompt,
+      publishResearch = false,
+    }) =>
+      runOpenCode({
+        model: primaryModel,
+        prompt: runPrompt,
+        title: `Колер · заказ ${job.id.slice(-6)}`,
+        agent,
+        timeoutMs,
+        onToolUse: publishResearch
+          ? (tool) =>
+              addEvent(
+                job.id,
+                "research",
+                tool.urls.length
+                  ? "Агент открыл публичный источник"
+                  : "Агент ищет открытые источники",
+                tool.detail,
+              )
+          : undefined,
+      });
+    const primaryRun = await runPrimaryWithOfflineRetry({
+      initialRun: () =>
+        runPrimary({
+          agent: sourcePlan.allowsPublicSearch
+            ? "koler-sales"
+            : "koler-sales-local",
+          timeoutMs: sourcePlan.allowsPublicSearch
+            ? openCodeSearchTimeoutMs
+            : openCodeTimeoutMs,
+          publishResearch: sourcePlan.allowsPublicSearch,
+        }),
+      onRetry: () =>
         addEvent(
           job.id,
-          "research",
-          tool.urls.length
-            ? "Агент открыл публичный источник"
-            : "Агент ищет открытые источники",
-          tool.detail,
+          "primary-retry",
+          "Агент собирает итог по данным заказа",
+          "Первый запуск занял больше времени. Агент сразу готовит итоговый ответ по письму, каталогу и свежим остаткам на складе.",
         ),
+      offlineRun: () =>
+        runPrimary({
+          agent: "koler-sales-local",
+          timeoutMs: openCodeTimeoutMs,
+          runPrompt: `${prompt}
+
+## Продолжение того же заказа
+
+- Сразу собери итоговый JSON по письму, каталогу, свежему снимку склада и правилам.
+- Используй только приложенные данные. Не вызывай веб-поиск и другие инструменты.
+- Для research укажи checked=false, summary="" и sources=[].`,
+        }),
     });
 
     const guardedJob = {

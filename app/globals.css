@@ -192,8 +192,7 @@ main {
   display: grid;
   padding: clamp(28px, 4vw, 56px) 0 clamp(38px, 5vw, 68px);
   border-bottom: 1px solid var(--line);
-  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
-  column-gap: clamp(36px, 6vw, 96px);
+  grid-template-columns: 1fr;
   row-gap: clamp(22px, 3vw, 38px);
 }
 
@@ -222,8 +221,7 @@ main {
 }
 
 .hero-status {
-  align-self: end;
-  padding: 24px;
+  padding: 20px 22px;
   border-radius: 18px;
   background: var(--ink);
   color: #fff;
@@ -235,7 +233,7 @@ main {
 }
 
 .hero-status > span {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   color: #d1ab84;
   font-size: 11px;
   font-weight: 700;
@@ -977,6 +975,18 @@ main {
 .run-head > div:first-child > small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.order-card-preview {
+  display: -webkit-box;
+  max-width: 760px;
+  overflow: hidden;
+  margin: 10px 0 0;
+  color: #5b6561;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .zone-badge {
@@ -2290,12 +2300,22 @@ footer span:last-child {
   padding: 0;
   margin: 0;
   list-style: none;
-  gap: 15px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
 }
 
 .hero-roles li {
   position: relative;
+  padding: 0 18px;
+  border-right: 1px solid rgb(255 255 255 / 12%);
+}
+
+.hero-roles li:first-child {
   padding-left: 18px;
+}
+
+.hero-roles li:last-child {
+  border-right: 0;
 }
 
 .hero-roles li::before {
@@ -3680,6 +3700,15 @@ footer span:last-child {
     min-height: 132px;
   }
 
+  .hero-roles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 18px;
+  }
+
+  .hero-roles li:nth-child(3) {
+    border-right: 0;
+  }
+
   .control-story {
     grid-template-columns: 1fr;
   }
@@ -3830,6 +3859,16 @@ footer span:last-child {
 
   .hero-lead {
     font-size: 17px;
+  }
+
+  .hero-roles {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .hero-roles li {
+    padding: 0 0 0 18px;
+    border-right: 0;
   }
 
   .system-map {

@@ -130,6 +130,34 @@ test("guards recalculation with fresh-stock and compare-and-set checks", async (
   );
 });
 
+test("retries an errored order in the same card with a compare-and-set transition", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const retry = route.slice(
+    route.indexOf('if (action === "retry")'),
+    route.indexOf("if (subject.length < 5"),
+  );
+
+  assert.match(retry, /canChangeOrder\(request, failedOrder\.actionTokenHash\)/);
+  assert.match(retry, /eq\(orders\.status, "error"\)/);
+  assert.match(retry, /coalesce\(\$\{orders\.resultJson\}/);
+  assert.match(retry, /coalesce\(\$\{orders\.inventorySnapshotJson\}/);
+  assert.match(retry, /orders\.roundNo/);
+  assert.match(retry, /orders\.sentAt/);
+  assert.match(retry, /stage:\s*"retry"/);
+  assert.match(retry, /status:\s*"queued"/);
+  assert.match(
+    retry,
+    /await db\.batch\(\[\s*retryEventQuery,\s*retryOrderQuery,\s*\]\)/,
+  );
+  assert.doesNotMatch(
+    retry,
+    /roundNo:\s*failedOrder\.roundNo\s*\+\s*1|resultJson:\s*null|inventorySnapshotJson:\s*null/,
+  );
+});
+
 test("preserves confirmed company research while refreshing commercial facts", async () => {
   const route = await readFile(
     new URL("../app/api/orders/route.ts", import.meta.url),
