@@ -217,6 +217,25 @@ test("removes CJK fragments from every visible model field", () => {
   assert.equal("unexpected" in result, false);
 });
 
+test("turns an internal profit-floor phrase into customer-facing Russian", () => {
+  const draft = agentDraft();
+  draft.understood = [
+    "Минимальная цена с прибылью: 278 ₽/кг",
+  ];
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Учебный заказчик",
+    subject: "Стандартный заказ КР-001",
+    body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
+  });
+
+  assert.match(
+    result.understood.join(" "),
+    /цена, от которой завод зарабатывает на заказе: 278 ₽\/кг/iu,
+  );
+  assert.doesNotMatch(result.understood.join(" "), /минимальн|с прибылью/iu);
+});
+
 test("replaces client rhetoric that violates the Russian copy contract", () => {
   const draft = agentDraft();
   const rejectedCopy = [
