@@ -2,13 +2,14 @@ import demoData from "@/data/paint-demo.json";
 import {
   asksCompatibility,
   asksPaymentAfterDelivery,
+  colorLabelFromText,
+  deliveryPlanFromText,
   explicitSkuFromText,
   hasColor,
   hasSpecialTerms,
   hasUsableEnvironment,
   matchProduct,
   orderFactsFromText,
-  quantityFromText,
   quotedUnitPrices,
 } from "@/lib/order-facts.mjs";
 
@@ -25,11 +26,11 @@ export type OrderInput = {
 };
 
 type BaseProduct = (typeof demoData.products)[number];
-type DemoProduct = BaseProduct & {
+export type DemoProduct = BaseProduct & {
   stockRevision?: number;
   stockUpdatedAt?: string;
 };
-type DemoMarketItem = (typeof demoData.market)[number];
+export type DemoMarketItem = (typeof demoData.market)[number];
 type DemoCompanyProfile = (typeof demoData.companyProfiles)[number];
 type DemoIndustry = (typeof demoData.industries)[number];
 type DemoRules = typeof demoData.rules;
@@ -122,6 +123,8 @@ export type AgentResult = {
     name: string;
     stockKg: number;
     requestedKg: number;
+    firstDeliveryKg?: number;
+    color?: string;
     pricePerKg: number;
     total: number;
     replenishmentDays: number;
@@ -514,7 +517,11 @@ function surfaceCalculation(
   };
 }
 
-function marketView(product: DemoProduct | null, items: DemoMarketItem[]) {
+export function marketView(
+  product: DemoProduct | null,
+  items: DemoMarketItem[],
+  requestedKg: number,
+) {
   if (!product) {
     return {
       checked: false,
@@ -552,30 +559,54 @@ function marketView(product: DemoProduct | null, items: DemoMarketItem[]) {
   const marketAverage =
     prices.reduce((sum, price) => sum + price, 0) / prices.length;
   const difference = product.pricePerKg - marketAverage;
+  const marketReference =
+    comparable.length === 1
+      ? "цены другого поставщика"
+      : "средней цены других поставщиков";
+  const equalMarketReference =
+    comparable.length === 1
+      ? "с ценой другого поставщика"
+      : "со средней ценой других поставщиков";
   const closeToAverage =
     Math.abs(difference) <= Math.max(5, marketAverage * 0.02);
+  const availability =
+    requestedKg <= 0
+      ? "Количество уточняем перед предложением."
+      : requestedKg <= product.stockKg
+        ? "Весь объём подтверждён складом."
+        : `Склад подтверждает ${money.format(
+            product.stockKg,
+          )} из ${money.format(
+            requestedKg,
+          )} кг. Поставку оставшейся части согласует руководитель.`;
 
   let position: string;
   if (closeToAverage) {
     const roundedDifference = Math.round(Math.abs(difference));
     position =
       roundedDifference === 0
-        ? `Цена совпадает со средней: ${money.format(
+        ? `Наша цена ${money.format(
             product.pricePerKg,
-          )} ₽/кг.`
-        : `Цена близка к рынку: ${money.format(product.pricePerKg)} ₽/кг, на ${money.format(
+          )} ₽/кг совпадает ${equalMarketReference}. ${availability}`
+        : `Наша цена ${money.format(product.pricePerKg)} ₽/кг, на ${money.format(
             roundedDifference,
-          )} ₽ ${difference > 0 ? "выше" : "ниже"} средней цены других поставщиков. Товар уже на складе, срок подтверждён.`;
+          )} ₽ ${difference > 0 ? "выше" : "ниже"} ${marketReference}. ${
+            difference > 0
+              ? "Цена близка к рынку."
+              : "Цена выглядит привлекательно."
+          } ${availability}`;
   } else if (difference < 0) {
     position = `Наша цена ${money.format(
       product.pricePerKg,
     )} ₽/кг на ${money.format(
       Math.round(Math.abs(difference)),
-    )} ₽ ниже средней цены других поставщиков.`;
+    )} ₽ ниже ${marketReference}.`;
   } else {
-    position = `Наша цена выше большинства показанных предложений: ${money.format(
+    position = `Наша цена ${money.format(
       product.pricePerKg,
-    )} ₽/кг. Весь объём и срок поставки подтверждены.`;
+    )} ₽/кг, на ${money.format(
+      Math.round(difference),
+    )} ₽ выше ${marketReference}. Агент покажет клиенту наличие, срок и свойства краски. ${availability}`;
   }
 
   const priceRoom = marketMax - product.pricePerKg;
@@ -704,6 +735,8 @@ function commercialEstimateFor(
 function productResult(
   product: DemoProduct | null,
   requestedKg: number,
+  firstDeliveryKg = 0,
+  color = "",
 ) {
   return product
     ? {
@@ -711,6 +744,8 @@ function productResult(
         name: product.name,
         stockKg: product.stockKg,
         requestedKg,
+        ...(firstDeliveryKg ? { firstDeliveryKg } : {}),
+        ...(color ? { color } : {}),
         pricePerKg: product.pricePerKg,
         total: requestedKg * product.pricePerKg,
         replenishmentDays: product.replenishmentDays,
@@ -777,19 +812,30 @@ function replyWithQuestions(
   };
 }
 
-function orderColorLabel(value: string) {
-  const colorNames: Array<[RegExp, string]> = [
-    [/т[её]мно[-\s]?сер\p{L}*/iu, "тёмно-серый"],
-    [/светло[-\s]?сер\p{L}*/iu, "светло-серый"],
-    [/коричнев\p{L}*/iu, "коричневый"],
-    [/бел\p{L}*/iu, "белый"],
-    [/сер(?:ый|ая|ое|ые|ого|ой|ую|ым|ом)/iu, "серый"],
-    [/ч[её]рн\p{L}*/iu, "чёрный"],
-    [/зел[её]н\p{L}*/iu, "зелёный"],
-  ];
-  const colorName = colorNames.find(([pattern]) => pattern.test(value))?.[1];
-  const ral = value.match(/\bRAL\s*\d{4}\b/iu)?.[0].replace(/\s+/g, " ");
-  return [colorName, ral?.toUpperCase()].filter(Boolean).join(", ");
+export function productHasRequestedColor(
+  product: DemoProduct,
+  requestText: string,
+) {
+  const requested = colorLabelFromText(requestText);
+  if (!requested) return false;
+
+  const available = product.colors.join(" ").toLocaleLowerCase("ru-RU");
+  const ral = requested.match(/\bRAL\s*\d{4}\b/iu)?.[0].toUpperCase();
+  if (ral) return available.includes(ral.toLocaleLowerCase("ru-RU"));
+
+  const color = requested.split(",")[0].toLocaleLowerCase("ru-RU");
+  const knownRal: Record<string, string[]> = {
+    "тёмно-серый": ["ral 7024"],
+    "светло-серый": ["ral 7035"],
+    серый: ["ral 7024", "ral 7035"],
+    чёрный: ["ral 9005"],
+    белый: ["ral 9016"],
+  };
+  const stem = color.replace(/(?:ый|ая|ое|ые)$/u, "");
+  return (
+    available.includes(stem) ||
+    (knownRal[color] ?? []).some((item) => available.includes(item))
+  );
 }
 
 function orderLogisticsLine(value: string) {
@@ -818,6 +864,8 @@ export function buildDemoResult(
     : "";
   const evidenceText = `${fullText}\n${visualText}`;
   const businessText = `${evidenceText}\n${input.company ?? ""}`;
+  const deliveryPlan = deliveryPlanFromText(fullText);
+  const requestedColor = colorLabelFromText(fullText);
   const facts = orderFactsFromText(evidenceText);
   const fence: FenceFacts | null = facts.fence
     ? {
@@ -830,7 +878,7 @@ export function buildDemoResult(
       }
     : null;
   const surface = surfaceFactsFromEvidence(fullText, visualText, fence);
-  const explicitRequestedKg = quantityFromText(fullText);
+  const explicitRequestedKg = deliveryPlan.totalKg;
   const matchedProduct = matchProduct(evidenceText, catalog.products);
   const product =
     matchedProduct ??
@@ -843,6 +891,11 @@ export function buildDemoResult(
       )
     : undefined;
   const requestedKg = explicitRequestedKg || calculation?.roundedKg || 0;
+  const firstDeliveryKg =
+    product &&
+    deliveryPlan.firstDeliveryKg > 0
+      ? Math.min(deliveryPlan.firstDeliveryKg, requestedKg)
+      : 0;
   const missing: string[] = [];
   const unknownSku = Boolean(explicitSkuFromText(fullText)) && !product;
 
@@ -910,7 +963,7 @@ export function buildDemoResult(
         !surface.sides),
   );
   const profile = profileFor(facts.inn, catalog.companyProfiles);
-  const baseMarketView = marketView(product, catalog.market);
+  const baseMarketView = marketView(product, catalog.market, requestedKg);
   const likelyTrialOrder = Boolean(
     profile &&
       product &&
@@ -961,7 +1014,18 @@ export function buildDemoResult(
           )} кг`,
         ]
       : requestedKg
-        ? [`Объём: ${money.format(requestedKg)} кг`]
+        ? [
+            `Объём: ${money.format(requestedKg)} кг`,
+            ...(firstDeliveryKg
+              ? [
+                  `Первая поставка: ${money.format(
+                    firstDeliveryKg,
+                  )} кг; затем ${money.format(
+                    requestedKg - firstDeliveryKg,
+                  )} кг`,
+                ]
+              : []),
+          ]
         : []),
   ];
 
@@ -1008,7 +1072,12 @@ export function buildDemoResult(
       confidence: hasAttachedPhoto ? 0.88 : 0.8,
       understood,
       missing,
-      product: productResult(product, requestedKg),
+      product: productResult(
+        product,
+        requestedKg,
+        firstDeliveryKg,
+        requestedColor,
+      ),
       ...(calculation ? { calculation } : {}),
       market: view,
       research,
@@ -1022,8 +1091,12 @@ export function buildDemoResult(
               calculation.roundedKg,
             )} кг. Клиенту осталось ответить только на вопросы, которые меняют предложение.`
           : surface.kind === "fence"
-            ? "Фото дополняет заявку и помогает обсудить состояние поверхности. Материал, размеры и стороны покраски подтверждает клиент; эти данные определяют краску и количество упаковок."
-            : "Фото и описание задачи помогают определить поверхность. Материал, площадь и условия подтверждает клиент; эти данные определяют краску и количество упаковок."
+            ? hasAttachedPhoto
+              ? "Фото дополняет заявку и помогает обсудить состояние поверхности. Материал, размеры и стороны покраски подтверждает клиент; эти данные определяют краску и количество упаковок."
+              : "Клиент описал забор своими словами. Материал, размеры и стороны покраски определят краску и количество упаковок."
+            : hasAttachedPhoto
+              ? "Фото и описание задачи помогают определить поверхность. Материал, площадь и условия подтверждает клиент; эти данные определяют краску и количество упаковок."
+              : "Описание задачи помогает определить поверхность. Материал, площадь и условия определят краску и количество упаковок."
         : product
           ? `Краска «${product.name}» найдена в каталоге. Короткий ответ клиента завершит расчёт.`
           : "Агент сохранил известные факты и подготовил самый короткий путь к точному предложению.",
@@ -1072,7 +1145,6 @@ export function buildDemoResult(
   }
 
   const total = requestedKg * product.pricePerKg;
-  const requestedColor = orderColorLabel(fullText);
   const logistics = orderLogisticsLine(fullText);
   const nextStep = /забер|самовывоз/iu.test(logistics)
     ? "Подтвердите время самовывоза — подготовим заказ к выдаче."
@@ -1159,18 +1231,23 @@ export function buildDemoResult(
   }
 
   if (shortage || specialTerms || belowMinimum) {
-    const remainder = Math.max(0, requestedKg - product.stockKg);
-    const compatibleAlternative = catalog.products.find(
-      (candidate) =>
-        product.analogues.includes(candidate.sku) &&
-        candidate.stockKg >= requestedKg,
-    );
+    const availableNowKg =
+      firstDeliveryKg || Math.min(product.stockKg, requestedKg);
+    const remainder = Math.max(0, requestedKg - availableNowKg);
+    const compatibleAlternative = calculation
+      ? null
+      : catalog.products.find(
+          (candidate) =>
+            product.analogues.includes(candidate.sku) &&
+            candidate.stockKg >= requestedKg &&
+            productHasRequestedColor(candidate, evidenceText),
+        );
     const colorRequest = hasColor(fullText)
       ? "После выбора варианта отложим доступную партию для вас."
       : "Назовите точный цвет, и мы отложим доступную партию для вас.";
     const firstReply = shortage
       ? `Добрый день!\n\nПодобрали «${product.name}». Готовы отгрузить ${money.format(
-          product.stockKg,
+          availableNowKg,
         )} кг сейчас и ${money.format(remainder)} кг через ${
           product.replenishmentDays
         } дней. Цена — ${money.format(product.pricePerKg)} ₽/кг. ${
@@ -1189,7 +1266,7 @@ export function buildDemoResult(
             id: "две-поставки",
             title: "Начать работу с первой партией",
             rationale: `${money.format(
-              product.stockKg,
+              availableNowKg,
             )} кг отправим сейчас, ${money.format(remainder)} кг — через ${
               product.replenishmentDays
             } дней. Клиент начинает работу раньше.`,
@@ -1204,7 +1281,7 @@ export function buildDemoResult(
                   id: "оплата-по-партиям",
                   title: "Разделить оплату по партиям",
                   rationale: `${money.format(
-                    product.stockKg,
+                    availableNowKg,
                   )} кг клиент оплачивает перед первой отгрузкой. Для оставшихся ${money.format(
                     remainder,
                   )} кг руководитель согласует оплату после поставки.`,
@@ -1213,7 +1290,7 @@ export function buildDemoResult(
                   tradeoff:
                     "Договор зафиксирует сумму и срок оплаты для каждой партии.",
                   reply: `Добрый день!\n\nПредлагаем поставить заказ двумя партиями и закрепить оплату отдельно для каждой. Первые ${money.format(
-                    product.stockKg,
+                    availableNowKg,
                   )} кг готовы отгрузить со склада, оставшиеся ${money.format(
                     remainder,
                   )} кг — через ${
@@ -1229,7 +1306,7 @@ export function buildDemoResult(
                   title: `Поставить весь объём краской «${compatibleAlternative.name}»`,
                   rationale: `${money.format(
                     requestedKg,
-                  )} кг есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
+                  )} кг есть на складе. Каталог допускает эту краску как замену для задачи клиента.`,
                   businessResult:
                     "Завод выполняет весь заказ товаром со склада и получает оплату за весь заказ сразу.",
                   tradeoff: `Цена составит ${money.format(
@@ -1237,7 +1314,17 @@ export function buildDemoResult(
                   )} ₽/кг.`,
                   reply: `Добрый день!\n\nМожем поставить весь объём краской «${compatibleAlternative.name}» по цене ${money.format(
                     compatibleAlternative.pricePerKg,
-                  )} ₽/кг. Весь объём есть на складе. Специалист подтвердит, что краска подходит; затем склад отложит нужный объём.`,
+                  )} ₽/кг${
+                    requestedColor ? `, цвет ${requestedColor}` : ""
+                  }. Весь объём есть на складе. Каталог допускает эту краску как замену для вашей задачи.${
+                    firstDeliveryKg
+                      ? ` Учтём ваш график: ${money.format(
+                          firstDeliveryKg,
+                        )} кг подготовим для первой поставки, оставшиеся ${money.format(
+                          requestedKg - firstDeliveryKg,
+                        )} кг — для следующей.`
+                      : ""
+                  }`,
                 },
               ]
             : []),
@@ -1250,7 +1337,7 @@ export function buildDemoResult(
               "Завод сохраняет полный заказ и заранее планирует ближайший выпуск.",
             tradeoff: "Производство подтвердит дату второй отгрузки.",
             reply: `Добрый день!\n\nОтложим для вас ${money.format(
-              product.stockKg,
+              availableNowKg,
             )} кг на складе и поставим оставшиеся ${money.format(
               remainder,
             )} кг в ближайший выпуск. После подтверждения заказа направим дату второй отгрузки.`,
@@ -1355,16 +1442,27 @@ export function buildDemoResult(
       confidence: 0.94,
       understood,
       missing: missing.slice(0, 1),
-      product: productResult(product, requestedKg),
+      product: productResult(
+        product,
+        requestedKg,
+        firstDeliveryKg,
+        requestedColor,
+      ),
       ...(calculation ? { calculation } : {}),
       market: view,
       research,
       businessContext,
       zoneReason: shortage
         ? [
-            `Склад подтверждает ${money.format(
-              product.stockKg,
-            )} кг сейчас и ${money.format(remainder)} кг после пополнения.`,
+            firstDeliveryKg
+              ? `Клиент выбрал ${money.format(
+                  firstDeliveryKg,
+                )} кг для первой поставки. Склад подтверждает этот объём; оставшиеся ${money.format(
+                  remainder,
+                )} кг войдут в следующий этап поставки.`
+              : `Склад подтверждает ${money.format(
+                  availableNowKg,
+                )} кг сейчас и ${money.format(remainder)} кг после пополнения.`,
             paymentAfterDelivery
               ? "Клиент просит оплату после поставки."
               : "",
@@ -1439,7 +1537,12 @@ export function buildDemoResult(
     confidence: 0.97,
     understood,
     missing: [],
-    product: productResult(product, requestedKg),
+    product: productResult(
+      product,
+      requestedKg,
+      firstDeliveryKg,
+      requestedColor,
+    ),
     ...(calculation ? { calculation } : {}),
     market: view,
     research,
@@ -1476,6 +1579,13 @@ export function buildDemoResult(
           product.pricePerKg,
         )} ₽/кг, сумма — ${money.format(total)} ₽.`,
         "Весь объём есть на складе.",
+        firstDeliveryKg
+          ? `Учли ваш график: ${money.format(
+              firstDeliveryKg,
+            )} кг подготовим для первой поставки, оставшиеся ${money.format(
+              requestedKg - firstDeliveryKg,
+            )} кг — для следующей.`
+          : "",
         logistics ? `Учли условия из заявки: ${logistics}.` : "",
         nextStep,
         calculation

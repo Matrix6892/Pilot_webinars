@@ -7,7 +7,12 @@ import {
   systemState,
 } from "@/db/schema";
 import modelCatalog from "@/data/models.json";
-import { buildDemoResult, type AgentResult } from "@/lib/demo-engine";
+import {
+  buildDemoResult,
+  marketView,
+  productHasRequestedColor,
+  type AgentResult,
+} from "@/lib/demo-engine";
 import { getDemoDataWithInventory } from "@/lib/inventory";
 import { productInventoryChanged } from "@/lib/inventory-freshness.mjs";
 import {
@@ -102,6 +107,121 @@ function routeLabel(result: AgentResult) {
   if (route === "manager") return "решает руководитель";
   if (route === "needs_info") return "нужны детали";
   return "готов ответить";
+}
+
+export function reserveEventDetail(
+  product: NonNullable<AgentResult["product"]>,
+) {
+  const formatKg = (value: number) =>
+    new Intl.NumberFormat("ru-RU").format(value);
+  const reservedKg = Math.max(
+    0,
+    Math.min(
+      product.firstDeliveryKg || product.requestedKg,
+      product.requestedKg,
+      product.stockKg,
+    ),
+  );
+  const remainingKg = Math.max(0, product.requestedKg - reservedKg);
+  const remaining =
+    remainingKg > 0
+      ? ` Оставшиеся ${formatKg(remainingKg)} кг записаны в выбранный план поставки.`
+      : "";
+
+  const color = product.color ? `, цвет ${product.color}` : "";
+  return `${formatKg(reservedKg)} кг краски «${product.name}»${color} закреплены за карточкой.${remaining} В рабочей системе этот шаг передаст резерв в учётную систему.`;
+}
+
+export function approvedProductForOption(
+  product: NonNullable<AgentResult["product"]>,
+  option: AgentResult["options"][number],
+  products: Array<{
+    sku: string;
+    name: string;
+    stockKg: number;
+    pricePerKg: number;
+    replenishmentDays: number;
+    analogues: string[];
+  }>,
+) {
+  const source = products.find((item) => item.sku === product.sku);
+  if (!source) return product;
+
+  const optionText =
+    `${option.id} ${option.title} ${option.rationale} ${option.tradeoff} ${option.reply}`.toLocaleLowerCase(
+      "ru-RU",
+    );
+  const alternative = products.find(
+    (item) =>
+      item.sku !== product.sku &&
+      source.analogues.includes(item.sku) &&
+      (optionText.includes(item.sku.toLocaleLowerCase("ru-RU")) ||
+        optionText.includes(item.name.toLocaleLowerCase("ru-RU"))),
+  );
+  if (!alternative) return product;
+
+  return {
+    sku: alternative.sku,
+    name: alternative.name,
+    stockKg: alternative.stockKg,
+    requestedKg: product.requestedKg,
+    ...(product.firstDeliveryKg
+      ? { firstDeliveryKg: product.firstDeliveryKg }
+      : {}),
+    ...(product.color ? { color: product.color } : {}),
+    pricePerKg: alternative.pricePerKg,
+    total: alternative.pricePerKg * product.requestedKg,
+    replenishmentDays: alternative.replenishmentDays,
+  };
+}
+
+export function optionNeedsCustomerReply(
+  option: AgentResult["options"][number],
+) {
+  return (
+    ["clarify", "график-клиента"].includes(option.id) ||
+    /(?:\?|назовите|укажите|ответьте|напишите|уточните|направьте|сообщите|пришлите|подтвердите|что для вас|к какой дате)/iu.test(
+      option.reply,
+    )
+  );
+}
+
+export function understoodAfterProductChoice(
+  understood: string[],
+  originalProduct: NonNullable<AgentResult["product"]>,
+  approvedProduct: NonNullable<AgentResult["product"]>,
+) {
+  const originalSku = originalProduct.sku.toLocaleLowerCase("ru-RU");
+  const originalName = originalProduct.name.toLocaleLowerCase("ru-RU");
+  const productFact =
+    /^(?:краска|выбранная краска|подходящий товар|краска по каталогу|остаток|на складе|цена|цвет|первая\s+(?:поставка|партия))(?:\s|:|—|-)/iu;
+  const formatted = new Intl.NumberFormat("ru-RU");
+
+  return [
+    ...understood.filter((item) => {
+      const value = item.toLocaleLowerCase("ru-RU");
+      return (
+        !productFact.test(item) &&
+        !value.includes(originalSku) &&
+        !value.includes(originalName)
+      );
+    }),
+    `Выбранная краска: ${approvedProduct.name}`,
+    `Склад подтверждает весь заказ: ${formatted.format(
+      approvedProduct.requestedKg,
+    )} кг из ${formatted.format(approvedProduct.stockKg)} кг`,
+    ...(approvedProduct.firstDeliveryKg
+      ? [
+          `Первая поставка: ${formatted.format(
+            approvedProduct.firstDeliveryKg,
+          )} кг; затем ${formatted.format(
+            approvedProduct.requestedKg - approvedProduct.firstDeliveryKg,
+          )} кг`,
+        ]
+      : []),
+    ...(approvedProduct.color ? [`Цвет: ${approvedProduct.color}`] : []),
+    `Цена: ${formatted.format(approvedProduct.pricePerKg)} ₽/кг`,
+  ];
 }
 
 export function preserveConfirmedResearch(
@@ -818,7 +938,7 @@ export async function PATCH(request: Request) {
       {
         orderId: id,
         stage: "clarification-sent",
-        title: "Вопросы отправлены на стенде",
+        title: "Вопросы записаны в журнал демонстрации",
         detail: `${result.missing.join(" · ")}. Письмо и время сохранены в общем журнале.`,
         createdAt: now,
       },
@@ -887,6 +1007,9 @@ export async function PATCH(request: Request) {
           conversationJson: JSON.stringify(nextConversation),
           roundNo: order.roundNo + 1,
           inventorySnapshotJson: JSON.stringify(inventorySnapshot),
+          managerDecision: null,
+          managerOptionId: null,
+          managerDecidedAt: null,
           updatedAt: sql`CURRENT_TIMESTAMP`,
         })
         .where(
@@ -969,6 +1092,9 @@ export async function PATCH(request: Request) {
         inventorySnapshotJson: JSON.stringify(inventorySnapshot),
         agentModel: "Расчёт по готовой инструкции",
         reviewerModel: "Проверка программы",
+        managerDecision: null,
+        managerOptionId: null,
+        managerDecidedAt: null,
         updatedAt: customerRepliedAt,
       })
       .where(transitionGuard)
@@ -1192,7 +1318,7 @@ export async function PATCH(request: Request) {
   if (action === "reserve") {
     if (order.status !== "ready_to_send" || order.sentAt) {
       return Response.json(
-        { error: "Резерв уже подготовлен или карточка перешла дальше." },
+        { error: "Резерв товара уже подготовлен или карточка перешла дальше." },
         { status: 409 },
       );
     }
@@ -1228,8 +1354,8 @@ export async function PATCH(request: Request) {
       {
         orderId: id,
         stage: "reserve",
-        title: "Резерв под договор подготовлен",
-        detail: `${result.product.requestedKg} кг краски «${result.product.name}» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.`,
+        title: "Резерв товара подготовлен",
+        detail: reserveEventDetail(result.product),
         createdAt: now,
       },
       transitionGuard,
@@ -1263,7 +1389,7 @@ export async function PATCH(request: Request) {
         {
           error:
             order.status === "ready_to_send"
-              ? "Сначала подготовьте резерв под договор."
+              ? "Сначала подготовьте резерв товара."
               : "Письмо ждёт следующий шаг в карточке.",
         },
         { status: 409 },
@@ -1294,7 +1420,7 @@ export async function PATCH(request: Request) {
       {
         orderId: id,
         stage: "sent",
-        title: "Ответ отправлен на стенде",
+        title: "Отправка ответа записана",
         detail:
           "Письмо и время отправки сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.",
         createdAt: now,
@@ -1364,10 +1490,195 @@ export async function PATCH(request: Request) {
     );
   }
 
+  const liveData = await getDemoDataWithInventory();
+  const currentInput = inputWithConversation(
+    order,
+    storedJson<ConversationMessage[]>(order.conversationJson, []),
+  );
+  const requestText = [
+    currentInput.subject,
+    currentInput.body,
+    currentInput.attachment?.alt,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  let approvedAlternative = false;
+  if (result.product) {
+    const originalProduct = result.product;
+    const approvedProduct = approvedProductForOption(
+      originalProduct,
+      option,
+      liveData.products,
+    );
+    if (
+      approvedProduct.sku !== originalProduct.sku &&
+      approvedProduct.stockKg < originalProduct.requestedKg
+    ) {
+      return Response.json(
+        {
+          error:
+            "Полного объёма предложенной краски уже нет на складе. Пересчитайте карточку — руководитель получит свежие варианты.",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      result.calculation &&
+      approvedProduct.sku !== originalProduct.sku
+    ) {
+      return Response.json(
+        {
+          error:
+            "Для заказа по площади пересчитайте расход выбранной краски перед подтверждением замены.",
+        },
+        { status: 409 },
+      );
+    }
+    const approvedSourceProduct = liveData.products.find(
+      (item) => item.sku === approvedProduct.sku,
+    );
+    if (
+      approvedProduct.sku !== originalProduct.sku &&
+      approvedSourceProduct &&
+      !productHasRequestedColor(approvedSourceProduct, requestText)
+    ) {
+      return Response.json(
+        {
+          error:
+            "У выбранной краски другой набор цветов. Пересчитайте карточку — агент предложит вариант для цвета клиента.",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      approvedProduct.sku !== originalProduct.sku &&
+      productInventoryChanged(
+        storedJson(order.inventorySnapshotJson, null),
+        { product: approvedProduct },
+        liveData.products,
+      )
+    ) {
+      return Response.json(
+        {
+          error:
+            "Остаток предложенной краски обновился. Пересчитайте карточку — руководитель получит свежие варианты.",
+        },
+        { status: 409 },
+      );
+    }
+    approvedAlternative = approvedProduct.sku !== originalProduct.sku;
+    result.product = approvedProduct;
+
+    if (approvedAlternative) {
+      const sourceProduct = liveData.products.find(
+        (item) => item.sku === approvedProduct.sku,
+      );
+      if (sourceProduct) {
+        const formatted = new Intl.NumberFormat("ru-RU");
+        const checkedAt = new Intl.DateTimeFormat("ru-RU").format(new Date());
+        result.market = marketView(
+          sourceProduct,
+          liveData.market,
+          approvedProduct.requestedKg,
+        );
+        result.understood = understoodAfterProductChoice(
+          result.understood,
+          originalProduct,
+          approvedProduct,
+        );
+        result.businessContext = `Руководитель выбрал краску «${approvedProduct.name}». Каталог допускает её как замену для этой задачи. Склад подтверждает ${formatted.format(
+          approvedProduct.requestedKg,
+        )} кг.`;
+        result.zoneReason = `Руководитель выбрал замену: «${approvedProduct.name}». Весь объём подтверждён складом. Цена — ${formatted.format(
+          approvedProduct.pricePerKg,
+        )} ₽/кг.`;
+        result.managerNote =
+          "Выбранный вариант готов к резерву товара и отправке клиенту.";
+        result.checks = [
+          "Каталог допускает выбранную замену",
+          "Весь объём подтверждён складом",
+          `Цена ${formatted.format(
+            approvedProduct.pricePerKg,
+          )} ₽/кг сохраняет заработок завода`,
+          "Письмо соответствует выбранному варианту",
+        ];
+        result.decisionBasis = [
+          {
+            fact: `Каталог допускает краску «${approvedProduct.name}» как замену краске «${originalProduct.name}» для этой задачи.`,
+            source: "Каталог товаров и решение руководителя",
+            checkedAt,
+          },
+          {
+            fact: `Склад подтверждает весь объём: ${formatted.format(
+              approvedProduct.requestedKg,
+            )} из ${formatted.format(approvedProduct.stockKg)} кг.`,
+            source: "Живой склад",
+            checkedAt,
+            stockVersion: `Обновление склада №${sourceProduct.stockRevision}`,
+          },
+          {
+            fact: `Цена ${formatted.format(
+              approvedProduct.pricePerKg,
+            )} ₽/кг. Завод зарабатывает при цене от ${formatted.format(
+              sourceProduct.minPricePerKg,
+            )} ₽/кг.`,
+            source: "Карточка выбранной краски",
+            checkedAt,
+          },
+          ...(result.market.items.length
+            ? [
+                {
+                  fact: result.market.position,
+                  source: "Цены других поставщиков",
+                  checkedAt,
+                },
+              ]
+            : []),
+        ];
+        result.sources = Array.from(
+          new Set([
+            ...result.sources,
+            "Каталог товаров",
+            "Живой склад",
+            "Решение руководителя",
+            ...(result.market.items.length
+              ? ["Цены других поставщиков"]
+              : []),
+          ]),
+        );
+      }
+    }
+  }
+
   result.reply = {
-    subject: result.reply.subject,
+    subject:
+      approvedAlternative && result.product
+        ? `Предложение по заказу: ${result.product.name}`
+        : result.reply.subject,
     body: option.reply,
   };
+  const needsCustomerReply = optionNeedsCustomerReply(option);
+  if (needsCustomerReply) {
+    result.zone = "yellow";
+    result.decision = "clarify";
+    result.route = "needs_info";
+    result.missing = ["ответ клиента по выбранному варианту"];
+    result.zoneReason =
+      "Руководитель выбрал следующий ход. Агент подготовил короткий вопрос клиенту.";
+    result.managerNote =
+      "Отправьте подготовленный вопрос клиенту. Ответ продолжит эту карточку.";
+    result.review = {
+      ...result.review,
+      verdict: "Вопрос готов к отправке",
+      notes: [
+        "Вопрос соответствует выбранному варианту",
+        "Ответ клиента продолжит ту же карточку",
+      ],
+    };
+  }
+  const nextStatus = needsCustomerReply
+    ? "clarification_ready"
+    : "ready_to_send";
 
   const now = new Date().toISOString();
   const transitionGuard = and(
@@ -1385,7 +1696,7 @@ export async function PATCH(request: Request) {
       orderId: id,
       roundNo: order.roundNo,
       result,
-      status: "ready_to_send",
+      status: nextStatus,
       reason: "Вариант руководителя подтверждён",
       sourceKey: `approval:${order.roundNo}:${option.id}`,
       inventorySnapshot: order.inventorySnapshotJson ?? undefined,
@@ -1408,7 +1719,8 @@ export async function PATCH(request: Request) {
   const updateOrderQuery = db
     .update(orders)
     .set({
-      status: "ready_to_send",
+      status: nextStatus,
+      zone: result.zone,
       managerDecision: option.title,
       managerOptionId: option.id,
       managerDecidedAt: now,
@@ -1433,6 +1745,6 @@ export async function PATCH(request: Request) {
   return Response.json({
     ok: true,
     selected: option.title,
-    status: "ready_to_send",
+    status: nextStatus,
   });
 }

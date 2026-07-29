@@ -5,6 +5,7 @@ import {
   asksCompatibility,
   asksPaymentAfterDelivery,
   calculatedSurfaceQuantityFromText,
+  deliveryPlanFromText,
   explicitSkuFromText,
   fenceMaterialFromText,
   fenceMeasurementsFromText,
@@ -83,6 +84,51 @@ test("marks ambiguous environment and compatibility questions as gaps", () => {
   );
 });
 
+test("uses the latest customer reply for corrected order facts", () => {
+  const conversation = [
+    "Нужно 180 кг КР-099. Пока неизвестно, внутри или на улице.",
+    "Ответ клиента 1: Берём КР-001, 220 кг. Красить будем на улице.",
+  ].join("\n\n");
+
+  assert.equal(hasUsableEnvironment(conversation), true);
+  assert.equal(explicitSkuFromText(conversation), "КР-001");
+  assert.equal(matchProduct(conversation, demoData.products)?.sku, "КР-001");
+  assert.equal(quantityFromText(conversation), 220);
+});
+
+test("keeps the total volume when the customer names only the first delivery", () => {
+  const conversation = [
+    "Нужно 800 кг КР-001.",
+    "Ответ клиента 1: Для старта достаточно 200 кг, остальная краска нужна к 15 августа.",
+  ].join("\n\n");
+
+  assert.equal(quantityFromText(conversation), 800);
+});
+
+test("reads a first delivery after an explicit total in the same sentence", () => {
+  const facts = deliveryPlanFromText(
+    [
+      "Нужно 800 кг краски для металла на улице, цвет RAL 7024.",
+      "Ответ клиента 1: Меняем цвет на RAL 9005. Всего нужно 800 кг: 200 кг сейчас, остальные 600 кг позже.",
+    ].join("\n\n"),
+  );
+
+  assert.deepEqual(facts, {
+    totalKg: 800,
+    firstDeliveryKg: 200,
+    remainingKg: 600,
+  });
+});
+
+test("does not carry a resolved compatibility question into the current request", () => {
+  const conversation = [
+    "Подскажите, подходит ли покрытие для постоянного контакта с маслами?",
+    "Ответ клиента 1: Контакта с маслами не будет.",
+  ].join("\n\n");
+
+  assert.equal(asksCompatibility(conversation), false);
+});
+
 test("extracts the customer's target unit price", () => {
   assert.deepEqual(quotedUnitPrices("Цена не выше 320 ₽/кг."), [320]);
 });
@@ -102,6 +148,15 @@ test("understands everyday phrases about payment after delivery", () => {
     hasSpecialTerms("Оплатим заказ сегодня по выставленному счёту."),
     false,
   );
+});
+
+test("treats a supplier competition as special terms", () => {
+  for (const phrase of [
+    "Проводим конкурс поставщиков.",
+    "Условия конкурса поставщиков согласуем отдельно.",
+  ]) {
+    assert.equal(hasSpecialTerms(phrase), true, phrase);
+  }
 });
 
 test("does not read a budget in thousands as tonnes", () => {
@@ -156,6 +211,18 @@ test("calculates a complete wall or floor request from area", () => {
       reserve,
     ),
     0,
+  );
+});
+
+test("calculates a complete fence request from dimensions and painted sides", () => {
+  const woodPaint = demoData.products.find((product) => product.sku === "КР-005");
+  assert.equal(
+    calculatedSurfaceQuantityFromText(
+      "Деревянный забор длиной 30 м и высотой 1,8 м. Красим с двух сторон, цвет коричневый.",
+      woodPaint,
+      demoData.rules.calculationReservePercent,
+    ),
+    40,
   );
 });
 

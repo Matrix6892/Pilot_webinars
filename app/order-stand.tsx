@@ -24,6 +24,7 @@ import {
   hasSpecialTerms,
   hasUsableEnvironment,
   matchProduct,
+  orderFactsFromText,
   quantityFromText,
 } from "@/lib/order-facts.mjs";
 import { productInventoryChanged } from "@/lib/inventory-freshness.mjs";
@@ -282,9 +283,9 @@ function humanizeText(value: string) {
     .replace(
       /(\d[\d\s]*)\s*кг\s+остал(?:ось|ись)\s+после\s+резервов/giu,
       (_, quantity: string) =>
-        `После действующих резервов на складе осталось ${quantity.trim()} кг`,
+        `${quantity.trim()} кг осталось после других заказов`,
     )
-    .replace(/после резервов/gi, "после действующих резервов")
+    .replace(/после резервов/gi, "после других заказов")
     .replace(
       /вариант руководителя согласован/gi,
       "Руководитель подтвердил выбранный вариант",
@@ -398,7 +399,7 @@ function humanizeText(value: string) {
     .replace(/OpenCode разбирает письмо/gi, "Модель для заказов разбирает письмо")
     .replace(
       /ответ отправлен в демонстрации/gi,
-      "Ответ отправлен на стенде",
+      "Отправка ответа записана в журнале демонстрации",
     )
     .replace(
       /руководитель выбрал следующий ход/gi,
@@ -533,7 +534,12 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
   }
 
   const quantity = quantityFromText(text);
-  const product = matchProduct(text, demoData.products);
+  const fence = orderFactsFromText(text).fence;
+  const product =
+    matchProduct(text, demoData.products) ??
+    (fence && fence.material !== "неясно"
+      ? matchProduct(`${fence.material} забор на улице`, demoData.products)
+      : null);
   const calculatedQuantity = calculatedSurfaceQuantityFromText(
     text,
     product,
@@ -543,11 +549,21 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
   const photoNeedsPickup =
     Boolean(draft.attachment) && (!product || !routeQuantity);
 
-  if (
-    draft.demoKind === "fence-photo" ||
-    photoNeedsPickup ||
-    /забор|прикладываю фото|на фото/i.test(text)
-  ) {
+  if (fence) {
+    const missingFenceFacts = [
+      fence.material === "неясно" ? "материал" : "",
+      !fence.areaPerSideM2 ? "размеры" : "",
+      !fence.sides ? "стороны покраски" : "",
+      !hasColor(text) ? "цвет" : "",
+    ].filter(Boolean);
+    if (missingFenceFacts.length) {
+      return {
+        zone: "yellow",
+        label: "Похоже: нужны детали",
+        reason: `Агент уточнит ${missingFenceFacts.slice(0, 2).join(" и ")}, затем сам рассчитает количество.`,
+      } as const;
+    }
+  } else if (photoNeedsPickup) {
     return {
       zone: "yellow",
       label: "Похоже: нужны детали",
@@ -582,7 +598,7 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
     );
   }
   if (!routeQuantity) missing.push("агент рассчитает или уточнит количество");
-  if (!hasUsableEnvironment(text)) {
+  if (!fence && !hasUsableEnvironment(text)) {
     missing.push("уточним: улица или помещение");
   }
   if (!hasColor(text)) {
@@ -612,7 +628,12 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
 }
 
 function modelLabel(id?: string | null) {
-  if (id === "Готовая инструкция") return "Программа стенда";
+  if (
+    id === "Готовая инструкция" ||
+    id === "Расчёт по готовой инструкции"
+  ) {
+    return "Автоматическая обработка по правилам";
+  }
   return (
     modelCatalog.options.find((model) => model.id === id)?.label ??
     (id ? "Подключённая модель" : "—")
@@ -636,13 +657,13 @@ function statusLabel(status: string) {
     {
       queued: "Заявка принята",
       processing: "Готовим решение",
-      clarification_ready: "Вопросы готовы к отправке",
-      awaiting_customer: "Ожидаем ответ клиента",
+      clarification_ready: "Вопросы готовы к записи",
+      awaiting_customer: "Ждём ответ клиента",
       awaiting_approval: "Руководитель выбирает вариант",
-      ready_to_send: "Ответ готов · подготовьте резерв",
-      reserved: "Резерв подготовлен · можно отправить",
-      completed: "Ответ готов к отправке",
-      sent: "Отправка записана",
+      ready_to_send: "Ответ готов · подготовьте резерв товара",
+      reserved: "Резерв товара подготовлен · можно записать отправку",
+      completed: "Ответ готов",
+      sent: "Отправка ответа записана",
       error: "Можно запустить снова",
     }[status] ?? "Состояние обновлено"
   );
@@ -706,6 +727,8 @@ export function OrderStand() {
   const [error, setError] = useState("");
   const inventoryLoadedRef = useRef(false);
   const lastOrderStatusRef = useRef<string | null>(null);
+  const isComparativeStrongModel =
+    selectedModel === "opencode/gpt-5.6-sol";
   const closeModal = useCallback(() => setModal(null), []);
   const orderActionHeaders = useCallback(
     () => ({
@@ -1016,7 +1039,7 @@ export function OrderStand() {
       const data = (await response.json()) as { error?: string };
       if (!response.ok) {
         throw new Error(
-          data.error ?? "Обновите карточку и подготовьте резерв снова.",
+          data.error ?? "Обновите карточку и подготовьте резерв товара снова.",
         );
       }
       await loadOrder(orderId);
@@ -1025,7 +1048,7 @@ export function OrderStand() {
       setError(
         reserveError instanceof Error
           ? reserveError.message
-          : "Обновите карточку и подготовьте резерв снова.",
+          : "Обновите карточку и подготовьте резерв товара снова.",
       );
     } finally {
       setReserving(false);
@@ -1113,6 +1136,7 @@ export function OrderStand() {
           data.error ?? "Проверьте ответ клиента и продолжите карточку.",
         );
       }
+      setCustomerAnswer("");
       await loadOrder(orderId);
       await Promise.all([loadStats(), loadLedger()]);
     } catch (actionError) {
@@ -1419,16 +1443,29 @@ export function OrderStand() {
             <small>Агент отдела продаж</small>
           </span>
         </a>
-        <div className={`connection ${bridgeOnline ? "is-live" : ""}`}>
+        <div
+          className={`connection ${bridgeOnline ? "is-live" : ""}`}
+          role="status"
+          aria-live="polite"
+          aria-label={
+            bridgeOnline
+              ? "Режим: обработка моделью"
+              : "Режим: обработка по правилам"
+          }
+        >
           <span className="connection-dot" aria-hidden="true" />
-          <span>
+          <span aria-hidden="true">
             {bridgeOnline
-              ? "Модель для заказов подключена"
-              : "Агент ведёт заказ по готовой инструкции"}
+              ? "Режим: обработка моделью"
+              : "Режим: обработка по правилам"}
           </span>
         </div>
-        <a className="topbar-link" href="#day-result">
-          Результат дня
+        <a
+          className="topbar-link"
+          href="#compose"
+          aria-label="Создать заявку"
+        >
+          Создать заявку
         </a>
       </header>
 
@@ -1440,31 +1477,37 @@ export function OrderStand() {
               Клиент пишет своими словами. Агент ведёт заказ до письма клиенту
             </h1>
             <p className="hero-lead">
-              Агент понимает задачу, проверяет живой склад и цены других
-              поставщиков, собирает сведения о компании, предлагает следующий
-              шаг и сохраняет всю работу. В живом режиме модели сами изучают
-              фото и открывают источники. На стенде заявку создаёт форма ниже;
-              в рабочей системе цепочку запускает письмо клиента.
+              {bridgeOnline
+                ? "Агент понимает задачу, проверяет живой склад и учебные цены поставщиков, при необходимости ищет открытые сведения о компании, предлагает следующий шаг и сохраняет ключевые действия."
+                : "Агент понимает задачу, проверяет живой склад и учебные цены поставщиков, использует подготовленные сведения о компании, предлагает следующий шаг и сохраняет ключевые действия."}{" "}
+              В живом режиме модель описывает фото. Агент ищет открытые
+              сведения, когда в заявке есть сайт, ИНН или особое условие;
+              найденные ссылки остаются для проверки. На стенде заявку создаёт
+              форма ниже; в рабочей системе цепочку запускает письмо клиента.
             </p>
           </div>
 
           <div className="system-map" aria-label="Путь заказа">
             <article>
               <span>01</span>
-              <strong>Письмо или фото</strong>
-              <small>Клиент описывает задачу своими словами</small>
+              <strong>Описание заказа и фото</strong>
+              <small>Клиент пишет своими словами и при желании добавляет снимок</small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>02</span>
               <strong>Понимание задачи</strong>
-              <small>Текст и фото превращаются в факты и вопросы</small>
+              <small>
+                {bridgeOnline
+                  ? "Текст и фото превращаются в факты и вопросы"
+                  : "Текст превращается в факты и вопросы, фото остаётся в карточке"}
+              </small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>03</span>
               <strong>Проверенные данные</strong>
-              <small>Каталог, остаток и цены других поставщиков</small>
+              <small>Каталог, остаток и учебные цены поставщиков</small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
@@ -1481,14 +1524,14 @@ export function OrderStand() {
             <i aria-hidden="true">→</i>
             <article>
               <span>06</span>
-              <strong>Письмо и продолжение</strong>
-              <small>Клиент получает ответ и продолжает ту же карточку</small>
+              <strong>Ответ и продолжение</strong>
+              <small>Стенд пишет ответ в журнал; клиент продолжает ту же карточку</small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>07</span>
               <strong>Журнал и таблица</strong>
-              <small>Каждый шаг виден команде и попадает в дневную выгрузку</small>
+              <small>Ключевые действия видны команде и попадают в дневную выгрузку</small>
             </article>
           </div>
 
@@ -1498,27 +1541,41 @@ export function OrderStand() {
               <li>
                 <strong>
                   {bridgeOnline
-                    ? "Недорогая модель ведёт заказ"
-                    : "Агент ведёт заказ по готовой инструкции"}
+                    ? isComparativeStrongModel
+                      ? "GPT-5.6 Sol обрабатывает заказ для сравнения"
+                      : `${modelLabel(selectedModel)} обрабатывает заказ`
+                    : "Автоматическая обработка по правилам"}
                 </strong>
                 <small>
                   {bridgeOnline
-                    ? "Читает письмо, выбирает источники и готовит ответ."
-                    : "Программа стенда применяет правила сильной модели к заявке и живому складу."}
+                    ? isComparativeStrongModel
+                      ? "Та же модель отдельно ведёт заказ и отдельно проверяет готовое решение."
+                      : "Читает письмо, выбирает источники и готовит ответ по заданным правилам."
+                    : "Система обрабатывает заявку по заданным правилам и текущим данным склада."}
                 </small>
               </li>
               <li>
-                <strong>Модель для фото описывает видимое</strong>
+                <strong>
+                  {bridgeOnline
+                    ? "Модель для фото описывает видимое"
+                    : "Фото сохраняется в карточке"}
+                </strong>
                 <small>
-                  Описывает видимые детали. Материал и размеры подтверждает
-                  клиент.
+                  {bridgeOnline
+                    ? "Описывает видимые детали. Материал и размеры подтверждает клиент."
+                    : "Система задаёт вопросы о материале, размерах и окрашиваемых сторонах по тексту заявки."}
                 </small>
               </li>
               <li>
-                <strong>Сильная модель готовит правила</strong>
+                <strong>
+                  {bridgeOnline
+                    ? "Модель проверки отдельно сверяет решение"
+                    : "GPT-5.6 Sol заранее подготовила правила"}
+                </strong>
                 <small>
-                  Пишет инструкцию, проверяет решения и предлагает улучшения по
-                  журналу.
+                  {bridgeOnline
+                    ? "По умолчанию GPT-5.6 Sol проверяет факты, числа и обещания отдельным запуском."
+                    : "Обработка по правилам сверяется с живым складом. Ведущий подключает модели для отдельной проверки решения."}
                 </small>
               </li>
               <li>
@@ -1536,13 +1593,13 @@ export function OrderStand() {
               </li>
             </ul>
             <details className="technical-layer">
-              <summary>Как стенд запущен сейчас</summary>
+              <summary>Как работает демонстрация</summary>
               <p>
                 {bridgeOnline
-                  ? "На компьютере ведущего программа OpenCode запускает выбранную модель. База хранит карточки и журнал."
-                  : "Стенд выполняет тот же путь по готовой инструкции и живым данным. При необходимости ведущий подключает OpenCode — программу для запуска выбранной модели."}{" "}
-                Корпоративная версия получает и отправляет письма через почтовый
-                ящик компании.
+                  ? "Компьютер ведущего запускает выбранную модель. Сайт хранит карточки и журнал."
+                  : "Сайт обрабатывает заявки по тем же правилам и живым данным склада."}{" "}
+                В рабочей системе письмо из почтового ящика создаёт заявку, а
+                готовый ответ уходит с корпоративной почты.
               </p>
             </details>
           </div>
@@ -1558,7 +1615,7 @@ export function OrderStand() {
             </button>
             <button type="button" onClick={() => setModal("instructions")}>
               <span>Три правила</span>
-              Инструкция сильной модели
+              Правила работы агента
             </button>
             <a href="#day-result">
               <span>Результат дня</span>
@@ -1593,10 +1650,10 @@ export function OrderStand() {
             <h2>Передайте первую заявку агенту</h2>
           </div>
           <p>
-            На стенде заявку создаёт форма: выберите готовый пример и передайте
-            его агенту. В наборе «Нужны детали» фотография забора уже
-            приложена. В рабочей системе карточку создаёт письмо из ящика
-            компании.
+            На стенде заявку создаёт форма. Выберите готовый пример или
+            заполните заявку своими словами. В наборе «Покупателю нужна помощь
+            с выбором» фото забора уже приложено. В рабочей системе карточку
+            создаёт письмо из ящика компании.
           </p>
         </section>
 
@@ -1748,7 +1805,7 @@ export function OrderStand() {
                       <strong>{draft.attachment.name}</strong>
                       <small>
                         {bridgeOnline
-                          ? "Недорогая модель опишет, что видно на снимке. Из чего сделан объект, его размеры и стороны покраски подтвердит клиент."
+                          ? "Модель для фото опишет видимые детали. Материал, размеры и стороны покраски подтвердит клиент."
                           : "Фото сохранится в карточке. Агент задаст вопросы о материале, размерах и сторонах покраски."}
                       </small>
                       <button
@@ -1775,24 +1832,32 @@ export function OrderStand() {
               )}
 
               <div className="mail-model">
-                <label>
-                  <span>Модель для ежедневных заказов</span>
-                  <select
-                    value={selectedModel}
-                    onChange={(event) => setSelectedModel(event.target.value)}
-                    disabled={!bridgeOnline}
-                  >
-                    {modelCatalog.options.map((model) => (
-                      <option value={model.id} key={model.id}>
-                        {model.label} · {model.note}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {bridgeOnline ? (
+                  <label>
+                    <span>Модель для ежедневных заказов</span>
+                    <select
+                      value={selectedModel}
+                      onChange={(event) => setSelectedModel(event.target.value)}
+                    >
+                      {modelCatalog.options.map((model) => (
+                        <option value={model.id} key={model.id}>
+                          {model.label} · {model.note}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <div className="mail-model-status">
+                    <span>Обработка заявки</span>
+                    <strong>Подготовленные правила и живой склад</strong>
+                  </div>
+                )}
                 <small>
                   {bridgeOnline
-                    ? "Выбранная недорогая модель выполнит инструкцию, которую подготовила и проверила сильная модель."
-                    : "Сейчас агент ведёт заказ по подготовленным правилам. Подключение моделей доступно ведущему."}
+                    ? isComparativeStrongModel
+                      ? "GPT-5.6 Sol ведёт заказ для сравнения. Затем отдельный запуск проверяет факты, числа и условия."
+                      : `${modelLabel(selectedModel)} обрабатывает ежедневный заказ. GPT-5.6 Sol отдельно проверяет факты, числа и условия.`
+                    : "Ведущий подключает ежедневную модель и отдельную проверку для живого прохода."}
                 </small>
               </div>
 
@@ -1859,15 +1924,15 @@ export function OrderStand() {
                   <li>
                     <span aria-hidden="true">•</span>
                     <strong>Проверка фактов</strong>
-                    <small>Каталог, живой остаток и цены других поставщиков</small>
+                    <small>Каталог, живой остаток и учебные цены поставщиков</small>
                   </li>
                   <li>
                     <span aria-hidden="true">•</span>
                     <strong>Сведения о клиенте</strong>
                     <small>
                       {bridgeOnline
-                        ? "Модель для заказов проверяет сайт, ИНН и открытые источники"
-                        : "Подготовленный пример показывает три заранее проверенных источника"}
+                        ? "Модель ищет сведения по сайту, ИНН и названию; ссылки остаются для проверки"
+                        : "Некоторые примеры показывают подготовленные сведения и ссылки"}
                     </small>
                   </li>
                   <li>
@@ -1875,7 +1940,7 @@ export function OrderStand() {
                     <strong>Проверка решения</strong>
                     <small>
                       {bridgeOnline
-                        ? "Сильная модель проверяет факты и обещания, затем отмечает решения для руководителя"
+                        ? "Модель проверки сверяет факты, обещания и решения для руководителя"
                         : "Программа проверяет числа, условия и правила"}
                     </small>
                   </li>
@@ -1907,7 +1972,7 @@ export function OrderStand() {
                               order?.requestedModel ??
                               selectedModel,
                           )
-                        : "Расчёт по готовой инструкции"}
+                        : "Автоматическая обработка по правилам"}
                     </small>
                     {order?.body && (
                       <p className="order-card-preview">
@@ -1932,7 +1997,7 @@ export function OrderStand() {
                 <div
                   className="progress-track"
                   role="progressbar"
-                  aria-label="Готовность карточки"
+                  aria-label="Ход обработки заявки"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={progress}
@@ -2041,27 +2106,37 @@ export function OrderStand() {
           <div className="control-intro">
             <p className="eyebrow">
               {bridgeOnline
-                ? "Как недорогая модель ведёт заказ"
-                : "Как агент ведёт заказ по готовым правилам"}
+                ? isComparativeStrongModel
+                  ? "Сравнение моделей"
+                  : "Ежедневная модель и отдельная проверка"
+                : "Автоматическая обработка по правилам"}
             </p>
             <h2>
               {bridgeOnline
-                ? "Инструкция, сильная проверка и программа отвечают за качество"
+                ? "Рабочая модель действует по правилам, модель проверки сверяет решение"
                 : "Готовые правила, точные факты и журнал отвечают за качество"}
             </h2>
             <p>
               {bridgeOnline
-                ? "Недорогая модель выполняет понятную инструкцию. Сильная модель проверяет факты и обещания, затем отмечает решения для руководителя. Программа подтверждает цены и остатки перед каждым действием."
-                : "Сейчас агент стенда читает заявку, сверяет склад и собирает ответ по подготовленным правилам. При подключении программа запускает модель для заказов и сильную проверку."}
+                ? isComparativeStrongModel
+                  ? "GPT-5.6 Sol сначала обрабатывает заказ, затем новым запуском проверяет готовое решение. Программа подтверждает цены и остатки перед каждым действием."
+                  : `${modelLabel(selectedModel)} обрабатывает заказ по готовым правилам. GPT-5.6 Sol отдельно проверяет факты и обещания. Программа подтверждает цены и остатки перед каждым действием.`
+                : "Система читает заявку, сверяет склад и собирает ответ по подготовленным правилам. При подключении моделей сохраняется тот же путь и те же проверки."}
             </p>
           </div>
           <div className="control-grid">
             <article>
-              <span>Ежедневная работа</span>
+              <span>
+                {bridgeOnline && isComparativeStrongModel
+                  ? "Сравнительный запуск"
+                  : "Ежедневная работа"}
+              </span>
               <strong>
                 {bridgeOnline
-                  ? "Недорогая модель ведёт заказ"
-                  : "Агент выполняет готовую инструкцию"}
+                  ? isComparativeStrongModel
+                    ? "GPT-5.6 Sol обрабатывает заказ"
+                    : `${modelLabel(selectedModel)} обрабатывает заказ`
+                  : "Система обрабатывает заказ по правилам"}
               </strong>
               <p>
                 {bridgeOnline
@@ -2073,11 +2148,15 @@ export function OrderStand() {
             </article>
             <article>
               <span>Подготовка и контроль</span>
-              <strong>Сильная модель готовит правила</strong>
+              <strong>
+                {bridgeOnline
+                  ? "Модель проверки отдельно сверяет решение"
+                  : "GPT-5.6 Sol подготовила правила"}
+              </strong>
               <p>
                 {bridgeOnline
-                  ? "GPT-5.6 Sol подготовила инструкцию и критерии проверки. В подключённом режиме сильная модель проверяет факты и обещания каждого ответа. После показа команда передаст ей журнал и рассмотрит предложения по правилам."
-                  : "GPT-5.6 Sol заранее подготовила инструкцию и критерии проверки. После показа команда передаст ей журнал всех заказов и рассмотрит предложения по правилам."}
+                  ? "GPT-5.6 Sol подготовила правила и критерии. По умолчанию она же отдельным запуском проверяет факты и обещания каждого ответа. Команда может передать журнал модели и получить предложения; руководитель выбирает правки."
+                  : "GPT-5.6 Sol заранее подготовила правила и критерии. Команда может передать журнал модели и получить предложения; руководитель выбирает правки."}
               </p>
               <button type="button" onClick={() => setModal("instructions")}>
                 Открыть три правила
@@ -2252,7 +2331,10 @@ function ResultPanel({
   onCustomerAnswerChange: (value: string) => void;
   onOpenCatalog: () => void;
 }) {
-  const [selectedOption, setSelectedOption] = useState("");
+  const [selectedOption, setSelectedOption] = useState({
+    key: "",
+    id: "",
+  });
   const [inventoryTransition, setInventoryTransition] = useState<{
     beforeStockKg: number;
     afterStockKg: number;
@@ -2293,8 +2375,13 @@ function ResultPanel({
     order.status,
   );
   const reservePrepared = ["reserved", "sent"].includes(order.status);
+  const optionSetKey = `${order.id}:${order.roundNo ?? 1}:${
+    order.managerDecision ?? ""
+  }:${result.options.map((option) => option.id).join("|")}`;
+  const selectedOptionId =
+    selectedOption.key === optionSetKey ? selectedOption.id : "";
   const selectedManagerOption =
-    result.options.find((option) => option.id === selectedOption) ?? null;
+    result.options.find((option) => option.id === selectedOptionId) ?? null;
   const checks = positiveChecks(result);
   const insights = [
     result.market.checked
@@ -2550,9 +2637,15 @@ function ResultPanel({
             <p>
               {humanizeText(
                 result.route === "manager"
-                  ? "Выберите один вариант ниже. Агент покажет готовое письмо и последствия для клиента и завода."
+                  ? order.managerDecision
+                    ? order.status === "sent"
+                      ? "Решение выполнено, отправка ответа записана в журнал."
+                      : order.status === "reserved"
+                        ? "Резерв товара подготовлен. Запишите отправку согласованного письма."
+                        : "Решение подтверждено. Подготовьте резерв товара."
+                    : "Выберите один вариант ниже. Агент покажет готовое письмо и последствия для клиента и завода."
                   : result.route === "ready" && !result.research?.checked
-                    ? "Проверьте готовое письмо и отправьте его клиенту."
+                    ? "Проверьте готовое письмо и подготовьте резерв товара."
                     : result.managerNote,
               )}
             </p>
@@ -2630,8 +2723,9 @@ function ResultPanel({
             )}
             {!usesOpenCode(order.mode) && (
               <small className="research-mode-note">
-                Карточка уже содержит проверенные источники. При подключении
-                модель для заказов открывает страницы и сохраняет ссылки.
+                Карточка использует подготовленные источники. При подключении
+                модель для заказов может проверить сайт, ИНН или особое условие
+                и сохранит найденные ссылки для проверки.
               </small>
             )}
           </div>
@@ -2800,7 +2894,7 @@ function ResultPanel({
             {result.options.map((option, index) => (
               <label
                 className={`option-card ${
-                  selectedOption === option.id ? "is-selected" : ""
+                  selectedOptionId === option.id ? "is-selected" : ""
                 }`}
                 key={option.id}
               >
@@ -2808,8 +2902,10 @@ function ResultPanel({
                   type="radio"
                   name={`decision-${order.id}`}
                   value={option.id}
-                  checked={selectedOption === option.id}
-                  onChange={() => setSelectedOption(option.id)}
+                  checked={selectedOptionId === option.id}
+                  onChange={() =>
+                    setSelectedOption({ key: optionSetKey, id: option.id })
+                  }
                 />
                 <span className="option-number">0{index + 1}</span>
                 <h4>{humanizeText(option.title)}</h4>
@@ -2834,9 +2930,9 @@ function ResultPanel({
           <button
             className="approve-button"
             type="button"
-            onClick={() => onApprove(selectedOption)}
+            onClick={() => onApprove(selectedManagerOption?.id ?? "")}
             disabled={
-              !selectedOption ||
+              !selectedManagerOption ||
               Boolean(approving) ||
               inventoryChanged ||
               !canManageOrder
@@ -2869,20 +2965,20 @@ function ResultPanel({
             }`}
           >
             {sent
-              ? "Отправка записана"
+              ? "Отправка ответа записана"
               : inventoryChanged
                 ? "Склад обновился · обновите черновик"
               : reserved
-                ? "Резерв под договор подготовлен"
+                ? "Резерв товара подготовлен"
               : waitingForCustomer
-                ? "Вопросы записаны · ожидаем ответ"
-                : canClarify
-                  ? "Вопросы готовы к отправке"
+                ? "Вопросы записаны · ждём ответ клиента"
+                : order.status === "clarification_ready"
+                  ? "Вопросы готовы к записи"
                 : order.status === "awaiting_approval"
                 ? "Руководитель выбирает вариант"
                 : order.managerDecision
-                  ? "Вариант подтверждён · подготовьте резерв"
-                  : "Ответ проверен · подготовьте резерв"}
+                  ? "Вариант подтверждён · подготовьте резерв товара"
+                  : "Ответ проверен · подготовьте резерв товара"}
           </div>
         </div>
         {responsePrepared && (
@@ -2907,7 +3003,7 @@ function ResultPanel({
               }
             >
               <span>2</span>
-              <strong>Резерв под договор</strong>
+              <strong>Резерв товара</strong>
             </li>
             <li
               className={sent ? "is-done" : reserved ? "is-current" : ""}
@@ -2930,8 +3026,8 @@ function ResultPanel({
               disabled={clarifying}
             >
               {clarifying
-                ? "Отправляем вопросы на стенде…"
-                : "Отправить вопросы на стенде"}
+                ? "Записываем вопросы…"
+                : "Записать вопросы в журнал демонстрации"}
             </button>
             <small>
               Кнопка добавляет вопросы в общий журнал. В рабочей системе письмо
@@ -2943,12 +3039,12 @@ function ResultPanel({
           <div className="reply-action">
             <button type="button" onClick={onReserve} disabled={reserving}>
               {reserving
-                ? "Готовим резерв под договор…"
-                : "Подготовить резерв под договор"}
+                ? "Готовим резерв товара…"
+                : "Подготовить резерв товара"}
             </button>
             <small>
-              Стенд подготовит запись резерва и сохранит её в журнале. Рабочая
-              система передаст запись в учётную систему компании.
+              Стенд сохранит подготовленный резерв в журнале. Рабочая система
+              передаст его в учётную систему компании.
             </small>
           </div>
         )}
@@ -2956,8 +3052,8 @@ function ResultPanel({
           <div className="reply-action">
             <button type="button" onClick={onSend} disabled={sending}>
               {sending
-                ? "Отправляем ответ на стенде…"
-                : "Отправить ответ на стенде"}
+                ? "Записываем отправку ответа…"
+                : "Записать отправку ответа"}
             </button>
             <small>
               Кнопка добавляет письмо в общий журнал. В рабочей системе оно
@@ -2967,7 +3063,7 @@ function ResultPanel({
         )}
         {sent && (
           <div className="sent-note">
-            Отправка записана. Карточка вошла в результат дня.
+            Отправка ответа записана. Карточка вошла в результат дня.
           </div>
         )}
       </div>
@@ -3024,8 +3120,8 @@ function ResultPanel({
         ))}
         <small>
           {usesOpenCode(order.mode)
-            ? `Заказ ведёт: ${modelLabel(order.agentModel)} · решение проверяет: ${modelLabel(order.reviewerModel)}`
-            : "Расчёт по готовым правилам и живому складу"}
+            ? `Заявку обрабатывает: ${modelLabel(order.agentModel)} · проверяет: ${modelLabel(order.reviewerModel)}`
+            : "Автоматическая обработка по правилам и живому складу"}
         </small>
       </div>
     </div>
@@ -3215,7 +3311,7 @@ function LiveInventoryPanel({
       <div className="live-inventory-intro">
         <p className="eyebrow">Живой склад меняет решение</p>
         <h2 id="live-inventory-title">
-          Ведущий меняет остаток — агент сам пересчитывает заказ
+          Измените остаток — агент пересчитает активную карточку
         </h2>
         <p>
           Новый остаток сразу появляется в открытой карточке. У ведущего
@@ -3412,18 +3508,33 @@ function LedgerTable({
         item.company || "Частный покупатель",
       ]),
     );
-    const eventActor = (stage: string) => {
+    const eventActor = (stage: string, title: string) => {
       if (stage === "customer-reply") return "Клиент";
       if (["approval", "approve", "approved"].includes(stage)) {
         return "Руководитель";
       }
-      if (["review", "review-result", "review-fallback"].includes(stage)) {
-        return "Сильная модель";
+      if (["vision", "vision-result"].includes(stage)) {
+        return "Модель для фотографий";
       }
+      if (stage === "review-result") return "Модель проверки";
+      if (stage === "review") {
+        return /модел/iu.test(title)
+          ? "Модель проверки"
+          : "Программа проверки";
+      }
+      if (stage === "review-fallback") return "Программа проверки";
       if (
-        ["received", "fallback", "retry", "error", "recalculate"].includes(
-          stage,
-        )
+        [
+          "received",
+          "fallback",
+          "retry",
+          "error",
+          "recalculate",
+          "vision-fallback",
+          "research-fallback",
+          "primary-retry",
+          "model",
+        ].includes(stage)
       ) {
         return "Программа стенда";
       }
@@ -3434,16 +3545,25 @@ function LedgerTable({
       if (["approval", "approve", "approved"].includes(stage)) {
         return "Решение руководителя";
       }
+      if (stage === "reserve") return "Резерв товара";
       if (stage === "sent" || stage === "clarification-sent") {
-        return "Отправка на стенде";
+        return "Запись отправки";
       }
       if (stage === "recalculate") return "Пересчёт заказа";
       if (stage === "inventory") return "Проверка склада";
       if (stage === "market") return "Проверка цены";
       if (stage === "company-context") return "Сведения о компании";
       if (stage === "source-plan") return "Выбор данных";
+      if (stage === "model") return "Выбор модели";
+      if (["vision", "vision-result"].includes(stage)) {
+        return "Осмотр фотографии";
+      }
+      if (stage === "vision-fallback") return "Вопросы по фотографии";
       if (["review", "review-result", "review-fallback"].includes(stage)) {
         return "Проверка ответа";
+      }
+      if (["research-fallback", "primary-retry"].includes(stage)) {
+        return "Продолжение работы";
       }
       if (["research", "research-result"].includes(stage)) {
         return "Поиск сведений";
@@ -3492,10 +3612,10 @@ function LedgerTable({
         id: `event:${item.id}`,
         createdAt: item.createdAt,
         kind: eventKind(item.stage),
-        actor: eventActor(item.stage),
+        actor: eventActor(item.stage, item.title),
         orderId: item.orderId,
         company:
-          companiesByOrderId.get(item.orderId) ?? "Частный покупатель",
+          companiesByOrderId.get(item.orderId) ?? "Частный клиент",
         title: humanizeText(item.title),
         detail: humanizeText(item.detail),
         outcome: item.state === "error" ? "Можно запустить снова" : "Сохранено",
@@ -3548,8 +3668,9 @@ function LedgerTable({
           <h3 id="ledger-title">Работа за сегодня в одной таблице</h3>
           <p>
             Обращение клиента, шаги агента, решения, черновики ответов и
-            изменения склада попадают сюда сами. У каждой строки есть номер
-            карточки — по нему открывается вся карточка.
+            изменения склада попадают сюда сами. У строк заказа есть номер
+            карточки — по нему открывается вся карточка. Изменения относятся
+            ко всему складу.
           </p>
         </div>
         <div className="ledger-actions">
@@ -3738,7 +3859,7 @@ function Modal({
 
   const titles = {
     catalog: "Каталог и остатки",
-    instructions: "Инструкции модели",
+    instructions: "Правила обработки заявок",
     order: "Заявка глазами агента",
   };
 
@@ -3771,8 +3892,8 @@ function Modal({
         {name === "catalog" && (
           <>
             <p className="modal-lead">
-              Это живые остатки стенда: агент читает их перед каждым новым
-              расчётом, а ведущий может изменить их во время показа. Карточка
+              Агент читает живые остатки перед каждым новым расчётом. Ведущий
+              может изменить их во время показа. Карточка
               сохраняет краску, остаток и время расчёта, поэтому основание
               решения всегда видно.
             </p>
@@ -3833,10 +3954,9 @@ function Modal({
         {name === "instructions" && (
           <>
             <p className="modal-lead">
-              GPT-5.6 Sol подготовила и проверила инструкцию. Когда модель для
-              заказов подключена, инструкцию выполняет она. Когда подключения
-              нет, агент стенда рассчитывает заявку по тем же правилам и
-              живому складу.
+              GPT-5.6 Sol подготовила правила и критерии проверки. Подключённая
+              модель обрабатывает заказ по этим правилам. Автоматический режим
+              применяет те же правила к живому складу.
             </p>
             <ol className="plain-rules">
               <li>
@@ -3859,7 +3979,7 @@ function Modal({
               </li>
             </ol>
             <details className="technical-instructions">
-              <summary>Технические инструкции для настройки</summary>
+              <summary>Материалы для настройки системы</summary>
               <p>
                 Эти файлы задают точный формат работы моделей. Они пригодятся
                 команде, которая будет настраивать рабочую систему.
@@ -3868,7 +3988,7 @@ function Modal({
                 <a href="/prompts/sales-agent.md" target="_blank">
                   <span>01</span>
                   <div>
-                    <strong>Недорогая модель ведёт заказ</strong>
+                    <strong>Модель обработки заказов</strong>
                     <small>
                       Письмо, источники, следующий шаг и готовое действие
                     </small>
@@ -3877,7 +3997,7 @@ function Modal({
                 <a href="/prompts/reviewer.md" target="_blank">
                   <span>02</span>
                   <div>
-                    <strong>Сильная модель проверяет решение</strong>
+                    <strong>Модель проверки</strong>
                     <small>Факты, обещания и решения для руководителя</small>
                   </div>
                 </a>
@@ -3886,7 +4006,7 @@ function Modal({
                   <div>
                     <strong>Команда улучшает правила по журналу</strong>
                     <small>
-                      Сильная модель предлагает правки, руководитель принимает
+                      GPT-5.6 Sol предлагает правки, руководитель принимает
                       новую редакцию
                     </small>
                   </div>
@@ -3924,7 +4044,7 @@ function Modal({
                 <strong>
                   {usesOpenCode(order.mode)
                     ? "Подключённая модель для заказов"
-                    : "Расчёт по готовым правилам и живому складу"}
+                    : "Автоматическая обработка по правилам и живому складу"}
                 </strong>
               </article>
             </div>

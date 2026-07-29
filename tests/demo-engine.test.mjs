@@ -63,6 +63,7 @@ test("does not claim that a photo was received when the attachment is absent", (
   assert.equal(result.route, "needs_info");
   assert.doesNotMatch(result.understood.join(" "), /фотограф.*получен/i);
   assert.doesNotMatch(result.reply.body, /фото приложено/i);
+  assert.doesNotMatch(result.businessContext, /фото/iu);
   assert.match(
     result.reply.body,
     /приложите фотографию, которую упомянули в письме/iu,
@@ -130,6 +131,95 @@ test("calculates fence paint by area, coats, reserve and whole packages", () => 
   assert.match(result.calculation?.explanation ?? "", /2 слоя/i);
   assert.match(result.calculation?.explanation ?? "", /10% запаса/i);
   assert.match(result.calculation?.explanation ?? "", /4 упаковки/i);
+});
+
+test("does not offer a paint replacement without recalculating a large fence", () => {
+  const result = buildDemoResult({
+    subject: "Краска для большого забора",
+    body: "Металлический забор длиной 500 м и высотой 2 м. Красим с одной стороны, цвет серый. Забор стоит на улице.",
+  });
+
+  assert.equal(result.route, "manager");
+  assert.equal(result.product?.sku, "КР-001");
+  assert.equal(result.product?.requestedKg, 400);
+  assert.equal(result.calculation?.paintAreaM2, 1000);
+  assert.equal(
+    result.options.some((option) => option.id === "замена-краски"),
+    false,
+  );
+});
+
+test("offers a stocked replacement only when it has the requested color", () => {
+  const unavailableColor = buildDemoResult({
+    subject: "Большой заказ краски для металла",
+    body: "Нужны 800 кг тёмно-серой краски для металла на улице, цвет RAL 7024.",
+  });
+  const availableColor = buildDemoResult({
+    subject: "Большой заказ краски для металла",
+    body: "Нужны 800 кг чёрной краски для металла на улице, цвет RAL 9005.",
+  });
+
+  assert.equal(unavailableColor.route, "manager");
+  assert.equal(
+    unavailableColor.options.some((option) => option.id === "замена-краски"),
+    false,
+  );
+  assert.equal(
+    availableColor.options.some((option) => option.id === "замена-краски"),
+    true,
+  );
+});
+
+test("keeps a corrected color and the customer's delivery plan in the replacement letter", () => {
+  const result = buildDemoResult({
+    subject: "Заказ краски для металла",
+    body: [
+      "Нужно 800 кг краски для металла на улице, цвет RAL 7024.",
+      "Ответ клиента 1: Меняем цвет на RAL 9005. Всего нужно 800 кг: 200 кг сейчас, остальные 600 кг позже.",
+    ].join("\n\n"),
+  });
+  const replacement = result.options.find(
+    (option) => option.id === "замена-краски",
+  );
+
+  assert.equal(result.route, "manager");
+  assert.equal(result.product?.requestedKg, 800);
+  assert.equal(result.product?.firstDeliveryKg, 200);
+  assert.equal(result.product?.color, "RAL 9005");
+  assert.ok(replacement);
+  assert.match(replacement.reply, /RAL 9005/u);
+  assert.doesNotMatch(replacement.reply, /RAL 7024/u);
+  assert.match(replacement.reply, /200 кг[^.]*первой поставки/iu);
+  assert.match(replacement.reply, /600 кг[^.]*следующей/iu);
+  assert.match(
+    result.options.find((option) => option.id === "две-поставки")?.reply ?? "",
+    /200 кг сейчас и 600 кг/iu,
+  );
+});
+
+test("keeps the first delivery after the warehouse grows to the full order", () => {
+  const catalogWithFullStock = {
+    ...baseCatalog,
+    products: baseCatalog.products.map((product) =>
+      product.sku === "КР-001" ? { ...product, stockKg: 900 } : product,
+    ),
+  };
+  const result = buildDemoResult(
+    {
+      subject: "Заказ краски для металла",
+      body: [
+        "Нужно 800 кг краски для металла на улице, цвет RAL 9005.",
+        "Ответ клиента 1: Нужно 200 кг сейчас, остальное позже.",
+      ].join("\n\n"),
+    },
+    catalogWithFullStock,
+  );
+
+  assert.equal(result.route, "ready");
+  assert.equal(result.product?.requestedKg, 800);
+  assert.equal(result.product?.firstDeliveryKg, 200);
+  assert.match(result.reply.body, /200 кг/iu);
+  assert.match(result.reply.body, /600 кг/iu);
 });
 
 test("calculates wall paint from area and material without asking for a model or weight", () => {
@@ -337,6 +427,42 @@ test("uses positive, readable checks in standard and manager routes", () => {
   );
 });
 
+test("states the exact nearby market difference in both directions", () => {
+  const input = {
+    subject: "Краска для ограждений",
+    body: "Нужны 200 кг краски для металлических ограждений на улице, цвет RAL 7024.",
+  };
+  const belowMarket = structuredClone(baseCatalog);
+  belowMarket.products = belowMarket.products.map((product) =>
+    product.sku === "КР-001"
+      ? { ...product, pricePerKg: 345 }
+      : product,
+  );
+
+  const above = buildDemoResult(input);
+  const below = buildDemoResult(input, belowMarket);
+
+  assert.equal(
+    above.market.position,
+    "Наша цена 349 ₽/кг, на 2 ₽ выше средней цены других поставщиков. Цена близка к рынку. Весь объём подтверждён складом.",
+  );
+  assert.equal(
+    below.market.position,
+    "Наша цена 345 ₽/кг, на 2 ₽ ниже средней цены других поставщиков. Цена выглядит привлекательно. Весь объём подтверждён складом.",
+  );
+  assert.match(
+    `${above.market.position} ${below.market.position}`,
+    /близка к рынку/iu,
+  );
+});
+
+test("uses a direct rule for manager choices", () => {
+  assert.equal(
+    baseCatalog.rules.plainPolicy[2],
+    "Руководитель выбирает скидку, оплату после поставки, условие о задержке, условия конкурса поставщиков и срок срочной поставки.",
+  );
+});
+
 test("explains a high market position through confirmed value and the next profit move", () => {
   const result = buildDemoResult({
     subject: "Краска для пола цеха",
@@ -344,13 +470,47 @@ test("explains a high market position through confirmed value and the next profi
   });
 
   assert.equal(result.route, "ready");
-  assert.match(
+  assert.equal(
     result.market.position,
-    /цена выше большинства показанных предложений.*весь объём и срок поставки подтверждены/iu,
+    "Наша цена 415 ₽/кг, на 13 ₽ выше цены другого поставщика. Агент покажет клиенту наличие, срок и свойства краски. Весь объём подтверждён складом.",
   );
   assert.equal(
     result.market.profitOpportunity,
     "Заработать больше поможет крупный заказ или удобный график поставки.",
+  );
+
+  const equalPriceCatalog = structuredClone(baseCatalog);
+  equalPriceCatalog.products = equalPriceCatalog.products.map((product) =>
+    product.sku === "КР-003" ? { ...product, pricePerKg: 402 } : product,
+  );
+  const equalPrice = buildDemoResult(
+    {
+      subject: "Краска для пола цеха",
+      body: "Нужны 200 кг серой краски для бетонного пола в помещении.",
+    },
+    equalPriceCatalog,
+  );
+  assert.equal(
+    equalPrice.market.position,
+    "Наша цена 402 ₽/кг совпадает с ценой другого поставщика. Весь объём подтверждён складом.",
+  );
+});
+
+test("keeps the market note aligned with a stock shortage", () => {
+  const result = buildDemoResult({
+    subject: "Срочное покрытие пола терминала",
+    body: "Нужны 650 кг серой краски для бетонного пола в помещении.",
+  });
+
+  assert.equal(result.route, "manager");
+  assert.equal(result.product?.stockKg, 420);
+  assert.equal(
+    result.market.position,
+    "Наша цена 415 ₽/кг, на 13 ₽ выше цены другого поставщика. Агент покажет клиенту наличие, срок и свойства краски. Склад подтверждает 420 из 650 кг. Поставку оставшейся части согласует руководитель.",
+  );
+  assert.doesNotMatch(
+    `${result.market.position} ${result.market.summary}`,
+    /весь объём.*подтверждён/iu,
   );
 });
 

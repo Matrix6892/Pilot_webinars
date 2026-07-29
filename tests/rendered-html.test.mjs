@@ -51,7 +51,7 @@ test("ships the Колер product surface and removes the starter", async () =>
     /Клиент пишет своими словами\.\s*Агент ведёт заказ до письма клиенту/,
   );
   assert.match(stand, /На стенде заявку создаёт форма/);
-  assert.match(stand, /Письмо или фото/);
+  assert.match(stand, /Описание заказа и фото/);
   assert.match(stand, /Модель для фото описала видимые детали/);
   assert.match(stand, /Модель для фото описывает видимое/);
   assert.match(
@@ -82,7 +82,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Готов ответить/);
   assert.match(stand, /Нужны детали/);
   assert.match(stand, /Решает руководитель/);
-  assert.match(stand, /Вариант подтверждён · подготовьте резерв/);
+  assert.match(stand, /Вариант подтверждён · подготовьте резерв товара/);
   assert.match(stand, /Польза клиенту/);
   assert.match(stand, /Результат для завода/);
   assert.match(
@@ -91,8 +91,8 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /Что учесть/);
   assert.match(stand, /Письмо по выбранному варианту/);
-  assert.match(stand, /Отправить ответ на стенде/);
-  assert.match(stand, /Отправить вопросы на стенде/);
+  assert.match(stand, /Записать отправку ответа/);
+  assert.match(stand, /Записать вопросы в журнал демонстрации/);
   assert.match(stand, /Продолжить эту карточку/);
   assert.match(stand, /посчитает килограммы/);
   assert.match(
@@ -147,9 +147,9 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Что подтверждает вывод/);
   assert.match(stand, /Проверено по источникам/);
   assert.match(stand, /Источники для проверки/);
-  assert.match(stand, /Как недорогая модель ведёт заказ/);
-  assert.match(stand, /Как агент ведёт заказ по готовым правилам/);
-  assert.match(stand, /Расчёт по готовым правилам и живому складу/);
+  assert.match(stand, /Ежедневная модель и отдельная проверка/);
+  assert.match(stand, /Автоматическая обработка по правилам/);
+  assert.match(stand, /Автоматическая обработка по правилам и живому складу/);
   assert.ok(
     modelData.options.some((model) => model.label === "DeepSeek V4 Flash"),
   );
@@ -157,13 +157,17 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Команда улучшает правила по журналу/);
   assert.match(
     stand,
-    /Сильная модель предлагает правки, руководитель принимает/,
+    /GPT-5\.6 Sol предлагает правки, руководитель принимает/,
   );
   assert.match(stand, /Работа за сегодня в одной таблице/);
   assert.match(stand, /Скачать журнал за сегодня/);
   assert.match(stand, /Открыть таблицу вебинара в Google Таблицах/);
   assert.match(stand, /Скопировать формулу для Google Таблиц/);
-  assert.match(stand, /disabled=\{!bridgeOnline\}/);
+  assert.match(
+    stand,
+    /bridgeOnline \? \([\s\S]*?Обработка заявки[\s\S]*?Подготовленные правила и живой склад/,
+  );
+  assert.doesNotMatch(stand, /disabled=\{!bridgeOnline\}/);
   assert.match(stand, /role="progressbar"/);
   assert.match(stand, /role="log"/);
   assert.match(
@@ -300,8 +304,8 @@ test("explains the stand calculation, manager role and saved recalculation", asy
     "utf8",
   );
 
-  assert.match(stand, /Агент ведёт заказ по готовой инструкции/);
-  assert.match(stand, /Расчёт по готовым правилам и живому складу/);
+  assert.match(stand, /Режим: обработка по правилам/);
+  assert.match(stand, /Автоматическая обработка по правилам и живому складу/);
   assert.match(stand, /Руководитель выбирает особые условия/);
   assert.match(
     stand,
@@ -323,6 +327,11 @@ test("prepares a contract reserve before the stand send", async () => {
     "const prepareReserve",
     "const sendReply",
   );
+  const eventKind = sourceBetween(
+    stand,
+    "const eventKind",
+    "const rows",
+  );
 
   assert.match(reserveAction, /setReserving\(true\)/);
   assert.match(
@@ -334,20 +343,25 @@ test("prepares a contract reserve before the stand send", async () => {
     stand,
     /order\.status === "ready_to_send"[\s\S]*?canSend = canManageOrder && reserved && !inventoryChanged/,
   );
-  assert.match(stand, /Резерв под договор подготовлен/);
-  assert.match(stand, /Подготовить резерв под договор/);
+  assert.match(stand, /Резерв товара подготовлен/);
+  assert.match(stand, /Подготовить резерв товара/);
   assert.match(
     stand,
-    /Рабочая\s+система передаст запись в учётную систему компании/,
+    /Рабочая система\s+передаст его в учётную систему компании/,
   );
   assert.match(stand, /Путь ответа клиенту/);
   assert.match(
     stand,
-    /Ответ готов[\s\S]*?Резерв под договор[\s\S]*?Отправка/,
+    /Ответ готов[\s\S]*?Резерв товара[\s\S]*?Отправка/,
   );
   assert.match(
     stand,
-    /После действующих резервов на складе осталось/,
+    /\$\{quantity\.trim\(\)\} кг осталось после других заказов/,
+  );
+  assert.doesNotMatch(stand, /действующ(?:ий|ие|их)\s+резерв/iu);
+  assert.match(
+    eventKind,
+    /stage === "reserve"\)\s+return "Резерв товара"/,
   );
   assert.match(stand, /Руководитель подтвердил выбранный вариант/);
   assert.match(
@@ -357,5 +371,39 @@ test("prepares a contract reserve before the stand send", async () => {
   assert.match(
     stand,
     /\.replace\(\/руководитель согласует\/gi, "руководитель подтверждает"\)/,
+  );
+});
+
+test("names the model roles honestly in the visible activity log", async () => {
+  const stand = await readFile(
+    new URL("../app/order-stand.tsx", import.meta.url),
+    "utf8",
+  );
+  const eventActor = sourceBetween(
+    stand,
+    "const eventActor",
+    "const eventKind",
+  );
+  const eventKind = sourceBetween(
+    stand,
+    "const eventKind",
+    "const rows",
+  );
+
+  assert.match(
+    eventActor,
+    /\["vision", "vision-result"\][\s\S]*?"Модель для фотографий"/,
+  );
+  assert.match(
+    eventActor,
+    /stage === "review"[\s\S]*?\/модел\/iu\.test\(title\)[\s\S]*?"Модель проверки"[\s\S]*?"Программа проверки"/,
+  );
+  assert.match(eventActor, /stage === "review-fallback"[\s\S]*?"Программа проверки"/);
+  assert.match(eventActor, /"model"[\s\S]*?"Программа стенда"/);
+  assert.match(stand, /actor: eventActor\(item\.stage, item\.title\)/);
+  assert.match(eventKind, /stage === "model"\) return "Выбор модели"/);
+  assert.match(
+    eventKind,
+    /\["vision", "vision-result"\][\s\S]*?"Осмотр фотографии"/,
   );
 });

@@ -86,10 +86,8 @@ function selectedModel(job) {
     : fallbackPrimary;
 }
 
-function reviewerFor(primaryModel) {
-  return primaryModel === strongReviewer
-    ? "opencode-go/deepseek-v4-pro"
-    : strongReviewer;
+function reviewerFor() {
+  return strongReviewer;
 }
 
 function demoDataForJob(job) {
@@ -240,19 +238,38 @@ function inventorySnapshotDetail(productCount, version) {
 
 function sourcePlanForJob(job) {
   const website = String(job?.website ?? "").trim();
+  const company = String(job?.company ?? "").trim();
+  const orderText = `${job?.subject ?? ""}\n${job?.body ?? ""}`;
   const mentionsInn = /(?:^|[^\p{L}])инн(?:[^\p{L}]|$)/iu.test(
-    `${job?.subject ?? ""}\n${job?.body ?? ""}`,
+    orderText,
   );
+  const hasRealWebsite =
+    Boolean(website) && !/\.example(?:[/:?#]|$)/iu.test(website);
+  const hasSpecificCompanyName =
+    company.length >= 4 &&
+    !/^(?:клиент|частное лицо|физлицо|не указано|—)$/iu.test(company);
+  const businessContextCanChangeDecision =
+    /(?:тендер|конкурс|скидк|отсроч|после\s+(?:поставк|отгрузк)|сроч|завтра|пробн|тестов|провер|оборот|производ|парк|партн[её]р|долгосроч)/iu.test(
+      orderText,
+    ) ||
+    /(?:^|[^\d])(?:[1-9]|[1-3]\d|40)\s*(?:кг|килограмм)/iu.test(
+      orderText,
+    );
+  const shouldSearchByName =
+    hasSpecificCompanyName &&
+    !website &&
+    businessContextCanChangeDecision;
   const shouldCheckCompany =
     mentionsInn ||
-    (Boolean(website) &&
-      !/\.example(?:[/:?#]|$)/iu.test(website));
+    hasRealWebsite ||
+    shouldSearchByName;
   return shouldCheckCompany
     ? {
         allowsPublicSearch: true,
         title: "Агент решил проверить компанию",
-        detail:
-          "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
+        detail: shouldSearchByName
+          ? "Название компании и условия заказа могут повлиять на предложение. Агент проверит открытые источники и отдельно отметит совпадение по названию."
+          : "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
       }
     : {
         allowsPublicSearch: false,
@@ -628,7 +645,7 @@ ${JSON.stringify(draft, null, 2)}
 async function processJob(job) {
   busy = true;
   const primaryModel = selectedModel(job);
-  const reviewerModel = reviewerFor(primaryModel);
+  const reviewerModel = reviewerFor();
   const liveDemoData = demoDataForJob(job);
   const inventoryVersion =
     liveDemoData.inventorySnapshot?.version ?? "исходная";
@@ -731,7 +748,7 @@ async function processJob(job) {
     await addEvent(
       job.id,
       "review",
-      "Черновик передан сильной модели",
+      "Черновик передан модели проверки",
       `${modelLabel(reviewerModel)} проверяет объём, цену, источники и полномочия.`,
       "active",
     );
@@ -753,7 +770,7 @@ async function processJob(job) {
       await addEvent(
         job.id,
         "review-result",
-        "Сильная модель завершила проверку",
+        `${modelLabel(reviewerModel)} завершила проверку`,
         result.review?.verdict || "Факты и границы полномочий подтверждены.",
       ).catch(() => {});
     } catch (reviewError) {

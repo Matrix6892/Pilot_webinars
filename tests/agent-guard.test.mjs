@@ -236,6 +236,19 @@ test("turns an internal profit-floor phrase into customer-facing Russian", () =>
   assert.doesNotMatch(result.understood.join(" "), /минимальн|с прибылью/iu);
 });
 
+test("uses the same plain market explanation in the live model route", () => {
+  const result = normalizeAgentResult(agentDraft(), demoData, {
+    company: "Завод",
+    subject: "Краска для ограждений",
+    body: "Нужны 200 кг краски для металлических ограждений на улице, цвет RAL 7024.",
+  });
+
+  assert.equal(
+    result.market.position,
+    "Наша цена 349 ₽/кг, на 2 ₽ выше средней цены других поставщиков. Цена близка к рынку. Весь объём подтверждён складом.",
+  );
+});
+
 test("keeps a complete green letter aligned with the customer's color and delivery", () => {
   const job = {
     company: "Посёлок «Сосны»",
@@ -1358,7 +1371,7 @@ test("offers only an explicitly approved stocked analogue", () => {
     {
       company: "Завод",
       subject: "Грунт-эмаль для металла",
-      body: "Нужно 800 кг покрытия КР-001 для металла снаружи, цвет RAL 7024.",
+      body: "Нужно 800 кг покрытия КР-001 для металла снаружи, цвет RAL 9005.",
     },
   );
   const alternative = result.options.find((option) =>
@@ -1369,9 +1382,30 @@ test("offers only an explicitly approved stocked analogue", () => {
   assert.ok(alternative);
   assert.match(
     alternative.reply,
-    /Специалист подтвердит, что краска подходит/iu,
+    /Каталог допускает эту краску как замену/iu,
   );
   assert.equal(product.analogues.includes(approvedAnalogue.sku), true);
+});
+
+test("does not offer a stocked analogue in another color", () => {
+  const approvedAnalogue = catalogProduct("КР-002");
+  const result = normalizeAgentResult(
+    agentDraft({ sku: "КР-001", requestedKg: 800 }),
+    demoData,
+    {
+      company: "Завод",
+      subject: "Грунт-эмаль для металла",
+      body: "Нужно 800 кг покрытия КР-001 для металла снаружи, цвет RAL 7024.",
+    },
+  );
+
+  assert.equal(result.zone, "red");
+  assert.equal(
+    result.options.some((option) =>
+      `${option.title} ${option.reply}`.includes(approvedAnalogue.name),
+    ),
+    false,
+  );
 });
 
 test("does not substitute wall paint for a floor coating", () => {

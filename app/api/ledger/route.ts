@@ -8,13 +8,13 @@ import {
 } from "@/db/schema";
 import {
   buildLedgerCsv,
+  queryForLedgerFormat,
 } from "@/lib/ledger-export.mjs";
 
 export const dynamic = "force-dynamic";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
-const MAX_CSV_ROWS_PER_SOURCE = 2_000;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_STORED_JSON_LENGTH = 32_000;
 
@@ -166,40 +166,50 @@ export async function GET(request: Request) {
 
   await ensureDb();
   const db = getDb();
-  const sourceLimit =
-    format === "csv" ? MAX_CSV_ROWS_PER_SOURCE : limit;
-  const orderQuery = db
-    .select()
-    .from(orders)
-    .where(
-      sql`date(${orders.createdAt}, '+3 hours') = date('now', '+3 hours')`,
-    )
-    .orderBy(desc(orders.createdAt), desc(orders.id))
-    .limit(sourceLimit);
-  const eventQuery = db
-    .select()
-    .from(orderEvents)
-    .where(
-      sql`date(${orderEvents.createdAt}, '+3 hours') = date('now', '+3 hours')`,
-    )
-    .orderBy(desc(orderEvents.id))
-    .limit(sourceLimit);
-  const inventoryChangeQuery = db
-    .select()
-    .from(inventoryChanges)
-    .where(
-      sql`date(${inventoryChanges.createdAt}, '+3 hours') = date('now', '+3 hours')`,
-    )
-    .orderBy(desc(inventoryChanges.id))
-    .limit(sourceLimit);
-  const resultHistoryQuery = db
-    .select()
-    .from(orderResultHistory)
-    .where(
-      sql`date(${orderResultHistory.createdAt}, '+3 hours') = date('now', '+3 hours')`,
-    )
-    .orderBy(desc(orderResultHistory.id))
-    .limit(sourceLimit);
+  const orderQuery = queryForLedgerFormat(
+    db
+      .select()
+      .from(orders)
+      .where(
+        sql`date(${orders.createdAt}, '+3 hours') = date('now', '+3 hours')`,
+      )
+      .orderBy(desc(orders.createdAt), desc(orders.id)),
+    format,
+    limit,
+  );
+  const eventQuery = queryForLedgerFormat(
+    db
+      .select()
+      .from(orderEvents)
+      .where(
+        sql`date(${orderEvents.createdAt}, '+3 hours') = date('now', '+3 hours')`,
+      )
+      .orderBy(desc(orderEvents.id)),
+    format,
+    limit,
+  );
+  const inventoryChangeQuery = queryForLedgerFormat(
+    db
+      .select()
+      .from(inventoryChanges)
+      .where(
+        sql`date(${inventoryChanges.createdAt}, '+3 hours') = date('now', '+3 hours')`,
+      )
+      .orderBy(desc(inventoryChanges.id)),
+    format,
+    limit,
+  );
+  const resultHistoryQuery = queryForLedgerFormat(
+    db
+      .select()
+      .from(orderResultHistory)
+      .where(
+        sql`date(${orderResultHistory.createdAt}, '+3 hours') = date('now', '+3 hours')`,
+      )
+      .orderBy(desc(orderResultHistory.id)),
+    format,
+    limit,
+  );
 
   const [rawOrders, rawEvents, rawChanges, rawResultHistory]: [
     Array<typeof orders.$inferSelect>,

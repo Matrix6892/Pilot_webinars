@@ -293,6 +293,18 @@ test("commits clarification and autonomous customer reply as complete transition
   assert.match(autonomousReply, /insertResultHistoryWhen\(/);
   assert.match(autonomousReply, /transitionEvents\.map\(/);
   assert.match(autonomousReply, /insertOrderEventWhen\(/);
+  assert.equal(
+    (customerReply.match(/managerDecision:\s*null/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (customerReply.match(/managerOptionId:\s*null/g) ?? []).length,
+    2,
+  );
+  assert.equal(
+    (customerReply.match(/managerDecidedAt:\s*null/g) ?? []).length,
+    2,
+  );
   assert.match(
     autonomousReply,
     /await db\.batch\(\[\s*historyQuery,\s*\.\.\.eventQueries,\s*updateOrderQuery,\s*\]\)/,
@@ -360,4 +372,239 @@ test("commits critical order transitions together with their ledger rows", async
   assert.doesNotMatch(liveResult, /await appendResultHistory\(/);
   assert.doesNotMatch(recalculation, /await appendResultHistory\(/);
   assert.doesNotMatch(approval, /await appendResultHistory\(/);
+});
+
+test("reserves only the stock-confirmed part of a split delivery", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const reserveEventDetail = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "reserveEventDetail",
+  );
+
+  assert.equal(
+    reserveEventDetail({
+      name: "Краска для дерева на улице",
+      requestedKg: 100,
+      stockKg: 40,
+    }),
+    "40 кг краски «Краска для дерева на улице» закреплены за карточкой. Оставшиеся 60 кг записаны в выбранный план поставки. В рабочей системе этот шаг передаст резерв в учётную систему.",
+  );
+  assert.equal(
+    reserveEventDetail({
+      name: "Краска для дерева на улице",
+      requestedKg: 100,
+      stockKg: 180,
+    }),
+    "100 кг краски «Краска для дерева на улице» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.",
+  );
+  assert.equal(
+    reserveEventDetail({
+      name: "Краска для бетонного пола",
+      requestedKg: 1100,
+      stockKg: 1100,
+    }),
+    "1 100 кг краски «Краска для бетонного пола» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.",
+  );
+});
+
+test("applies an approved stocked analogue to the product and reserve", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const approvedProductForOption = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "approvedProductForOption",
+  );
+  const product = {
+    sku: "КР-001",
+    name: "Краска для металла на улице",
+    stockKg: 300,
+    requestedKg: 800,
+    firstDeliveryKg: 200,
+    color: "RAL 9005",
+    pricePerKg: 349,
+    total: 279200,
+    replenishmentDays: 5,
+  };
+  const products = [
+    {
+      ...product,
+      analogues: ["КР-002"],
+    },
+    {
+      sku: "КР-002",
+      name: "Универсальная краска для металла",
+      stockKg: 900,
+      pricePerKg: 382,
+      replenishmentDays: 4,
+      analogues: [],
+    },
+  ];
+
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        approvedProductForOption(
+          product,
+          {
+            id: "замена-краски",
+            title:
+              "Поставить весь объём краской «Универсальная краска для металла»",
+            reply:
+              "Можем поставить весь объём краской «Универсальная краска для металла».",
+          },
+          products,
+        ),
+      ),
+    ),
+    {
+      sku: "КР-002",
+      name: "Универсальная краска для металла",
+      stockKg: 900,
+      requestedKg: 800,
+      firstDeliveryKg: 200,
+      color: "RAL 9005",
+      pricePerKg: 382,
+      total: 305600,
+      replenishmentDays: 4,
+    },
+  );
+
+  const skuOnly = approvedProductForOption(
+    product,
+    {
+      id: "alternative",
+      title: "Поставить КР-002",
+      rationale: "Весь объём есть на складе.",
+      tradeoff: "Цена указана в письме.",
+      reply: "Готовы поставить КР-002.",
+    },
+    products,
+  );
+  assert.equal(skuOnly.sku, "КР-002");
+
+  const approval = ordersRoute.slice(
+    ordersRoute.indexOf('if (action !== "approve"'),
+  );
+  assert.match(
+    approval,
+    /approvedProduct\.stockKg < originalProduct\.requestedKg[\s\S]*?Полного объёма предложенной краски уже нет на складе/,
+  );
+});
+
+test("routes a manager question back to the same customer conversation", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const optionNeedsCustomerReply = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "optionNeedsCustomerReply",
+  );
+
+  assert.equal(
+    optionNeedsCustomerReply({
+      id: "график-клиента",
+      reply:
+        "Напишите, какой объём нужен для старта и к какой дате потребуется остальная краска?",
+    }),
+    true,
+  );
+  assert.equal(
+    optionNeedsCustomerReply({
+      id: "две-поставки",
+      reply: "Первые 300 кг готовы отгрузить сейчас, вторую партию — через пять дней.",
+    }),
+    false,
+  );
+  assert.equal(
+    optionNeedsCustomerReply({
+      id: "оплата-за-план",
+      reply:
+        "Готовы рассмотреть оплату после поставки. Направьте ожидаемый график, и мы подготовим условия.",
+    }),
+    true,
+  );
+  assert.equal(
+    optionNeedsCustomerReply({
+      id: "две-поставки",
+      reply:
+        "Первые 300 кг готовы отгрузить сейчас. Назовите точный цвет, и мы отложим доступную партию.",
+    }),
+    true,
+  );
+
+  const approval = ordersRoute.slice(
+    ordersRoute.indexOf('if (action !== "approve"'),
+  );
+  assert.match(
+    approval,
+    /needsCustomerReply[\s\S]*?result\.route = "needs_info"[\s\S]*?"clarification_ready"/,
+  );
+  assert.match(
+    approval,
+    /\.set\(\{[\s\S]*?status:\s*nextStatus,[\s\S]*?zone:\s*result\.zone,[\s\S]*?managerDecision:/,
+  );
+  assert.match(
+    approval,
+    /approvedAlternative[\s\S]*?result\.market = marketView\([\s\S]*?result\.understood = understoodAfterProductChoice\([\s\S]*?result\.zoneReason =[\s\S]*?result\.checks = \[[\s\S]*?result\.decisionBasis = \[/,
+  );
+  assert.match(
+    approval,
+    /result\.managerNote =[\s\S]*?Отправьте подготовленный вопрос клиенту[\s\S]*?verdict:\s*"Вопрос готов к отправке"/,
+  );
+});
+
+test("replaces live model product facts after the manager chooses another paint", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const understoodAfterProductChoice = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "understoodAfterProductChoice",
+  );
+  const originalProduct = {
+    sku: "КР-001",
+    name: "Краска по металлу с защитой от ржавчины",
+    stockKg: 300,
+    requestedKg: 800,
+    pricePerKg: 349,
+    total: 279200,
+    replenishmentDays: 7,
+  };
+  const approvedProduct = {
+    sku: "КР-002",
+    name: "Краска для металлической техники на улице",
+    stockKg: 900,
+    requestedKg: 800,
+    pricePerKg: 382,
+    total: 305600,
+    replenishmentDays: 14,
+  };
+
+  const understood = understoodAfterProductChoice(
+    [
+      "Клиент: Завод заказчика",
+      "Подходящий товар: КР-001 — Краска по металлу с защитой от ржавчины",
+      "Объём: 800 кг",
+      "Остаток: 300 кг",
+      "Цена: 349 ₽/кг",
+    ],
+    originalProduct,
+    approvedProduct,
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(understood)), [
+    "Клиент: Завод заказчика",
+    "Объём: 800 кг",
+    "Выбранная краска: Краска для металлической техники на улице",
+    "Склад подтверждает весь заказ: 800 кг из 900 кг",
+    "Цена: 382 ₽/кг",
+  ]);
+  assert.doesNotMatch(understood.join(" "), /КР-001|349|300 кг/iu);
 });

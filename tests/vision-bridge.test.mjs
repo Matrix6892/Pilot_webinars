@@ -205,6 +205,31 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
         "Агент продолжает по письму, каталогу, складу и правилам продаж.",
     },
   );
+  assert.deepEqual(
+    {
+      ...sourcePlanForJob({
+        company: "ООО «Ромашка»",
+        website: "",
+        subject: "Пробный заказ",
+        body: "Хотим сначала заказать 20 кг и проверить качество.",
+      }),
+    },
+    {
+      allowsPublicSearch: true,
+      title: "Агент решил проверить компанию",
+      detail:
+        "Название компании и условия заказа могут повлиять на предложение. Агент проверит открытые источники и отдельно отметит совпадение по названию.",
+    },
+  );
+  assert.equal(
+    sourcePlanForJob({
+      company: "Сад у озера",
+      website: "",
+      subject: "Краска для забора",
+      body: "Помогите подобрать краску и рассчитать количество.",
+    }).allowsPublicSearch,
+    false,
+  );
 });
 
 test("does not verify a URL from a failed web action", async () => {
@@ -277,7 +302,7 @@ test("shows live research and strong-model review as distinct event states", asy
   );
   assert.match(
     bridge,
-    /"Черновик передан сильной модели"[\s\S]*?"active"/,
+    /"Черновик передан модели проверки"[\s\S]*?"active"/,
   );
   assert.match(
     bridge,

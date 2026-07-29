@@ -526,7 +526,7 @@ main {
   border-radius: 26px;
   background: var(--panel);
   box-shadow: var(--shadow);
-  grid-template-columns: minmax(420px, 0.78fr) minmax(0, 1.22fr);
+  grid-template-columns: minmax(470px, 1fr) minmax(0, 1fr);
 }
 
 .workbench.has-order {
@@ -627,6 +627,23 @@ main {
 .mail-model select:disabled {
   cursor: not-allowed;
   opacity: 0.62;
+}
+
+.mail-model-status span,
+.mail-model-status strong {
+  display: block;
+}
+
+.mail-model-status span {
+  margin: 0 0 6px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mail-model-status strong {
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .preset-controls > button {
@@ -884,10 +901,10 @@ main {
 .empty-process {
   display: grid;
   min-height: 610px;
-  align-items: center;
+  align-content: center;
   padding: 20px 0;
-  grid-template-columns: minmax(220px, 0.75fr) minmax(330px, 1.25fr);
-  gap: clamp(28px, 5vw, 70px);
+  grid-template-columns: 1fr;
+  gap: 30px;
 }
 
 .empty-process h2 {
@@ -3785,7 +3802,7 @@ footer span:last-child {
   }
 
   .workbench {
-    grid-template-columns: minmax(390px, 0.9fr) minmax(0, 1.1fr);
+    grid-template-columns: minmax(390px, 0.96fr) minmax(0, 1.04fr);
   }
 
   .empty-process {
@@ -3899,17 +3916,37 @@ footer span:last-child {
   .topbar {
     min-height: 64px;
     padding: 10px 16px;
-    grid-template-columns: 1fr auto;
+    gap: 10px;
+    grid-template-columns: auto 1fr auto;
   }
 
   .connection {
+    justify-self: center;
     min-height: 34px;
     padding: 0 10px;
     font-size: 10px;
   }
 
+  .connection > span:last-child {
+    font-size: 0;
+  }
+
+  .connection > span:last-child::after {
+    content: "По правилам";
+    font-size: 10px;
+  }
+
+  .connection.is-live > span:last-child::after {
+    content: "Модель на связи";
+  }
+
   .topbar-link {
-    display: none;
+    font-size: 0;
+  }
+
+  .topbar-link::after {
+    content: "К заявке";
+    font-size: 11px;
   }
 
   .brand small {
