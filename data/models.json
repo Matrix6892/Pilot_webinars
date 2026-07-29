@@ -9,12 +9,12 @@
     {
       "id": "opencode-go/deepseek-v4-pro",
       "label": "DeepSeek V4 Pro",
-      "note": "Больше проверки"
+      "note": "Тщательная проверка"
     },
     {
       "id": "opencode/gpt-5.6-sol",
       "label": "GPT-5.6 Sol",
-      "note": "Сильный проход"
+      "note": "Самая тщательная проверка"
     }
   ]
 }

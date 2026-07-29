@@ -11,6 +11,12 @@ import {
   applyReviewerResult,
   normalizeAgentResult,
 } from "../lib/agent-guard.mjs";
+import {
+  normalizeVisionObservation,
+  resolveVisionImageUrl,
+  visionPromptBlock,
+} from "../lib/upload-guard.mjs";
+import { downloadVisionImage } from "../lib/upload-vision.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -50,6 +56,10 @@ const reviewerInstruction = await readFile(
   resolve(root, "public/prompts/reviewer.md"),
   "utf8",
 );
+const visionInstruction = await readFile(
+  resolve(root, "public/prompts/vision-agent.md"),
+  "utf8",
+);
 const allowedModels = new Set(modelCatalog.options.map((model) => model.id));
 const modelLabel = (id) =>
   modelCatalog.options.find((model) => model.id === id)?.label ?? id;
@@ -57,6 +67,7 @@ const fallbackPrimary =
   process.env.OPENCODE_PRIMARY_MODEL ?? modelCatalog.default;
 const strongReviewer =
   process.env.OPENCODE_REVIEWER_MODEL ?? "opencode/gpt-5.6-sol";
+const visionModel = "opencode-go/mimo-v2.5";
 const agentApiTimeoutMs = 12_000;
 const openCodeTimeoutMs = 120_000;
 const openCodeTerminationGraceMs = 5_000;
@@ -78,6 +89,73 @@ function reviewerFor(primaryModel) {
   return primaryModel === strongReviewer
     ? "opencode-go/deepseek-v4-pro"
     : strongReviewer;
+}
+
+function demoDataForJob(job) {
+  if (typeof job?.inventorySnapshotJson !== "string") return demoData;
+
+  try {
+    const snapshot = JSON.parse(job.inventorySnapshotJson);
+    const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+    const stockBySku = new Map(
+      items
+        .filter(
+          (item) =>
+            typeof item?.sku === "string" &&
+            Number.isFinite(Number(item?.stockKg)),
+        )
+        .map((item) => [
+          item.sku,
+          {
+            stockKg: Math.max(0, Number(item.stockKg)),
+            stockRevision: Number.isFinite(Number(item?.revision)) &&
+              Number(item.revision) > 0
+                ? Number(item.revision)
+                : undefined,
+            stockUpdatedAt: typeof item?.updatedAt === "string"
+              ? item.updatedAt
+              : undefined,
+          },
+        ]),
+    );
+
+    return {
+      ...demoData,
+      products: demoData.products.map((product) => {
+        const liveStock = stockBySku.get(product.sku);
+        return {
+          ...product,
+          stockKg: liveStock?.stockKg ?? product.stockKg,
+          stockRevision:
+            liveStock?.stockRevision ?? product.stockRevision,
+          stockUpdatedAt:
+            liveStock?.stockUpdatedAt ?? product.stockUpdatedAt,
+        };
+      }),
+      inventorySnapshot: {
+        version:
+          typeof snapshot?.version === "string" ||
+          typeof snapshot?.version === "number"
+            ? String(snapshot.version)
+            : "текущая",
+        capturedAt:
+          typeof snapshot?.capturedAt === "string"
+            ? snapshot.capturedAt
+            : "",
+      },
+    };
+  } catch {
+    return demoData;
+  }
+}
+
+function storedJobJson(value, fallback) {
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 function childEnvironment() {
@@ -169,10 +247,11 @@ function toolSummary(event) {
   };
 }
 
-async function runOpenCode({ model, prompt, title, agent }) {
+async function runOpenCode({ model, prompt, title, agent, files = [] }) {
   const promptDirectory = await mkdtemp(join(tmpdir(), "koler-agent-"));
   const promptPath = join(promptDirectory, "request.md");
   await writeFile(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
+  const fileArguments = [promptPath, ...files].flatMap((path) => ["-f", path]);
 
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(
@@ -189,8 +268,7 @@ async function runOpenCode({ model, prompt, title, agent }) {
         "--title",
         title,
         "Выполни приложенную задачу и верни только JSON.",
-        "-f",
-        promptPath,
+        ...fileArguments,
       ],
       {
         cwd: root,
@@ -274,7 +352,64 @@ async function runOpenCode({ model, prompt, title, agent }) {
   });
 }
 
-function primaryPrompt(job) {
+async function visionObservationForJob(job) {
+  const attachment = storedJobJson(job.attachmentJson, null);
+  if (!resolveVisionImageUrl(attachment?.src, standUrl)) return null;
+
+  let downloaded;
+  await addEvent(
+    job.id,
+    "vision",
+    "Модель зрения смотрит фото",
+    "Отдельная модель отмечает только видимые признаки.",
+    "active",
+  );
+  try {
+    downloaded = await downloadVisionImage({ attachment, standUrl });
+    if (!downloaded) return null;
+    const run = await runOpenCode({
+      model: visionModel,
+      prompt: `${visionInstruction}
+
+## Имя вложения
+
+${JSON.stringify(String(attachment?.name ?? "photo"))}`,
+      title: `Колер · фото ${job.id.slice(-6)}`,
+      agent: "koler-reviewer",
+      files: [downloaded.path],
+    });
+    const observation = normalizeVisionObservation(run.value);
+    if (!observation) throw new Error("Vision model returned no observation");
+    await addEvent(
+      job.id,
+      "vision-result",
+      "Фото осмотрено",
+      observation.summary || "Видимые признаки добавлены в задачу.",
+    );
+    return observation;
+  } catch (error) {
+    console.error(
+      `[bridge] vision ${job.id}:`,
+      error instanceof Error ? error.message : error,
+    );
+    await addEvent(
+      job.id,
+      "vision-fallback",
+      "Фото оставлено для уточнения",
+      "Агент продолжает работу и задаст клиенту вопросы по материалу и размерам.",
+    ).catch(() => {});
+    return null;
+  } finally {
+    if (downloaded) {
+      await rm(downloaded.directory, { recursive: true, force: true }).catch(
+        () => {},
+      );
+    }
+  }
+}
+
+function primaryPrompt(job, liveDemoData, visionObservation) {
+  const visionBlock = visionPromptBlock(visionObservation);
   return `${salesInstruction}
 
 ## Текущий заказ
@@ -285,6 +420,9 @@ ${JSON.stringify(
     website: job.website,
     subject: job.subject,
     body: job.body,
+    attachment: storedJobJson(job.attachmentJson, null),
+    conversation: storedJobJson(job.conversationJson, []),
+    round: Number(job.roundNo) || 1,
   },
   null,
   2,
@@ -292,19 +430,21 @@ ${JSON.stringify(
 
 ## Демонстрационные источники истины
 
-${JSON.stringify(demoData, null, 2)}
+${JSON.stringify(liveDemoData, null, 2)}
+
+${visionBlock}
 
 ## Уточнения запуска
 
 - Верни один JSON-объект без Markdown.
-- Числа продукта возьми только из демонстрационных источников.
+- Числа продукта возьми только из снимка склада внутри демонстрационных источников.
 - Пропусти веб-поиск для доменов .example и рутинной зелёной заявки.
 - При реальном домене исследуй компанию, когда масштаб, профиль или надёжность могут изменить жёлтое или красное решение.
 - Сохрани до трёх публичных источников в research.sources.
 - Пиши активным русским языком без оправданий и риторических противопоставлений.`;
 }
 
-function reviewPrompt(job, draft) {
+function reviewPrompt(job, draft, liveDemoData) {
   return `${reviewerInstruction}
 
 ## Заказ
@@ -313,7 +453,7 @@ ${JSON.stringify(job, null, 2)}
 
 ## Каталог, склад, прайс и правила
 
-${JSON.stringify(demoData, null, 2)}
+${JSON.stringify(liveDemoData, null, 2)}
 
 ## Черновик агента
 
@@ -326,6 +466,9 @@ async function processJob(job) {
   busy = true;
   const primaryModel = selectedModel(job);
   const reviewerModel = reviewerFor(primaryModel);
+  const liveDemoData = demoDataForJob(job);
+  const inventoryVersion =
+    liveDemoData.inventorySnapshot?.version ?? "исходная";
 
   try {
     await addEvent(
@@ -338,18 +481,19 @@ async function processJob(job) {
       job.id,
       "inventory",
       "Каталог и склад добавлены в задачу",
-      `${demoData.products.length} продуктов, остатки, цены и минимальные границы.`,
+      `${liveDemoData.products.length} товаров. Остаток на момент расчёта: ${inventoryVersion}.`,
     );
     await addEvent(
       job.id,
       "market",
-      "Демонстрационный срез рынка подготовлен",
-      `${demoData.market.length} синтетических предложений с датой среза.`,
+      "Цены похожих предложений подготовлены",
+      `${liveDemoData.market.length} предложений с датой проверки.`,
     );
 
+    const visionObservation = await visionObservationForJob(job);
     const primaryRun = await runOpenCode({
       model: primaryModel,
-      prompt: primaryPrompt(job),
+      prompt: primaryPrompt(job, liveDemoData, visionObservation),
       title: `Колер · заказ ${job.id.slice(-6)}`,
       agent: "koler-sales",
     });
@@ -363,19 +507,19 @@ async function processJob(job) {
       );
     }
 
-    let result = normalizeAgentResult(primaryRun.value, demoData, job);
+    let result = normalizeAgentResult(primaryRun.value, liveDemoData, job);
 
     await addEvent(
       job.id,
       "review",
-      "Черновик передан ИИ-рецензенту",
+      "Черновик передан сильной модели",
       `${modelLabel(reviewerModel)} проверяет объём, цену, источники и полномочия.`,
     );
 
     try {
       const reviewRun = await runOpenCode({
         model: reviewerModel,
-        prompt: reviewPrompt(job, result),
+        prompt: reviewPrompt(job, result, liveDemoData),
         title: `Колер · проверка ${job.id.slice(-6)}`,
         agent: "koler-reviewer",
       });
@@ -383,7 +527,7 @@ async function processJob(job) {
         result,
         reviewRun.value,
         reviewerModel,
-        demoData,
+        liveDemoData,
         job,
       );
     } catch (reviewError) {
@@ -395,19 +539,19 @@ async function processJob(job) {
         job.id,
         "review-fallback",
         "Решение передано руководителю",
-        "ИИ-рецензент остановил проверку. Черновик сохранён и ожидает решения человека.",
+        "Черновик и проверенные факты сохранены. Руководитель получил готовые варианты.",
         "error",
       ).catch(() => {});
       result = applyReviewerResult(
         result,
         {
           approved: false,
-          verdict: "ИИ-проверка не завершена",
+          verdict: "Руководитель получил пункты для решения",
           notes: ["Черновик сохранён для проверки руководителем."],
           blockingIssues: ["Требуется ручная проверка перед отправкой."],
         },
         reviewerModel,
-        demoData,
+        liveDemoData,
         job,
       );
     }
@@ -415,7 +559,7 @@ async function processJob(job) {
     await addEvent(
       job.id,
       "research-result",
-      "Итоговый контекст заказа",
+      "Данные для решения собраны",
       [result.businessContext, result.research?.summary]
         .filter(Boolean)
         .join(" "),
@@ -437,7 +581,7 @@ async function processJob(job) {
       action: "error",
       orderId: job.id,
       detail:
-        "OpenCode остановил обработку. Письмо и журнал сохранены; запустите новую карточку.",
+        "Письмо и журнал сохранены. Запустите карточку снова или выберите другого исполнителя.",
     }).catch(() => {});
   } finally {
     busy = false;
@@ -479,5 +623,6 @@ process.on("SIGTERM", () => {
 console.log(`[bridge] ${standUrl}`);
 console.log(`[bridge] default=${fallbackPrimary}`);
 console.log(`[bridge] reviewer=${strongReviewer}`);
+console.log(`[bridge] vision=${visionModel}`);
 
 await Promise.all([heartbeatLoop(), jobLoop()]);

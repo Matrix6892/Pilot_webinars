@@ -1,35 +1,17 @@
 import { and, asc, eq, lt, sql } from "drizzle-orm";
 import { env } from "cloudflare:workers";
-import { ensureDb, getDb } from "@/db";
+import { ensureDb, getDb, insertOrderEventWhen } from "@/db";
 import { orderEvents, orders, systemState } from "@/db/schema";
+import type { AgentResult } from "@/lib/demo-engine";
+import { isCompleteAgentResult } from "@/lib/agent-guard.mjs";
+import { insertResultHistoryWhen } from "@/lib/result-history";
 
 export const dynamic = "force-dynamic";
 
-function validResult(value: unknown): value is {
-  zone: "green" | "yellow" | "red";
-  reply: { subject: string; body: string };
-  understood: unknown[];
-  missing: unknown[];
-  options: unknown[];
-  checks: unknown[];
-  sources: unknown[];
-} {
-  if (!value || typeof value !== "object") return false;
-  const result = value as Record<string, unknown>;
-  const reply = result.reply as Record<string, unknown> | undefined;
-  return (
-    ["green", "yellow", "red"].includes(String(result.zone)) &&
-    Array.isArray(result.understood) &&
-    Array.isArray(result.missing) &&
-    Array.isArray(result.options) &&
-    Array.isArray(result.checks) &&
-    Array.isArray(result.sources) &&
-    Boolean(
-      reply &&
-        typeof reply.subject === "string" &&
-        typeof reply.body === "string",
-    )
-  );
+function resultStatus(result: AgentResult) {
+  if (result.route === "manager") return "awaiting_approval";
+  if (result.route === "needs_info") return "clarification_ready";
+  return "ready_to_send";
 }
 
 function expectedToken() {
@@ -49,7 +31,7 @@ export async function GET(request: Request) {
   if (!authorized(request)) return denied();
   await ensureDb();
   const db = getDb();
-  await db
+  const requeued = await db
     .update(orders)
     .set({ status: "queued", updatedAt: sql`CURRENT_TIMESTAMP` })
     .where(
@@ -57,7 +39,19 @@ export async function GET(request: Request) {
         eq(orders.status, "processing"),
         lt(orders.updatedAt, sql`datetime('now', '-6 minutes')`),
       ),
+    )
+    .returning({ id: orders.id });
+  if (requeued.length > 0) {
+    await db.insert(orderEvents).values(
+      requeued.map((item) => ({
+        orderId: item.id,
+        stage: "retry",
+        title: "Карточка вернулась в очередь",
+        detail:
+          "Предыдущий запуск остановился. Письмо и история сохранены, обработка продолжится с теми же данными.",
+      })),
     );
+  }
   const [job] = await db
     .select()
     .from(orders)
@@ -78,7 +72,8 @@ export async function GET(request: Request) {
     orderId: claimedJob.id,
     stage: "understanding",
     title: "OpenCode разбирает письмо",
-    detail: "Агент выделяет потребность и выбирает необходимые источники.",
+    detail:
+      "Агент собирает задачу клиента, выбирает источники и читает снимок склада этой карточки.",
     state: "active",
   });
 
@@ -110,7 +105,12 @@ export async function POST(request: Request) {
   }
 
   const [order] = await db
-    .select({ id: orders.id, status: orders.status })
+    .select({
+      id: orders.id,
+      status: orders.status,
+      roundNo: orders.roundNo,
+      inventorySnapshotJson: orders.inventorySnapshotJson,
+    })
     .from(orders)
     .where(eq(orders.id, orderId))
     .limit(1);
@@ -137,50 +137,90 @@ export async function POST(request: Request) {
 
   if (action === "result") {
     const result = payload.result;
-    if (!validResult(result)) {
+    if (!isCompleteAgentResult(result)) {
       return Response.json({ error: "invalid result" }, { status: 400 });
     }
-    const status =
-      result.zone === "red" ? "awaiting_approval" : "ready_to_send";
-    const [updatedOrder] = await db
-      .update(orders)
-      .set({
+    const agentResult = result as AgentResult;
+    const status = resultStatus(agentResult);
+    const agentModel = String(payload.agentModel ?? "OpenCode").slice(0, 120);
+    const reviewerModel = String(
+      payload.reviewerModel ?? "OpenCode reviewer",
+    ).slice(0, 120);
+    const transitionGuard = and(
+      eq(orders.id, orderId),
+      eq(orders.status, "processing"),
+    )!;
+    const resultJson = JSON.stringify(agentResult);
+    const historyQuery = insertResultHistoryWhen(
+      db,
+      {
+        orderId,
+        roundNo: order.roundNo,
+        result: agentResult,
         status,
-        zone: String(result.zone),
-        resultJson: JSON.stringify(result),
-        agentModel: String(payload.agentModel ?? "OpenCode").slice(0, 120),
-        reviewerModel: String(payload.reviewerModel ?? "OpenCode reviewer").slice(
-          0,
-          120,
-        ),
-        updatedAt: sql`CURRENT_TIMESTAMP`,
-      })
-      .where(and(eq(orders.id, orderId), eq(orders.status, "processing")))
-      .returning({ id: orders.id });
-    if (!updatedOrder) {
-      return Response.json(
-        { error: "order state changed" },
-        { status: 409 },
-      );
-    }
-    await db
+        reason: "Решение рабочей модели",
+        sourceKey: `model:${order.roundNo}`,
+        inventorySnapshot: order.inventorySnapshotJson ?? undefined,
+        agentModel,
+        reviewerModel,
+      },
+      transitionGuard,
+    );
+    const closeActiveEventsQuery = db
       .update(orderEvents)
       .set({ state: "done" })
       .where(
         and(
           eq(orderEvents.orderId, orderId),
           eq(orderEvents.state, "active"),
+          sql`exists (select 1 from ${orders} where ${transitionGuard})`,
         ),
       );
-    await db.insert(orderEvents).values({
-      orderId,
-      stage: "decision",
-      title: `Решение: ${result.zone === "green" ? "зелёная" : result.zone === "yellow" ? "жёлтая" : "красная"} зона`,
-      detail:
-        result.zone === "red"
-          ? "Нестандартное предложение передано руководителю."
-          : "Ответ проверен и готов.",
-    });
+    const decisionEventQuery = insertOrderEventWhen(
+      db,
+      {
+        orderId,
+        stage: "decision",
+        title:
+          status === "ready_to_send"
+            ? "Следующий шаг: готов ответить"
+            : status === "clarification_ready"
+              ? "Следующий шаг: нужны детали"
+              : "Следующий шаг: решает руководитель",
+        detail:
+          status === "awaiting_approval"
+            ? "Руководитель получил подготовленные варианты."
+            : status === "clarification_ready"
+              ? "Агент подготовил короткие вопросы клиенту."
+              : "Ответ проверен и готов к отправке.",
+      },
+      transitionGuard,
+    );
+    const updateOrderQuery = db
+      .update(orders)
+      .set({
+        status,
+        zone: agentResult.zone,
+        resultJson,
+        agentModel,
+        reviewerModel,
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .where(transitionGuard)
+      .returning({ id: orders.id });
+    const [, , , updatedOrders] = await db.batch([
+      historyQuery,
+      closeActiveEventsQuery,
+      decisionEventQuery,
+      updateOrderQuery,
+    ]);
+    const [updatedOrder] = updatedOrders;
+    if (!updatedOrder) {
+      return Response.json(
+        { error: "order state changed" },
+        { status: 409 },
+      );
+    }
     return Response.json({ ok: true, status });
   }
 
@@ -208,9 +248,9 @@ export async function POST(request: Request) {
     await db.insert(orderEvents).values({
       orderId,
       stage: "error",
-      title: "Агент остановился",
+      title: "Работу можно продолжить",
       detail:
-        "OpenCode остановил обработку. Письмо и журнал сохранены; запустите новую карточку.",
+        "Письмо и журнал сохранены. Запустите карточку ещё раз.",
       state: "error",
     });
     return Response.json({ ok: true });

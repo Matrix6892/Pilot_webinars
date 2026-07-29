@@ -15,6 +15,34 @@
       "when": 1785265678874,
       "tag": "0001_mature_justice",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785283579774,
+      "tag": "0002_odd_praxagora",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785293273043,
+      "tag": "0003_majestic_energizer",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1785295133384,
+      "tag": "0004_legal_the_captain",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1785299377340,
+      "tag": "0005_unique_selene",
+      "breakpoints": true
     }
   ]
 }

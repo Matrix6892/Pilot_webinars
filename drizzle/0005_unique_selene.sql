@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `action_token_hash` text;

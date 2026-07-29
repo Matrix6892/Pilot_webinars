@@ -3,12 +3,37 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   applyReviewerResult,
+  isCompleteAgentResult,
   normalizeAgentResult,
 } from "../lib/agent-guard.mjs";
 
 const demoData = JSON.parse(
   await readFile(new URL("../data/paint-demo.json", import.meta.url), "utf8"),
 );
+
+function catalogProduct(sku) {
+  const product = demoData.products.find((item) => item.sku === sku);
+  assert.ok(product, `В демонстрационном каталоге должен быть товар ${sku}`);
+  return product;
+}
+
+function assertSafeManagerOptions(result, rejectedIds = []) {
+  assert.equal(result.zone, "red");
+  assert.equal(result.decision, "escalate");
+  assert.equal(result.route, "manager");
+  assert.equal(result.options.length, 3);
+  assert.equal(
+    new Set(result.options.map((option) => option.id)).size,
+    result.options.length,
+  );
+  assert.ok(result.options.every((option) => option.id.trim()));
+  for (const rejectedId of rejectedIds) {
+    assert.equal(
+      result.options.some((option) => option.id === rejectedId),
+      false,
+    );
+  }
+}
 
 function agentDraft({
   sku = "КР-001",
@@ -73,7 +98,7 @@ test("grounds a red order in catalog data and keeps visible copy clean", () => {
       managerNote: "",
       options: [
         {
-          id: "split",
+          id: "partial-delivery",
           title: "Разделить поставку",
           rationale: "Отгрузить первую партию со склада.",
           tradeoff: "Клиент получает часть объёма раньше.",
@@ -98,19 +123,24 @@ test("grounds a red order in catalog data and keeps visible copy clean", () => {
 
   assert.equal(result.zone, "red");
   assert.equal(result.decision, "escalate");
-  assert.equal(result.product.name, "Барьер 3в1");
+  assert.equal(result.product.name, catalogProduct("КР-001").name);
+  assert.match(result.product.name, /краск.*металл.*ржавчин/iu);
   assert.equal(result.product.stockKg, 300);
   assert.equal(result.product.pricePerKg, 349);
   assert.equal(result.options.length, 3);
   assert.match(result.market.summary, /Цена «Колер»: 349 ₽\/кг/);
   assert.match(result.reply.body, /выберет руководитель/);
-  assert.deepEqual(result.sources, [
+  assert.deepEqual(result.sources.slice(0, 3), [
     "Входящее письмо",
     "Каталог и остатки",
     "Правила продаж",
-    "Демонстрационный срез рынка",
-    "Демонстрационный отраслевой сценарий",
   ]);
+  assert.equal(result.sources.length, 5);
+  assert.match(
+    result.sources.join(" "),
+    /цен.*(?:поставщик|предлож)|рын/iu,
+  );
+  assert.match(result.sources.join(" "), /влияет на работу клиента/iu);
   assert.doesNotMatch(
     JSON.stringify({
       market: result.market,
@@ -135,7 +165,7 @@ test("records a safe template replacement without leaking rejected Latin copy", 
 
   assert.match(
     result.checks.join(" "),
-    /клиентский текст заменён безопасным шаблоном.*латиниц/i,
+    /клиентск[а-яё]*\s+текст.*ясн[а-яё]*\s+русск[а-яё]*\s+шаблон/iu,
   );
   assert.doesNotMatch(
     JSON.stringify({
@@ -206,7 +236,7 @@ test("replaces client rhetoric that violates the Russian copy contract", () => {
 
   assert.match(
     result.checks.join(" "),
-    /клиентский текст заменён безопасным шаблоном.*русского текста/i,
+    /клиентск[а-яё]*\s+текст.*правил[а-яё]*\s+делов[а-яё]*\s+переписк/iu,
   );
   assert.doesNotMatch(result.reply.body, /особый ход/i);
 });
@@ -273,7 +303,7 @@ test("replaces an all-caps model reason with a calm fallback", () => {
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
 
-  assert.equal(result.zoneReason, "Товар, объём и цена подтверждены.");
+  assert.equal(result.zoneReason, "Краска, объём и цена подтверждены.");
 });
 
 test("keeps a completed research check visible when no sources were found", () => {
@@ -352,21 +382,211 @@ test("forces an unknown SKU from the letter into the yellow zone", () => {
   assert.match(result.missing.join(" "), /КР-099/);
 });
 
+test("keeps a fence photo request human and asks only for useful details", () => {
+  const draft = agentDraft({ zone: "yellow" });
+  draft.decision = "clarify";
+  draft.product = null;
+  draft.understood = [
+    "Клиент хочет покрасить забор",
+    "К письму приложена фотография",
+  ];
+  draft.missing = [
+    "материал забора",
+    "длина и высота забора",
+    "стороны покраски",
+    "цвет забора",
+  ];
+  draft.reply = {
+    subject: "Уточнение по покраске забора",
+    body: [
+      "Добрый день!",
+      "Из чего сделан забор?",
+      "Какие у него длина и средняя высота?",
+      "Красим одну или обе стороны?",
+      "Какой цвет нужен?",
+    ].join("\n"),
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Сад у озера",
+    subject: "Хочу покрасить забор",
+    body: "Добрый день! Хочу покрасить забор. Прикладываю фото.",
+    attachment: {
+      name: "забор.jpg",
+      src: "/fence-demo.jpg",
+      alt: "Забор на даче",
+    },
+  });
+  const questions = `${result.missing.join(" ")} ${result.reply.body}`;
+
+  assert.equal(result.zone, "yellow");
+  assert.equal(result.decision, "clarify");
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.product, null);
+  assert.match(questions, /материал|из чего сделан/iu);
+  assert.match(questions, /длин[а-яё]*.*высот/isu);
+  assert.match(questions, /(?:одн|обе)[а-яё]*\s+сторон/iu);
+  assert.match(questions, /цвет/iu);
+  assert.doesNotMatch(
+    questions,
+    /килограмм|(?:^|[^\p{L}])кг(?:[^\p{L}]|$)|объ[её]м|услови[а-яё]*\s+эксплуатац|улиц|помещ/iu,
+  );
+});
+
+test("grounds a clarified fence in the wood paint and whole packages", () => {
+  const draft = agentDraft({
+    sku: "КР-005",
+    requestedKg: 30,
+    zone: "green",
+  });
+  draft.understood = [
+    "Забор деревянный",
+    "Размер: 25 × 1,8 м",
+    "Покраска с обеих сторон",
+    "Цвет: коричневый",
+  ];
+  draft.missing = [];
+  draft.calculation = {
+    kind: "fence-area",
+    material: "дерево",
+    lengthM: 25,
+    heightM: 1.8,
+    areaPerSideM2: 45,
+    sides: 2,
+    paintAreaM2: 90,
+    coverageKgPerM2PerCoat: 0.14,
+    coats: 2,
+    reservePercent: 10,
+    estimatedKg: 27.72,
+    packageKg: 10,
+    packages: 3,
+    roundedKg: 30,
+    explanation:
+      "Площадь покраски 90 м². Два слоя и запас 10% дают 27,72 кг. Берём 3 упаковки по 10 кг.",
+  };
+  draft.zoneReason =
+    "Краска подобрана, расход рассчитан целыми упаковками, склад подтверждает весь объём.";
+  draft.reply = {
+    subject: "Расчёт краски для забора",
+    body: "Подобрали краску для дерева: 3 упаковки по 10 кг, всего 30 кг.",
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Сад у озера",
+    subject: "Хочу покрасить забор",
+    body: "Добрый день! Хочу покрасить забор. Прикладываю фото.",
+    conversation: [
+      {
+        role: "customer",
+        body: "Деревянный, 25 × 1,8 м, обе стороны, коричневый.",
+      },
+    ],
+  });
+
+  assert.equal(result.zone, "green");
+  assert.equal(result.route, "ready");
+  assert.equal(result.missing.length, 0);
+  assert.equal(result.product?.sku, "КР-005");
+  assert.equal(result.product?.name, catalogProduct("КР-005").name);
+  assert.equal(result.product?.requestedKg, 30);
+  assert.deepEqual(
+    {
+      material: result.calculation?.material,
+      areaPerSideM2: result.calculation?.areaPerSideM2,
+      sides: result.calculation?.sides,
+      paintAreaM2: result.calculation?.paintAreaM2,
+      packageKg: result.calculation?.packageKg,
+      packages: result.calculation?.packages,
+      roundedKg: result.calculation?.roundedKg,
+    },
+    {
+      material: "дерево",
+      areaPerSideM2: 45,
+      sides: 2,
+      paintAreaM2: 90,
+      packageKg: 10,
+      packages: 3,
+      roundedKg: 30,
+    },
+  );
+  assert.ok(
+    Math.abs((result.calculation?.estimatedKg ?? 0) - 27.72) < 1e-9,
+  );
+  assert.match(result.calculation?.explanation ?? "", /3 упаковки по 10 кг/iu);
+});
+
+test("records a fence photo only when the live order contains an attachment", () => {
+  const job = {
+    company: "Сад у озера",
+    subject: "Хочу покрасить забор",
+    body: "Хочу покрасить забор. Прикладываю фото.",
+  };
+  const normalized = normalizeAgentResult(
+    {
+      ...agentDraft({ zone: "yellow" }),
+      product: null,
+      missing: ["материал забора", "длина и высота забора"],
+      options: [],
+    },
+    demoData,
+    job,
+  );
+  const reviewed = applyReviewerResult(
+    normalized,
+    {
+      approved: false,
+      verdict: "Нужны данные клиента",
+      notes: [],
+      blockingIssues: ["Материал и размеры подтвердит клиент"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+
+  assert.doesNotMatch(reviewed.understood.join(" "), /фотограф/i);
+
+  const withAttachment = applyReviewerResult(
+    normalized,
+    {
+      approved: false,
+      verdict: "Нужны данные клиента",
+      notes: [],
+      blockingIssues: ["Материал и размеры подтвердит клиент"],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    {
+      ...job,
+      attachmentJson: JSON.stringify({
+        name: "забор.jpg",
+        src: "/api/uploads?key=customer-images/demo.jpg",
+        alt: "Фотография забора",
+      }),
+    },
+  );
+
+  assert.match(withAttachment.understood.join(" "), /фотограф/i);
+});
+
 test("stops a quote when the model SKU disagrees with the product named in the letter", () => {
+  const requestedProduct = catalogProduct("КР-002");
   const draft = agentDraft({ sku: "КР-001", requestedKg: 200 });
-  draft.reply.body =
-    "Подтверждаем 200 кг продукта «Барьер 3в1» по цене 349 ₽/кг.";
+  draft.reply.body = `Подтверждаем 200 кг продукта «${catalogProduct("КР-001").name}» по цене 349 ₽/кг.`;
 
   const result = normalizeAgentResult(draft, demoData, {
     company: "МехПром",
-    subject: "Заказ Металл Про",
-    body: "Нужно 200 кг Металл Про для наружных металлоконструкций, цвет RAL 7024.",
+    subject: `Заказ ${requestedProduct.sku}: ${requestedProduct.name}`,
+    body: `Нужно 200 кг ${requestedProduct.sku} для техники на улице, цвет RAL 7024.`,
   });
 
   assert.equal(result.zone, "yellow");
   assert.equal(result.decision, "clarify");
   assert.equal(result.product?.sku, "КР-002");
-  assert.match(result.missing.join(" "), /артикул.*модел/i);
+  assert.match(
+    result.missing.join(" "),
+    /(?=.*модел[^.]*КР-001)(?=.*письм[^.]*КР-002)/isu,
+  );
   assert.doesNotMatch(result.reply.body, /подтверждаем|349 ₽\/кг/i);
 });
 
@@ -384,9 +604,9 @@ test("recomputes material gaps from the letter and removes the model quote", () 
 
   assert.equal(result.zone, "yellow");
   assert.equal(result.decision, "clarify");
-  assert.match(result.missing.join(" "), /условия эксплуатации/i);
+  assert.match(result.missing.join(" "), /улиц|помещ/i);
   assert.match(result.missing.join(" "), /цвет|RAL/i);
-  assert.match(result.missing.join(" "), /совместимость/i);
+  assert.match(result.missing.join(" "), /пользоваться окрашенной поверхностью/i);
   assert.doesNotMatch(
     result.reply.body,
     /подтверждаем|349 ₽\/кг|совместимость покрытия/i,
@@ -406,9 +626,9 @@ test("keeps a shortage red when color and environment are missing", () => {
 
   assert.equal(result.zone, "red");
   assert.equal(result.decision, "escalate");
-  assert.match(result.missing.join(" "), /условия эксплуатации/i);
+  assert.match(result.missing.join(" "), /улиц|помещ/i);
   assert.match(result.missing.join(" "), /цвет|RAL/i);
-  assert.match(result.zoneReason, /запрошено 800 кг.*в наличии 300 кг/i);
+  assert.match(result.zoneReason, /(?=.*(?:склад|налич|остат))(?=.*300)(?=.*800)/isu);
   assert.equal(result.options.length, 3);
 });
 
@@ -416,6 +636,10 @@ for (const [risk, condition] of [
   ["a price below the minimum", "Цена не выше 320 ₽/кг."],
   ["a requested discount", "Просим скидку 10%."],
   ["special terms", "Просим отсрочку 60 дней."],
+  [
+    "everyday post-delivery payment terms",
+    "Просим оплату через 90 дней после поставки.",
+  ],
 ]) {
   test(`keeps ${risk} red when color and environment are missing`, () => {
     const result = normalizeAgentResult(agentDraft(), demoData, {
@@ -426,7 +650,7 @@ for (const [risk, condition] of [
 
     assert.equal(result.zone, "red");
     assert.equal(result.decision, "escalate");
-    assert.match(result.missing.join(" "), /условия эксплуатации/i);
+    assert.match(result.missing.join(" "), /улиц|помещ/i);
     assert.match(result.missing.join(" "), /цвет|RAL/i);
     assert.equal(result.options.length, 3);
   });
@@ -441,7 +665,7 @@ test("does not invent a metal industry for an office order", () => {
     body: "Нужно 200 кг белой краски для стен офиса после ремонта.",
   });
 
-  assert.match(result.businessContext, /строительство/);
+  assert.match(result.businessContext, /налич|логистик|объект/iu);
   assert.doesNotMatch(result.businessContext, /металлоконструк|корроз/i);
 });
 
@@ -453,7 +677,12 @@ test("routes a requested price below the minimum to the red zone", () => {
   });
 
   assert.equal(result.zone, "red");
-  assert.match(result.zoneReason, /ниже минимальной границы 332 ₽\/кг/);
+  assert.equal(result.route, "manager");
+  assert.match(
+    result.zoneReason,
+    /(?=.*особ[а-яё]*\s+цен)(?=.*руководител)(?=.*(?:экономик|прибыл|заработ))/isu,
+  );
+  assert.doesNotMatch(result.zoneReason, /наруш|ниже минимальн/iu);
   assert.equal(result.options.length, 3);
 });
 
@@ -489,7 +718,7 @@ test("routes special terms found only in client copy to the red zone", () => {
 test("keeps two unique safe manager options for a red order", () => {
   const options = [
     {
-      id: "manager-split",
+      id: "two-part-delivery",
       title: "Разделить поставку",
       rationale: "Отгрузить доступную партию, остаток поставить по графику.",
       tradeoff: "Потребуются две отгрузки.",
@@ -519,7 +748,7 @@ test("keeps two unique safe manager options for a red order", () => {
   assert.equal(result.zone, "red");
   assert.deepEqual(
     result.options.map((option) => option.id),
-    ["manager-split", "ask-schedule"],
+    ["two-part-delivery", "ask-schedule"],
   );
 });
 
@@ -542,10 +771,7 @@ test("replaces the whole red option set when ids are duplicated", () => {
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
-  );
+  assertSafeManagerOptions(result, ["same-id", "third-id"]);
 });
 
 test("replaces the whole red option set when an id is empty", () => {
@@ -567,10 +793,7 @@ test("replaces the whole red option set when an id is empty", () => {
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
-  );
+  assertSafeManagerOptions(result, ["other-id"]);
 });
 
 test("replaces the whole red option set when the model returns more than three", () => {
@@ -592,9 +815,9 @@ test("replaces the whole red option set when the model returns more than three",
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
+  assertSafeManagerOptions(
+    result,
+    options.map((option) => option.id),
   );
 });
 
@@ -605,8 +828,7 @@ test("replaces every model option after a promise of the unavailable full volume
       title: "Пообещать полный объём",
       rationale: "Закрыть заказ одной отгрузкой.",
       tradeoff: "Нет.",
-      reply:
-        "В наличии полный объём — 800 кг продукта «Барьер 3в1».",
+      reply: `В наличии полный объём — 800 кг продукта «${catalogProduct("КР-001").name}».`,
     },
     {
       id: "safe-check",
@@ -634,10 +856,7 @@ test("replaces every model option after a promise of the unavailable full volume
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
-  );
+  assertSafeManagerOptions(result, ["promise-full", "safe-check", "safe-ask"]);
   assert.doesNotMatch(
     result.options.map((option) => option.reply).join(" "),
     /в наличии полный объём/i,
@@ -645,12 +864,13 @@ test("replaces every model option after a promise of the unavailable full volume
 });
 
 test("replaces every model option after a quoted price below the catalog minimum", () => {
+  const approvedAnalogue = catalogProduct("КР-002");
   const options = [
     {
       id: "below-minimum",
-      title: "Предложить Металл Про",
+      title: `Предложить ${approvedAnalogue.name}`,
       rationale: "Закрепить цену для клиента.",
-      tradeoff: "Цена ниже действующей границы.",
+      tradeoff: "Особую цену выбирает руководитель.",
       reply: "Подтверждаем цену 340 ₽/кг для аналога.",
     },
     {
@@ -679,10 +899,7 @@ test("replaces every model option after a quoted price below the catalog minimum
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
-  );
+  assertSafeManagerOptions(result, ["below-minimum", "safe-check", "safe-ask"]);
   assert.doesNotMatch(
     result.options.map((option) => option.reply).join(" "),
     /340 ₽\/кг/,
@@ -690,14 +907,14 @@ test("replaces every model option after a quoted price below the catalog minimum
 });
 
 test("replaces every model option after an unapproved analogue is offered", () => {
+  const unapprovedProduct = catalogProduct("КР-004");
   const options = [
     {
       id: "wrong-analogue",
-      title: "Предложить Аква Стена",
+      title: `Предложить ${unapprovedProduct.name}`,
       rationale: "Закрыть объём продуктом из наличия.",
       tradeoff: "Потребуется замена продукта.",
-      reply:
-        "Можем предложить «Аква Стена» из наличия в полном объёме по цене 228 ₽/кг.",
+      reply: `Можем предложить «${unapprovedProduct.name}» из наличия в полном объёме по цене 228 ₽/кг.`,
     },
     {
       id: "safe-check",
@@ -725,13 +942,16 @@ test("replaces every model option after an unapproved analogue is offered", () =
     },
   );
 
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["split", "alternative", "contract"],
-  );
-  assert.doesNotMatch(
-    result.options.map((option) => option.reply).join(" "),
-    /Аква Стена/,
+  assertSafeManagerOptions(result, [
+    "wrong-analogue",
+    "safe-check",
+    "safe-ask",
+  ]);
+  assert.equal(
+    result.options.some((option) =>
+      `${option.title} ${option.reply}`.includes(unapprovedProduct.name),
+    ),
+    false,
   );
 });
 
@@ -774,6 +994,8 @@ test("rejects an analogue SKU that is not in the approved catalogue list", () =>
 });
 
 test("offers only an explicitly approved stocked analogue", () => {
+  const product = catalogProduct("КР-001");
+  const approvedAnalogue = catalogProduct(product.analogues[0]);
   const result = normalizeAgentResult(
     agentDraft({ sku: "КР-001", requestedKg: 800 }),
     demoData,
@@ -783,14 +1005,21 @@ test("offers only an explicitly approved stocked analogue", () => {
       body: "Нужно 800 кг покрытия КР-001 для металла снаружи, цвет RAL 7024.",
     },
   );
-  const alternative = result.options.find((option) => option.id === "alternative");
+  const alternative = result.options.find((option) =>
+    option.title.includes(approvedAnalogue.name),
+  );
 
   assert.equal(result.zone, "red");
   assert.ok(alternative);
-  assert.match(alternative.title, /Металл Про/);
+  assert.match(
+    alternative.reply,
+    /Перед поставкой технолог подтвердит, что краска подходит/iu,
+  );
+  assert.equal(product.analogues.includes(approvedAnalogue.sku), true);
 });
 
 test("does not substitute wall paint for a floor coating", () => {
+  const wallPaint = catalogProduct("КР-004");
   const result = normalizeAgentResult(
     agentDraft({ sku: "КР-003", requestedKg: 800 }),
     demoData,
@@ -803,12 +1032,10 @@ test("does not substitute wall paint for a floor coating", () => {
 
   assert.equal(result.zone, "red");
   assert.equal(
-    result.options.some((option) => option.id === "alternative"),
+    result.options.some((option) =>
+      `${option.title} ${option.reply}`.includes(wallPaint.name),
+    ),
     false,
-  );
-  assert.doesNotMatch(
-    result.options.map((option) => option.title).join(" "),
-    /Аква Стена/,
   );
 });
 
@@ -839,7 +1066,11 @@ test("blocks a green reply after a negative model review", () => {
   assert.equal(reviewed.zone, "red");
   assert.equal(reviewed.decision, "escalate");
   assert.equal(reviewed.options.length, 3);
-  assert.match(reviewed.review.notes.join(" "), /Блокер/);
+  assert.match(
+    reviewed.review.notes.join(" "),
+    /обещан[^.]*неподтвержд[её]нн[^.]*срок/iu,
+  );
+  assert.doesNotMatch(reviewed.reply.body, /подтвердили\s+200\s*кг/iu);
 });
 
 test("does not reuse client copy rejected by the reviewer", () => {
@@ -930,7 +1161,10 @@ test("removes unsupported business conclusions after a negative review", () => {
     `${reviewed.businessContext} ${reviewed.research.summary}`,
     /один день|риск неплатежа низкий/i,
   );
-  assert.match(reviewed.businessContext, /исключил неподтверждённые выводы/i);
+  assert.match(
+    reviewed.businessContext,
+    /(?=.*письм)(?=.*каталог)(?=.*склад)(?=.*открыт[^.]*источник)(?=.*решени)/isu,
+  );
   assert.equal(reviewed.research.sources.length, 1);
   assert.equal(
     reviewed.research.sources[0].fact,
@@ -942,7 +1176,11 @@ test("removes unsupported business conclusions after a negative review", () => {
   );
   assert.doesNotMatch(reviewed.understood.join(" "), /выручк|50 млрд/i);
   assert.doesNotMatch(reviewed.managerNote, /выручк|принять риск/i);
-  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/i);
+  assert.ok(
+    reviewed.understood
+      .join(" ")
+      .includes(catalogProduct("КР-001").name),
+  );
   assert.match(reviewed.understood.join(" "), /800 кг/i);
 });
 
@@ -970,15 +1208,20 @@ test("keeps source company names when rebuilding understanding after review", ()
   );
 
   assert.match(reviewed.understood.join(" "), /VOLGA STEEL/);
-  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/);
+  assert.ok(
+    reviewed.understood
+      .join(" ")
+      .includes(catalogProduct("КР-001").name),
+  );
   assert.match(reviewed.understood.join(" "), /800 кг/);
 });
 
 test("keeps a deterministic SKU mismatch note after a negative review", () => {
+  const requestedProduct = catalogProduct("КР-002");
   const job = {
     company: "МехПром",
-    subject: "Заказ Металл Про",
-    body: "Нужно 200 кг Металл Про для наружных металлоконструкций, цвет RAL 7024.",
+    subject: `Заказ ${requestedProduct.sku}: ${requestedProduct.name}`,
+    body: `Нужно 200 кг ${requestedProduct.sku} для техники на улице, цвет RAL 7024.`,
   };
   const reviewed = applyReviewerResult(
     normalizeAgentResult(
@@ -1022,8 +1265,12 @@ test("mentions the catalogue when product is known and quantity is missing", () 
     job,
   );
 
-  assert.match(reviewed.understood.join(" "), /Барьер 3в1.*КР-001/i);
-  assert.match(reviewed.businessContext, /письмо, каталог и остатки/i);
+  assert.ok(
+    reviewed.understood
+      .join(" ")
+      .includes(catalogProduct("КР-001").name),
+  );
+  assert.match(reviewed.businessContext, /письм.*каталог.*(?:склад|остат)/iu);
 });
 
 test("explains a completed public search with no confirmed sources", () => {
@@ -1052,7 +1299,8 @@ test("explains a completed public search with no confirmed sources", () => {
   );
 
   assert.match(reviewed.research.summary, /поиск завершён/i);
-  assert.match(reviewed.research.summary, /не нашёл/i);
+  assert.match(reviewed.research.summary, /письм.*внутренн[^.]*данн/iu);
+  assert.doesNotMatch(reviewed.research.summary, /не\s+наш[её]л/iu);
   assert.doesNotMatch(
     `${reviewed.businessContext} ${reviewed.research.summary}`,
     /источники (?:ниже|дают)/i,
@@ -1073,6 +1321,26 @@ test("logs final context after review without blocking result persistence", asyn
   assert.match(
     source.slice(contextIndex, resultIndex),
     /\.catch\(\(\) => \{\}\)/,
+  );
+});
+
+test("passes the saved stock revision and timestamp into the live OpenCode catalog", async () => {
+  const source = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("function demoDataForJob(");
+  const end = source.indexOf("function storedJobJson(", start);
+  const snapshotAdapter = source.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(
+    snapshotAdapter,
+    /stockRevision\s*:[^,\n]{0,120}(?:stockRevision|revision)/,
+  );
+  assert.match(
+    snapshotAdapter,
+    /stockUpdatedAt\s*:[^,\n]{0,120}(?:stockUpdatedAt|updatedAt)/,
   );
 });
 
@@ -1102,7 +1370,10 @@ test("rejects reviewer approval when blocking issues are not empty", () => {
 
   assert.equal(reviewed.zone, "red");
   assert.equal(reviewed.decision, "escalate");
-  assert.match(reviewed.review.notes.join(" "), /Блокер/);
+  assert.match(
+    reviewed.review.notes.join(" "),
+    /неподтвержд[её]нн[^.]*обещан/iu,
+  );
 });
 
 test("requires reviewer approval to be the boolean true", () => {
@@ -1194,4 +1465,96 @@ test("keeps a negative review red when the product is still unknown", () => {
   assert.equal(reviewed.zone, "red");
   assert.equal(reviewed.decision, "escalate");
   assert.equal(reviewed.options.length, 3);
+});
+
+test("accepts complete grounded live results on all three routes", () => {
+  const greenJob = {
+    company: "ГородПроект",
+    subject: "Белая краска для офиса",
+    body: "Нужно 200 кг продукта КР-004 для внутренних стен офиса, цвет белый.",
+  };
+  const review = {
+    approved: true,
+    verdict: "Факты и полномочия подтверждены",
+    notes: [],
+    blockingIssues: [],
+  };
+  const green = applyReviewerResult(
+    normalizeAgentResult(
+      agentDraft({ sku: "КР-004", requestedKg: 200 }),
+      demoData,
+      greenJob,
+    ),
+    review,
+    "opencode/gpt-5.6-sol",
+    demoData,
+    greenJob,
+  );
+  const yellowJob = {
+    company: "Дачный посёлок",
+    subject: "Хочу покрасить забор",
+    body: "Помогите выбрать краску и рассчитать количество.",
+  };
+  const yellow = applyReviewerResult(
+    normalizeAgentResult(agentDraft(), demoData, yellowJob),
+    review,
+    "opencode/gpt-5.6-sol",
+    demoData,
+    yellowJob,
+  );
+  const redJob = {
+    company: "МеталлСтрой",
+    subject: "Крупная партия для ограждений",
+    body: "Нужны 800 кг КР-001 для металлических ограждений на улице, цвет RAL 7024.",
+  };
+  const red = applyReviewerResult(
+    normalizeAgentResult(
+      agentDraft({ sku: "КР-001", requestedKg: 800 }),
+      demoData,
+      redJob,
+    ),
+    review,
+    "opencode/gpt-5.6-sol",
+    demoData,
+    redJob,
+  );
+
+  assert.equal(green.route, "ready");
+  assert.equal(yellow.route, "needs_info");
+  assert.equal(red.route, "manager");
+  assert.equal(isCompleteAgentResult(green), true);
+  assert.equal(isCompleteAgentResult(yellow), true);
+  assert.equal(isCompleteAgentResult(red), true);
+});
+
+test("rejects a contradictory or partial live result", () => {
+  const job = {
+    company: "ГородПроект",
+    subject: "Белая краска для офиса",
+    body: "Нужно 200 кг продукта КР-004 для внутренних стен офиса, цвет белый.",
+  };
+  const normalized = normalizeAgentResult(
+    agentDraft({ sku: "КР-004", requestedKg: 200 }),
+    demoData,
+    job,
+  );
+  const reviewed = applyReviewerResult(
+    normalized,
+    {
+      approved: true,
+      verdict: "Факты и полномочия подтверждены",
+      notes: [],
+      blockingIssues: [],
+    },
+    "opencode/gpt-5.6-sol",
+    demoData,
+    job,
+  );
+  const contradictory = structuredClone(reviewed);
+  contradictory.route = "manager";
+  const partial = structuredClone(reviewed);
+  partial.market.items = [{ competitor: "Поставщик" }];
+
+  assert.equal(isCompleteAgentResult(contradictory), false);
+  assert.equal(isCompleteAgentResult(partial), false);
 });
