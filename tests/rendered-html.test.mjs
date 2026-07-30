@@ -63,6 +63,11 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Проверенные данные/);
   assert.match(stand, /Сведения о клиенте/);
   assert.match(stand, /Журнал и таблица/);
+  assert.match(stand, /<details className="zone-guide" open>/);
+  assert.match(
+    stand,
+    /bridgeOnline[\s\S]*?В живом режиме модель описывает фото[\s\S]*?По заданным правилам агент работает с письмом, каталогом, живым складом/,
+  );
   assert.match(stand, /Google[- ]таблиц|Google Таблиц/iu);
   assert.match(stand, /Другой пример/);
   assert.match(stand, /type="file"/);
