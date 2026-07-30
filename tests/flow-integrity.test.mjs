@@ -5,7 +5,11 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
-function exportedFunctionFromTypeScript(source, functionName) {
+function exportedFunctionFromTypeScript(
+  source,
+  functionName,
+  context = {},
+) {
   const sourceFile = ts.createSourceFile(
     "route.ts",
     source,
@@ -35,7 +39,7 @@ function exportedFunctionFromTypeScript(source, functionName) {
       module: ts.ModuleKind.None,
     },
   }).outputText;
-  return runInNewContext(`${javascript}\n${functionName}`);
+  return runInNewContext(`${javascript}\n${functionName}`, context);
 }
 
 test("applies every migration and keeps one history row per source step", async () => {
@@ -115,18 +119,146 @@ test("guards recalculation with fresh-stock and compare-and-set checks", async (
   assert.match(branch, /coalesce\(\$\{orders\.inventorySnapshotJson\}/);
   assert.match(branch, /orders\.sentAt/);
   assert.match(branch, /\.returning\(\{ id: orders\.id \}\)/);
-  assert.match(branch, /sourceKey:\s*`inventory:/);
+  assert.match(branch, /sourceKey:\s*`recalculate:/);
   assert.match(
     branch,
     /preserveConfirmedResearch\(\s*previousResult,\s*recalculatedResult,\s*\)/,
   );
   assert.match(
     route,
-    /result\.research\?\.checked[\s\S]*?stage:\s*"company-context"[\s\S]*?title:\s*"Сведения о компании учтены"/,
+    /result\.research\?\.checked[\s\S]*?stage:\s*"company-context"[\s\S]*?title:\s*"Агент изучил сведения о компании"/,
   );
   assert.match(
     route,
     /result\.market\.items\.length > 0[\s\S]*?"Агент сравнил нашу цену с ценами других поставщиков"[\s\S]*?"Агент проверил цену по карточке товара"/,
+  );
+});
+
+test("keeps the live supplier market in the order data snapshot", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const snapshotFromDemoData = exportedFunctionFromTypeScript(
+    route,
+    "snapshotFromDemoData",
+  );
+  const market = [
+    {
+      id: "floor--supplier",
+      category: "краска для бетонного пола",
+      competitor: "Поставщик",
+      stockKg: 150,
+      stockCheckedAt: "30.07.2026, 15:20",
+      pricePerKg: 402,
+      deliveryDays: 4,
+    },
+  ];
+
+  const snapshot = snapshotFromDemoData({
+    products: [
+      {
+        sku: "КР-003",
+        name: "Краска для бетонного пола",
+        stockKg: 420,
+        stockRevision: 3,
+        stockUpdatedAt: "2026-07-30T12:20:00.000Z",
+      },
+    ],
+    market,
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.market)),
+    market,
+  );
+});
+
+test("loads inventory and supplier market from one live data source", async () => {
+  const inventorySource = await readFile(
+    new URL("../lib/inventory.ts", import.meta.url),
+    "utf8",
+  );
+  const liveMarket = [
+    {
+      id: "floor--supplier",
+      category: "краска для бетонного пола",
+      competitor: "Поставщик",
+      stockKg: 150,
+      stockCheckedAt: "30.07.2026, 15:20",
+      pricePerKg: 402,
+      deliveryDays: 4,
+    },
+  ];
+  const getDemoDataWithInventory = exportedFunctionFromTypeScript(
+    inventorySource,
+    "getDemoDataWithInventory",
+    {
+      asc: (value) => value,
+      demoData: {
+        products: [
+          {
+            sku: "КР-003",
+            name: "Краска для бетонного пола",
+            stockKg: 420,
+          },
+        ],
+        market: [{ competitor: "Статический поставщик", stockKg: 260 }],
+      },
+      ensureDb: async () => {},
+      getDb: () => ({
+        select: () => ({
+          from: () => ({
+            orderBy: async () => [
+              {
+                sku: "КР-003",
+                stockKg: 410,
+                revision: 3,
+                updatedAt: "2026-07-30T12:20:00.000Z",
+              },
+            ],
+          }),
+        }),
+      }),
+      getLiveMarket: async () => liveMarket,
+      inventoryItems: { sku: "sku" },
+      normalizedTimestamp: (value) => value,
+    },
+  );
+
+  const result = await getDemoDataWithInventory();
+
+  assert.equal(result.products[0].stockKg, 410);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result.market)),
+    liveMarket,
+  );
+});
+
+test("logs the selected supplier volume beside the available volume", async () => {
+  const agentRoute = await readFile(
+    new URL("../app/api/agent/route.ts", import.meta.url),
+    "utf8",
+  );
+  const supplierPlanDetail = exportedFunctionFromTypeScript(
+    agentRoute,
+    "supplierPlanDetail",
+  );
+
+  assert.equal(
+    supplierPlanDetail({
+      supplierPlan: {
+        supplierName: "Индустрия Покрытий",
+        ourKg: 420,
+        supplierKg: 200,
+        supplierStockKg: 260,
+        supplierPricePerKg: 402,
+        deliveryDays: 4,
+        stockCheckedAt: "30.07.2026, 10:40",
+        total: 254700,
+      },
+    }),
+    "Для полного заказа найден поставщик «Индустрия Покрытий»: выбрано 200 кг из доступных 260 кг по 402 ₽/кг, срок 4 дн., данные от 30.07.2026, 10:40. Наша часть — 420 кг, весь заказ — 254 700 ₽.",
   );
 });
 
@@ -351,7 +483,7 @@ test("commits critical order transitions together with their ledger rows", async
   }
   assert.match(
     liveResult,
-    /insertResultHistoryWhen\([\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*historyQuery,\s*closeActiveEventsQuery,\s*decisionEventQuery,\s*updateOrderQuery,\s*\]\)/,
+    /insertResultHistoryWhen\([\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*historyQuery,\s*closeActiveEventsQuery,\s*supplierEventQuery,\s*decisionEventQuery,\s*updateOrderQuery,\s*\]\)/,
   );
   assert.match(
     recalculation,
@@ -407,6 +539,89 @@ test("reserves only the stock-confirmed part of a split delivery", async () => {
       stockKg: 1100,
     }),
     "1 100 кг краски «Краска для бетонного пола» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.",
+  );
+});
+
+test("rechecks the other supplier before approval, reserve and send", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const supplierPlanEventDetail = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "supplierPlanEventDetail",
+  );
+  const plan = {
+    supplierName: "Индустрия Покрытий",
+    supplierKg: 200,
+    supplierStockKg: 260,
+    supplierPricePerKg: 402,
+    deliveryDays: 4,
+    stockCheckedAt: "30.07.2026, 10:40",
+    ourKg: 420,
+    total: 254700,
+  };
+
+  assert.equal(
+    supplierPlanEventDetail(plan),
+    "В таблице «Индустрия Покрытий» указано 200 кг из доступных 260 кг по 402 ₽/кг, срок 4 дн., данные от 30.07.2026, 10:40. Наша часть — 420 кг, весь заказ — 254 700 ₽.",
+  );
+
+  const reservation = ordersRoute.slice(
+    ordersRoute.indexOf('if (action === "reserve")'),
+    ordersRoute.indexOf('if (action === "send")'),
+  );
+  const approval = ordersRoute.slice(
+    ordersRoute.indexOf('if (action !== "approve"'),
+  );
+  const send = ordersRoute.slice(
+    ordersRoute.indexOf('if (action === "send")'),
+    ordersRoute.indexOf('if (action !== "approve"'),
+  );
+  for (const branch of [reservation, approval, send]) {
+    assert.match(branch, /confirmSupplierPlan\(/);
+    assert.match(
+      branch,
+      /Данные поставщика обновились\. Пересчитайте карточку/,
+    );
+    assert.match(branch, /recalculate:\s*true/);
+    assert.match(branch, /\{ status: 409 \}/);
+  }
+  assert.match(
+    reservation,
+    /reserveEventDetail\(\s*result\.product,\s*confirmedSupplierPlan,\s*\)/,
+  );
+  assert.match(
+    approval,
+    /Перед решением повторно проверены цена, объём, срок и дата/,
+  );
+  assert.match(
+    send,
+    /Перед записью отправки повторно проверены цена, объём, срок и дата поставщика/,
+  );
+  assert.match(
+    ordersRoute,
+    /title:\s*"Нужен свежий расчёт совместной поставки"/,
+  );
+});
+
+test("keeps the supplier check when recalculation rebuilds the route", async () => {
+  const ordersRoute = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const recalculation = ordersRoute.slice(
+    ordersRoute.indexOf('if (action === "recalculate")'),
+    ordersRoute.indexOf('if (action === "reserve")'),
+  );
+
+  assert.match(
+    recalculation,
+    /\[\s*"inventory",\s*"market",\s*"partner-stock",\s*"review",\s*"decision",\s*\]\.includes\(event\.stage\)/,
+  );
+  assert.match(
+    recalculation,
+    /supplierOutdated[\s\S]*?confirmSupplierPlan\([\s\S]*?!inventoryOutdated[\s\S]*?!supplierOutdated/,
   );
 });
 
@@ -492,7 +707,7 @@ test("applies an approved stocked analogue to the product and reserve", async ()
   );
   assert.match(
     approval,
-    /approvedProduct\.stockKg < originalProduct\.requestedKg[\s\S]*?Полного объёма предложенной краски уже нет на складе/,
+    /approvedProduct\.stockKg < originalProduct\.requestedKg[\s\S]*?Остаток краски изменился\. Пересчитайте карточку/,
   );
 });
 

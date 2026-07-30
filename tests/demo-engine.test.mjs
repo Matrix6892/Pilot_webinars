@@ -292,6 +292,170 @@ test("uses material and area recognized in a photo to calculate floor paint", ()
   );
 });
 
+test("uses a company profile to form a cautious floor hypothesis and one question", () => {
+  const result = buildDemoResult({
+    company: "ГК «ПРОТЕК»",
+    website: "protek-group.ru",
+    subject: "Помогите выбрать краску для пола",
+    body: "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Марку и количество не знаем. Пол моют каждый день.",
+  });
+  const visibleCopy = [
+    result.businessContext,
+    result.zoneReason,
+    result.reply.body,
+  ].join(" ");
+
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.zone, "yellow");
+  assert.equal(result.product?.sku, "КР-003");
+  assert.equal(result.product?.requestedKg, 0);
+  assert.equal(result.research?.checked, true);
+  assert.equal(result.research?.sources.length, 2);
+  assert.equal(result.missing.length, 1);
+  assert.match(
+    result.missing[0],
+    /материал пола.*назначение помещения.*способ уборки.*нагрузка/iu,
+  );
+  assert.match(result.businessContext, /фармацевтическ.*медицинск/iu);
+  assert.match(result.businessContext, /агент предполагает/iu);
+  assert.match(
+    result.businessContext,
+    /подходит для цехов и складов.*выдерживает тележки и технику/iu,
+  );
+  assert.match(
+    result.reply.body,
+    /похоже, помещение может быть складом.*если (?:его|помещение) используют как медицинский склад.*первым вариантом станет краска/isu,
+  );
+  assert.match(
+    result.reply.body,
+    /обычный склад.*другое помещение.*подберём покрытие по назначению/isu,
+  );
+  assert.match(result.reply.body, /светло-серый.*есть в каталоге/iu);
+  assert.match(
+    result.reply.body,
+    /как используют помещение/iu,
+  );
+  assert.match(result.understood.join(" "), /цвет: светло-серый/iu);
+  assert.match(
+    result.reply.body,
+    /рассчитаем заказ на 800 м².*проверим цвет.*остаток на складе/isu,
+  );
+  assert.doesNotMatch(result.reply.body, /ГОСТ|дезинфиц|технолог/iu);
+  assert.doesNotMatch(
+    result.reply.body,
+    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*/iu,
+  );
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.doesNotMatch(
+    visibleCopy,
+    /КР-003\s+(?:соответствует|подходит)\s+(?:ГОСТ|GMP|ISO|СанПиН)|выдерживает\s+дезинфекц/iu,
+  );
+  assert.match(
+    result.decisionBasis.map((basis) => basis.source).join(" "),
+    /О группе компаний «ПРОТЕК».*Направления бизнеса/iu,
+  );
+});
+
+test("continues the floor card through a customer reply and a live stock change", () => {
+  const initialBody =
+    "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Марку и количество не знаем. Пол моют каждый день.";
+  const input = {
+    company: "ГК «ПРОТЕК»",
+    website: "protek-group.ru",
+    subject: "Помогите выбрать краску для пола",
+    body: `${initialBody}\n\nОтвет клиента 1: Пол бетонный. Храним лекарства. Моем нейтральным средством. По полу ездят погрузчики.`,
+  };
+  const replenished = structuredClone(baseCatalog);
+  replenished.products = replenished.products.map((product) =>
+    product.sku === "КР-003"
+      ? {
+          ...product,
+          stockKg: 700,
+          stockRevision: 12,
+          stockUpdatedAt: "2026-07-30T12:00:00+03:00",
+        }
+      : product,
+  );
+
+  const beforeRestock = buildDemoResult(input);
+  const afterRestock = buildDemoResult(input, replenished);
+
+  assert.equal(beforeRestock.route, "manager");
+  assert.equal(beforeRestock.zone, "red");
+  assert.equal(beforeRestock.product?.requestedKg, 620);
+  assert.equal(beforeRestock.calculation?.paintAreaM2, 800);
+  assert.match(beforeRestock.calculation?.explanation ?? "", /31 упаковку/iu);
+  assert.doesNotMatch(
+    beforeRestock.calculation?.explanation ?? "",
+    /31 упаковок/iu,
+  );
+  assert.deepEqual(beforeRestock.missing, []);
+  assert.match(beforeRestock.understood.join(" "), /хранение помещения:|назначение помещения:/iu);
+  assert.match(beforeRestock.understood.join(" "), /нейтральное моющее средство/iu);
+  assert.match(beforeRestock.understood.join(" "), /погрузчики/iu);
+  const supplierHelp = beforeRestock.options.find(
+    (option) => option.id === "помочь-с-недостающим-объёмом",
+  );
+  assert.ok(supplierHelp);
+  assert.equal(beforeRestock.supplierPlan?.ourKg, 420);
+  assert.equal(beforeRestock.supplierPlan?.supplierKg, 200);
+  assert.equal(beforeRestock.supplierPlan?.ourSubtotal, 174300);
+  assert.equal(beforeRestock.supplierPlan?.supplierSubtotal, 80400);
+  assert.equal(beforeRestock.supplierPlan?.total, 254700);
+  assert.equal(beforeRestock.supplierPlan?.deliveryDays, 4);
+  assert.equal(beforeRestock.supplierPlan?.offersChecked, 3);
+  assert.equal(beforeRestock.supplierPlan?.eligibleOffers, 2);
+  const supplierCopy = `${supplierHelp.rationale} ${supplierHelp.reply}`;
+  assert.match(supplierCopy, /Индустрия Покрытий/iu);
+  assert.match(supplierCopy, /420 кг.*415 ₽/isu);
+  assert.match(supplierCopy, /200 кг.*402 ₽/isu);
+  assert.match(supplierHelp.reply, /254\s*700 ₽/u);
+  assert.match(supplierCopy, /4 дня/iu);
+  assert.match(supplierHelp.rationale, /на 6 дней раньше/iu);
+  assert.match(supplierHelp.rationale, /на 2\s*600 ₽ меньше/iu);
+  assert.doesNotMatch(
+    supplierHelp.reply,
+    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*/iu,
+  );
+  assert.match(
+    supplierHelp.reply,
+    /на складе «Колера» доступно 420 кг.*по данным от 30\.07\.2026, 10:40.*доступно 260 кг.*готовим запрос партнёру: подтвердить 200 кг; срок — 4 дня; цвет — «светло-серый»; совместимость.*после подтверждений пришлём единый график/isu,
+  );
+  assert.match(
+    supplierHelp.reply,
+    /после подтверждения.*(?:сократить ожидание|раньше).*6 дней.*2\s*600 ₽/isu,
+  );
+  assert.doesNotMatch(
+    supplierHelp.reply,
+    /подготовили способ собрать все|так вы получите весь объём/iu,
+  );
+  assert.match(
+    beforeRestock.decisionBasis.map((basis) => basis.source).join(" "),
+    /цен и наличия других поставщиков/iu,
+  );
+
+  assert.equal(afterRestock.route, "ready");
+  assert.equal(afterRestock.zone, "green");
+  assert.equal(afterRestock.product?.stockKg, 700);
+  assert.equal(afterRestock.product?.requestedKg, 620);
+  assert.deepEqual(afterRestock.missing, []);
+  assert.doesNotMatch(afterRestock.reply.body, /что храните|чем его моете/iu);
+  assert.match(
+    afterRestock.reply.body,
+    /подходит для цехов и складов.*ежедневной влажной уборки нейтральным средством/isu,
+  );
+  assert.match(afterRestock.reply.body, /паспорт качества/iu);
+  assert.doesNotMatch(afterRestock.reply.body, /Клиент подтвердил/iu);
+  assert.doesNotMatch(
+    afterRestock.reply.body,
+    /соответств\p{L}*\s+(?:ГОСТ|GMP|ISO|СанПиН)|выдерживает\s+дезинфекц/iu,
+  );
+  assert.match(
+    afterRestock.decisionBasis.map((basis) => basis.stockVersion).join(" "),
+    /12/u,
+  );
+});
+
 test("a live stock change alters the next decision and records its revision", () => {
   const input = {
     subject: "Краска для деревянных конструкций",
@@ -472,7 +636,7 @@ test("explains a high market position through confirmed value and the next profi
   assert.equal(result.route, "ready");
   assert.equal(
     result.market.position,
-    "Наша цена 415 ₽/кг, на 13 ₽ выше цены другого поставщика. Агент покажет клиенту наличие, срок и свойства краски. Весь объём подтверждён складом.",
+    "Наша цена 415 ₽/кг, на 12 ₽ выше средней цены других поставщиков. Агент покажет клиенту наличие, срок и свойства краски. Весь объём подтверждён складом.",
   );
   assert.equal(
     result.market.profitOpportunity,
@@ -492,7 +656,7 @@ test("explains a high market position through confirmed value and the next profi
   );
   assert.equal(
     equalPrice.market.position,
-    "Наша цена 402 ₽/кг совпадает с ценой другого поставщика. Весь объём подтверждён складом.",
+    "Наша цена 402 ₽/кг, на 1 ₽ ниже средней цены других поставщиков. Цена выглядит привлекательно. Весь объём подтверждён складом.",
   );
 });
 
@@ -506,7 +670,7 @@ test("keeps the market note aligned with a stock shortage", () => {
   assert.equal(result.product?.stockKg, 420);
   assert.equal(
     result.market.position,
-    "Наша цена 415 ₽/кг, на 13 ₽ выше цены другого поставщика. Агент покажет клиенту наличие, срок и свойства краски. Склад подтверждает 420 из 650 кг. Поставку оставшейся части согласует руководитель.",
+    "Наша цена 415 ₽/кг, на 12 ₽ выше средней цены других поставщиков. Агент покажет клиенту наличие, срок и свойства краски. Склад подтверждает 420 из 650 кг. Поставку оставшейся части согласует руководитель.",
   );
   assert.doesNotMatch(
     `${result.market.position} ${result.market.summary}`,
@@ -593,4 +757,70 @@ test("falls back to the safe catalog value when a snapshot has invalid stock", (
 
   assert.equal(result.product?.stockKg, 180);
   assert.equal(result.route, "ready");
+});
+
+test("uses confirmed conditions for an ordinary room at a researched company", () => {
+  const replenished = structuredClone(baseCatalog);
+  replenished.products = replenished.products.map((product) =>
+    product.sku === "КР-003" ? { ...product, stockKg: 700 } : product,
+  );
+  const result = buildDemoResult(
+    {
+      company: "ГК «ПРОТЕК»",
+      website: "protek-group.ru",
+      subject: "Помогите выбрать краску для пола",
+      body: [
+        "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
+        "Ответ клиента 1: Помещение будет мастерской. Пол бетонный, моем нейтральным средством, погрузчиков не будет.",
+      ].join("\n\n"),
+    },
+    replenished,
+  );
+  const visibleCopy = `${result.businessContext} ${result.reply.body}`;
+
+  assert.equal(result.route, "ready");
+  assert.equal(result.product?.sku, "КР-003");
+  assert.equal(result.product?.requestedKg, 620);
+  assert.match(result.understood.join(" "), /мастерск/iu);
+  assert.match(result.reply.body, /назначение «мастерской»/iu);
+  assert.doesNotMatch(
+    visibleCopy,
+    /краска\s+(?:подходит|соответствует)\s+(?:для\s+)?(?:фармацевтическ|медицинск)|соответств\p{L}*\s+ГОСТ|выдерживает\s+дезинфекц/iu,
+  );
+});
+
+test("keeps a named standard or disinfectant pending verification", () => {
+  const result = buildDemoResult({
+    company: "ГК «ПРОТЕК»",
+    website: "protek-group.ru",
+    subject: "Краска для пола медицинского склада",
+    body: "Нужна светло-серая краска для бетонного пола медицинского склада площадью 400 м². Пол каждый день обрабатывают дезинфицирующим средством, по нему ездят погрузчики. Требуется соответствие ГОСТ.",
+  });
+
+  const optionCopy = result.options
+    .map(
+      (option) =>
+        `${option.title} ${option.rationale} ${option.tradeoff} ${option.reply}`,
+    )
+    .join(" ");
+
+  assert.equal(result.route, "manager");
+  assert.equal(result.zone, "red");
+  assert.match(result.missing.join(" "), /документ|ГОСТ|средств|технолог/iu);
+  assert.match(
+    optionCopy,
+    /точное название.*(?:документ|средств).*технолог.*паспортом качества.*карточкой краски/isu,
+  );
+  assert.match(
+    `${result.zoneReason} ${result.managerNote}`,
+    /документ|дезинфиц|средств/iu,
+  );
+  assert.doesNotMatch(
+    `${result.zoneReason} ${result.managerNote}`,
+    /моторн\p{L}*\s+масл/iu,
+  );
+  assert.doesNotMatch(
+    `${result.businessContext} ${result.reply.body} ${optionCopy}`,
+    /подтверждаем\s+соответствие\s+ГОСТ|КР-003\s+соответствует\s+ГОСТ|выдерживает\s+дезинфекц/iu,
+  );
 });

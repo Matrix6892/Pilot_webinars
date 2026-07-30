@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { ensureDb, getDb } from "@/db";
 import { inventoryItems } from "@/db/schema";
 import demoData from "@/data/paint-demo.json";
+import { getLiveMarket } from "@/lib/market-store";
 
 export const INVENTORY_MAX_STOCK_KG = 1_000_000;
 export const INVENTORY_REASON_MAX_LENGTH = 180;
@@ -93,14 +94,18 @@ export function isInventorySku(value: string) {
 
 export async function getDemoDataWithInventory() {
   await ensureDb();
-  const rows = await getDb()
-    .select()
-    .from(inventoryItems)
-    .orderBy(asc(inventoryItems.sku));
+  const [rows, market] = await Promise.all([
+    getDb()
+      .select()
+      .from(inventoryItems)
+      .orderBy(asc(inventoryItems.sku)),
+    getLiveMarket(),
+  ]);
   const bySku = new Map(rows.map((row) => [row.sku, row]));
 
   return {
     ...demoData,
+    market,
     products: demoData.products.map((product) => {
       const live = bySku.get(product.sku);
       return {

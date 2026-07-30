@@ -9,6 +9,7 @@ import {
   explicitSkuFromText,
   fenceMaterialFromText,
   fenceMeasurementsFromText,
+  floorUseFactsFromText,
   hasColor,
   hasSpecialTerms,
   hasUsableEnvironment,
@@ -84,6 +85,47 @@ test("marks ambiguous environment and compatibility questions as gaps", () => {
   );
 });
 
+test("recognizes cleaning and documented-use requirements as compatibility gaps", () => {
+  for (const phrase of [
+    "Пол будут убирать каждый день.",
+    "Пол моют каждый день.",
+    "Покрытие нужно для ежедневной санитарной обработки.",
+    "Будем применять дезинфицирующее средство.",
+    "Требуется соответствие ГОСТ для этого помещения.",
+  ]) {
+    assert.equal(asksCompatibility(phrase), true, phrase);
+  }
+});
+
+test("collects floor use facts from the customer's continuation", () => {
+  const facts = floorUseFactsFromText(
+    [
+      "Нужна краска для пола. Пол моют каждый день.",
+      "Ответ клиента 1: Пол бетонный. Храним лекарства, моем нейтральным средством, по полу ездят погрузчики.",
+    ].join("\n\n"),
+  );
+
+  assert.deepEqual(facts, {
+    material: "бетон",
+    purpose: "медицинский склад",
+    cleaning: "нейтральное моющее средство",
+    load: "погрузчики или тележки",
+  });
+});
+
+test("understands a non-warehouse answer about how the room will be used", () => {
+  const facts = floorUseFactsFromText(
+    "Помещение будет мастерской. Пол бетонный, моем нейтральным средством, погрузчиков не будет.",
+  );
+
+  assert.deepEqual(facts, {
+    material: "бетон",
+    purpose: "мастерской",
+    cleaning: "нейтральное моющее средство",
+    load: "без погрузчиков и тележек",
+  });
+});
+
 test("uses the latest customer reply for corrected order facts", () => {
   const conversation = [
     "Нужно 180 кг КР-099. Пока неизвестно, внутри или на улице.",
@@ -127,6 +169,15 @@ test("does not carry a resolved compatibility question into the current request"
   ].join("\n\n");
 
   assert.equal(asksCompatibility(conversation), false);
+});
+
+test("keeps a cleaning requirement open when the customer only rules out oil", () => {
+  const conversation = [
+    "Пол будут убирать каждый день. Подберите подходящее покрытие.",
+    "Ответ клиента 1: Масел на полу не будет.",
+  ].join("\n\n");
+
+  assert.equal(asksCompatibility(conversation), true);
 });
 
 test("extracts the customer's target unit price", () => {

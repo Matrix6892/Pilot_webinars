@@ -230,6 +230,15 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
     }).allowsPublicSearch,
     false,
   );
+  assert.equal(
+    sourcePlanForJob({
+      company: "ГК «ПРОТЕК»",
+      website: "",
+      subject: "Краска для пола склада",
+      body: "Подберите краску для пола и рассчитайте количество по площади.",
+    }).allowsPublicSearch,
+    true,
+  );
 });
 
 test("does not verify a URL from a failed web action", async () => {

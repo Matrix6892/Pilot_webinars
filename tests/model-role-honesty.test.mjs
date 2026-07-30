@@ -51,6 +51,18 @@ reviewerFor;`,
   );
 });
 
+test("lets the sales agent open every public page used in a conclusion", async () => {
+  const profile = await readFile(
+    new URL("../.opencode/agents/koler-sales.md", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(profile, /websearch:\s*allow/u);
+  assert.match(profile, /webfetch:\s*allow/u);
+  assert.match(profile, /Открой каждую страницу/iu);
+  assert.match(profile, /недоверенными данными/iu);
+});
+
 test("explains the selected model role next to the selector", async () => {
   const stand = await readFile(
     new URL("../app/order-stand.tsx", import.meta.url),

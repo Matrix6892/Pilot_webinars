@@ -22,6 +22,25 @@ function resultRoute(result: AgentResult | null) {
   return "ready";
 }
 
+export function supplierPlanDetail(result: AgentResult) {
+  const plan = result.supplierPlan;
+  if (!plan) return "";
+  const formatted = new Intl.NumberFormat("ru-RU");
+  return `Для полного заказа найден поставщик «${
+    plan.supplierName
+  }»: выбрано ${formatted.format(
+    plan.supplierKg,
+  )} кг из доступных ${formatted.format(
+    plan.supplierStockKg,
+  )} кг по ${formatted.format(
+    plan.supplierPricePerKg,
+  )} ₽/кг, срок ${plan.deliveryDays} дн., данные от ${
+    plan.stockCheckedAt
+  }. Наша часть — ${formatted.format(
+    plan.ourKg,
+  )} кг, весь заказ — ${formatted.format(plan.total)} ₽.`;
+}
+
 function storedResult(value: string | null) {
   if (!value) return null;
   try {
@@ -166,13 +185,32 @@ export async function POST(request: Request) {
       payload.reviewerModel ?? "OpenCode reviewer",
     ).slice(0, 120);
     const previousResult = storedResult(order.resultJson);
-    const isInventoryRecalculation = order.mode === "opencode-recalculate";
-    const historyReason = isInventoryRecalculation
-      ? "Склад перечитан"
-      : "Решение рабочей модели";
-    const sourceKey = isInventoryRecalculation
-      ? `inventory-model:${order.roundNo}`
-      : `model:${order.roundNo}`;
+    const isSupplierRecalculation = [
+      "opencode-supplier-recalculate",
+      "opencode-inventory-supplier-recalculate",
+    ].includes(order.mode);
+    const isInventoryRecalculation = [
+      "opencode-recalculate",
+      "opencode-inventory-supplier-recalculate",
+    ].includes(order.mode);
+    const isRecalculation =
+      isSupplierRecalculation || isInventoryRecalculation;
+    const historyReason =
+      isSupplierRecalculation && isInventoryRecalculation
+        ? "Поставщик и склад перечитаны"
+        : isSupplierRecalculation
+          ? "Поставщик перечитан"
+          : isInventoryRecalculation
+            ? "Склад перечитан"
+            : "Решение рабочей модели";
+    const sourceKey =
+      isSupplierRecalculation && isInventoryRecalculation
+        ? `inventory-supplier-model:${order.roundNo}`
+        : isSupplierRecalculation
+          ? `supplier-model:${order.roundNo}`
+          : isInventoryRecalculation
+            ? `inventory-model:${order.roundNo}`
+            : `model:${order.roundNo}`;
     const transitionGuard = and(
       eq(orders.id, orderId),
       eq(orders.status, "processing"),
@@ -203,15 +241,33 @@ export async function POST(request: Request) {
           sql`exists (select 1 from ${orders} where ${transitionGuard})`,
         ),
       );
+    const supplierPlan = agentResult.supplierPlan;
+    const supplierEventQuery = insertOrderEventWhen(
+      db,
+      {
+        orderId,
+        stage: "partner-stock",
+        title: "Агент нашёл, где собрать полный объём",
+        detail: supplierPlanDetail(agentResult),
+      },
+      and(
+        transitionGuard,
+        supplierPlan ? sql`1 = 1` : sql`1 = 0`,
+      )!,
+    );
     const decisionEventQuery = insertOrderEventWhen(
       db,
       {
         orderId,
         stage: "decision",
         title:
-          isInventoryRecalculation &&
+          isRecalculation &&
           resultRoute(previousResult) !== resultRoute(agentResult)
-            ? "Свежий склад изменил решение"
+            ? isSupplierRecalculation && isInventoryRecalculation
+              ? "Свежие данные изменили решение"
+              : isSupplierRecalculation
+                ? "Свежее предложение изменило решение"
+                : "Свежий склад изменил решение"
             : status === "ready_to_send"
             ? "Следующий шаг: готов ответить"
             : status === "clarification_ready"
@@ -238,9 +294,10 @@ export async function POST(request: Request) {
       })
       .where(transitionGuard)
       .returning({ id: orders.id });
-    const [, , , updatedOrders] = await db.batch([
+    const [, , , , updatedOrders] = await db.batch([
       historyQuery,
       closeActiveEventsQuery,
+      supplierEventQuery,
       decisionEventQuery,
       updateOrderQuery,
     ]);

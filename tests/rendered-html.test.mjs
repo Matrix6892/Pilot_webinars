@@ -50,7 +50,33 @@ test("ships the Колер product surface and removes the starter", async () =>
     stand,
     /Клиент пишет своими словами\.\s*Агент ведёт заказ до письма клиенту/,
   );
-  assert.match(stand, /На стенде заявку создаёт форма/);
+  assert.match(stand, /На стенде форму отправляют/);
+  assert.match(stand, /Медицинский склад/);
+  assert.match(stand, /Обычный склад/);
+  assert.match(stand, /Другое помещение/);
+  assert.match(stand, /Как используют помещение\?/);
+  assert.match(stand, /Руководитель одобрил запрос/);
+  assert.match(stand, /Агент нашёл, как собрать все/);
+  assert.match(stand, /Расчёт варианта с другим поставщиком/);
+  assert.match(stand, /Что подтверждаем перед итоговым письмом/);
+  assert.match(stand, /Попробовать с фото забора/);
+  assert.match(stand, /Показать, как агент сохраняет большой заказ/);
+  assert.match(stand, /Заполнить свой заказ/);
+  assert.match(stand, /Заявка на подбор краски/);
+  assert.match(stand, /customDraft \? "Ваш заказ" : "Готовый пример"/);
+  assert.match(stand, /Свой заказ/);
+  assert.match(stand, /className="system-map-mobile"/);
+  assert.match(stand, /Наша часть/);
+  assert.match(stand, /в строке партнёра видно/);
+  assert.match(stand, /до полного\s+заказа/);
+  assert.match(stand, /Расчёт для сравнения; сейчас у «Колера» доступно/);
+  assert.match(stand, /В учебной строке от/);
+  assert.match(stand, /Цены и наличие у других поставщиков/);
+  assert.match(stand, /Где начинается агентная работа/);
+  assert.match(
+    stand,
+    /Чат помогает подготовить текст[\s\S]*?агент ждёт ответ клиента[\s\S]*?пересчитывает план/,
+  );
   assert.match(stand, /Описание заказа и фото/);
   assert.match(stand, /Модель для фото описала видимые детали/);
   assert.match(stand, /Модель для фото описывает видимое/);
@@ -62,11 +88,11 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /остаток на момент расчёта/);
   assert.match(stand, /Проверенные данные/);
   assert.match(stand, /Сведения о клиенте/);
-  assert.match(stand, /Журнал и таблица/);
+  assert.match(stand, /Общая память/);
   assert.match(stand, /<details className="zone-guide" open>/);
   assert.match(
     stand,
-    /bridgeOnline[\s\S]*?В живом режиме модель описывает фото[\s\S]*?По заданным правилам агент работает с письмом, каталогом, живым складом/,
+    /bridgeOnline[\s\S]*?Модель для фото описывает видимые детали[\s\S]*?Стенд читает заявку, обращается к живому складу, считает заказ/,
   );
   assert.match(stand, /Google[- ]таблиц|Google Таблиц/iu);
   assert.match(stand, /Другой пример/);
@@ -97,8 +123,8 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Что учесть/);
   assert.match(stand, /Письмо по выбранному варианту/);
   assert.match(stand, /Записать отправку ответа/);
-  assert.match(stand, /Записать вопросы в журнал демонстрации/);
-  assert.match(stand, /Продолжить эту карточку/);
+  assert.match(stand, /Записать отправку вопросов/);
+  assert.match(stand, /Передать ответ агенту/);
   assert.match(stand, /посчитает килограммы/);
   assert.match(
     stand,
@@ -109,7 +135,7 @@ test("ships the Колер product surface and removes the starter", async () =>
     /result\.calculation\.source === "распознанное фото"/,
   );
   assert.match(stand, /данные из переписки/);
-  assert.match(stand, /% на запас/);
+  assert.match(stand, /% технологического запаса/);
   assert.match(stand, /Агент перечитает склад/);
   assert.match(stand, /40 кг · агент принесёт варианты/);
   assert.match(stand, /180 кг · агент подготовит письмо/);
@@ -148,7 +174,7 @@ test("ships the Колер product surface and removes the starter", async () =>
     stand,
     /Исходное письмо, вопросы и ответы клиента сохраняются под одним номером заявки/,
   );
-  assert.match(stand, /checkedAt: "при этом расчёте"/);
+  assert.match(stand, /checkedAt: "во время этого расчёта"/);
   assert.match(stand, /Что подтверждает вывод/);
   assert.match(stand, /Проверено по источникам/);
   assert.match(stand, /Источники для проверки/);
@@ -208,6 +234,16 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(scenarios, /demoKind:\s*"fence-photo"/);
   assert.match(scenarios, /Хочу покрасить забор/);
   assert.match(scenarios, /какая краска нужна и сколько покупать/);
+  assert.match(scenarios, /ГК «ПРОТЕК»/);
+  assert.match(
+    scenarios,
+    /краска для пола в новом помещении площадью 800 м²/,
+  );
+  assert.match(scenarios, /Пол моют каждый день/);
+  assert.ok(
+    scenarios.indexOf("Хочу покрасить забор") <
+      scenarios.indexOf("ГК «ПРОТЕК»"),
+  );
   assert.match(scenarios, /ИНН 7805059867/);
   assert.ok(
     scenarios.indexOf("ИНН 7805059867") <
@@ -230,6 +266,19 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(ordersRoute, /Карточка продолжила работу/);
   assert.match(stand, /Повторить эту карточку/);
+  assert.match(stand, /const latestOrderStorageKey = "koler-latest-order"/);
+  assert.match(
+    stand,
+    /new URLSearchParams\(window\.location\.search\)[\s\S]*?sessionStorage\.getItem\(latestOrderStorageKey\)/,
+  );
+  assert.match(
+    stand,
+    /На стенде участник на минуту принимает роль руководителя/,
+  );
+  assert.match(
+    stand,
+    /humanizeText\(visibleTransition\.beforeReply\)[\s\S]*?humanizeText\(visibleTransition\.afterReply\)/,
+  );
   assert.match(stand, /Запускаем карточку снова/);
   assert.match(stand, /action:\s*"retry"/);
   assert.match(ordersRoute, /datetime\('now', '-1 minute'\)/);
@@ -247,11 +296,11 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(
     ordersRoute,
-    /action === "recalculate"[\s\S]*?status:\s*"queued"[\s\S]*?mode:\s*"opencode-recalculate"/,
+    /action === "recalculate"[\s\S]*?const liveMode = supplierOutdated[\s\S]*?"opencode-supplier-recalculate"[\s\S]*?mode:\s*liveMode/,
   );
   assert.match(
     agentRoute,
-    /order\.mode === "opencode-recalculate"[\s\S]*?"Склад перечитан"[\s\S]*?inventory-model:/,
+    /"opencode-supplier-recalculate"[\s\S]*?"Поставщик перечитан"[\s\S]*?supplier-model:/,
   );
   assert.match(
     stand,
@@ -311,10 +360,10 @@ test("explains the stand calculation, manager role and saved recalculation", asy
 
   assert.match(stand, /Режим: обработка по правилам/);
   assert.match(stand, /Автоматическая обработка по правилам и живому складу/);
-  assert.match(stand, /Руководитель выбирает особые условия/);
+  assert.match(stand, /Руководитель выбирает условия сделки/);
   assert.match(
     stand,
-    /Подтверждает цену, оплату после поставки, срочный срок или\s+частичную поставку/,
+    /Подтверждает скидку, оплату после поставки, срочную отгрузку\s+или частичную поставку/,
   );
   assert.match(
     stand,
@@ -377,6 +426,11 @@ test("prepares a contract reserve before the stand send", async () => {
     stand,
     /\.replace\(\/руководитель согласует\/gi, "руководитель подтверждает"\)/,
   );
+  assert.match(
+    stand,
+    /Что можно красить:[\s\S]*Где\s+использовать:[\s\S]*Что важно:/,
+  );
+  assert.doesNotMatch(stand, /Основание:/);
 });
 
 test("names the model roles honestly in the visible activity log", async () => {

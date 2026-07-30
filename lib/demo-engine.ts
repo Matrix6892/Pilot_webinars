@@ -5,6 +5,7 @@ import {
   colorLabelFromText,
   deliveryPlanFromText,
   explicitSkuFromText,
+  floorUseFactsFromText,
   hasColor,
   hasSpecialTerms,
   hasUsableEnvironment,
@@ -12,6 +13,7 @@ import {
   orderFactsFromText,
   quotedUnitPrices,
 } from "@/lib/order-facts.mjs";
+import { buildSupplierPlan } from "@/lib/supplier-plan.mjs";
 
 export type OrderInput = {
   subject: string;
@@ -31,7 +33,21 @@ export type DemoProduct = BaseProduct & {
   stockUpdatedAt?: string;
 };
 export type DemoMarketItem = (typeof demoData.market)[number];
-type DemoCompanyProfile = (typeof demoData.companyProfiles)[number];
+export type SupplierPlan = NonNullable<
+  ReturnType<typeof buildSupplierPlan>
+> & {
+  confirmedAt?: string;
+};
+type DemoCompanyProfile = (typeof demoData.companyProfiles)[number] & {
+  website?: string;
+  applicationGuidance?: {
+    kind: string;
+    hypothesis: string;
+    recommendation: string;
+    question: string;
+    documentRequest: string;
+  };
+};
 type DemoIndustry = (typeof demoData.industries)[number];
 type DemoRules = typeof demoData.rules;
 type FenceFacts = Omit<
@@ -140,8 +156,11 @@ export type AgentResult = {
       pricePerKg: number;
       deliveryDays: number;
       checkedAt: string;
+      stockKg?: number;
+      stockCheckedAt?: string;
     }>;
   };
+  supplierPlan?: SupplierPlan;
   research?: {
     checked: boolean;
     summary: string;
@@ -185,6 +204,19 @@ const money = new Intl.NumberFormat("ru-RU");
 const decimal = new Intl.NumberFormat("ru-RU", {
   maximumFractionDigits: 2,
 });
+
+function countedNoun(
+  value: number,
+  one: string,
+  few: string,
+  many: string,
+) {
+  const lastTwo = value % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return many;
+  const last = value % 10;
+  if (last === 1) return one;
+  return last >= 2 && last <= 4 ? few : many;
+}
 const today = new Intl.DateTimeFormat("ru-RU").format(new Date());
 
 function validNumber(value: unknown, fallback: number, allowZero = true) {
@@ -509,7 +541,12 @@ function surfaceCalculation(
       product.coverageKgPerM2PerCoat,
     )} кг/м² + ${reservePercent}% запаса = ${decimal.format(
       estimatedKg,
-    )} кг. Берём ${packages} ${packages === 1 ? "упаковку" : packages < 5 ? "упаковки" : "упаковок"} по ${decimal.format(
+    )} кг. Берём ${packages} ${countedNoun(
+      packages,
+      "упаковку",
+      "упаковки",
+      "упаковок",
+    )} по ${decimal.format(
       product.packKg,
     )} кг: ${decimal.format(roundedKg)} кг. Площадь и материал получены из ${
       surface.source === "распознанное фото" ? "описания фото" : "письма"
@@ -612,9 +649,9 @@ export function marketView(
   const priceRoom = marketMax - product.pricePerKg;
   const profitOpportunity =
     priceRoom > 0
-      ? `В следующем предложении можно попробовать цену до ${money.format(
+      ? `На следующем похожем заказе можно проверить цену до ${money.format(
           marketMax,
-        )} ₽/кг: другие поставщики уже предлагают такую цену. Журнал покажет, как изменится результат.`
+        )} ₽/кг при сопоставимых свойствах, объёме и сроке. Журнал покажет результат.`
       : "Заработать больше поможет крупный заказ или удобный график поставки.";
 
   return {
@@ -657,22 +694,66 @@ function marketBasis(view: ReturnType<typeof marketView>): DecisionBasis | null 
   const comparedPrices = view.items
     .map(
       (item) =>
-        `${item.competitor} — ${money.format(item.pricePerKg)} ₽/кг`,
+        `${item.competitor} — ${money.format(item.pricePerKg)} ₽/кг${
+          typeof item.stockKg === "number"
+            ? `, в таблице указано ${money.format(item.stockKg)} кг`
+            : ""
+        }`,
     )
     .join("; ");
   return {
     fact: `${view.position} Для сравнения: ${comparedPrices}.`,
-    source: "Учебная таблица цен других поставщиков",
-    checkedAt: latest?.checkedAt ?? today,
+    source: "Учебная таблица цен и наличия других поставщиков",
+    checkedAt: latest?.stockCheckedAt ?? latest?.checkedAt ?? today,
   };
 }
 
+function comparableHost(value: string | undefined) {
+  const source = String(value ?? "").trim();
+  if (!source) return "";
+  try {
+    return new URL(source.includes("://") ? source : `https://${source}`)
+      .hostname.toLocaleLowerCase("ru-RU")
+      .replace(/^www\./u, "");
+  } catch {
+    return source
+      .toLocaleLowerCase("ru-RU")
+      .replace(/^www\./u, "")
+      .replace(/\/.*$/u, "");
+  }
+}
+
+function comparableCompany(value: string | undefined) {
+  return String(value ?? "")
+    .toLocaleLowerCase("ru-RU")
+    .replace(/\b(?:ао|ооо|пао|зао|гк)\b/giu, "")
+    .replace(/[«»"'“”„().,\s-]+/gu, "");
+}
+
 function profileFor(
-  inn: string,
+  identity: { inn?: string; company?: string; website?: string },
   companyProfiles: DemoCompanyProfile[],
 ): DemoCompanyProfile | null {
-  return inn
-    ? companyProfiles.find((profile) => profile.inn === inn) ?? null
+  const inn = String(identity.inn ?? "").trim();
+  if (inn) {
+    const exactInn = companyProfiles.find((profile) => profile.inn === inn);
+    if (exactInn) return exactInn;
+  }
+
+  const host = comparableHost(identity.website);
+  if (host) {
+    const exactWebsite = companyProfiles.find(
+      (profile) => comparableHost(profile.website) === host,
+    );
+    if (exactWebsite) return exactWebsite;
+    return null;
+  }
+
+  const company = comparableCompany(identity.company);
+  return company
+    ? companyProfiles.find(
+        (profile) => comparableCompany(profile.name) === company,
+      ) ?? null
     : null;
 }
 
@@ -690,6 +771,43 @@ function researchFor(profile: DemoCompanyProfile | null) {
     summary: `${profile.summary} Агент сохранил ссылки и даты проверки каждого факта.`,
     sources: profile.sources,
   };
+}
+
+function floorGuidanceFor(
+  profile: DemoCompanyProfile | null,
+  surface: SurfaceFacts | null,
+) {
+  return surface?.kind === "floor" &&
+    profile?.applicationGuidance?.kind === "floor-profile"
+    ? profile.applicationGuidance
+    : null;
+}
+
+function guidedFloorGaps(
+  surface: SurfaceFacts,
+  floorUse: ReturnType<typeof floorUseFactsFromText>,
+) {
+  return [
+    ...(surface.material === "неясно" ? ["материал пола"] : []),
+    ...(!surface.paintAreaM2 ? ["площадь пола"] : []),
+    ...(!floorUse.purpose ? ["назначение помещения"] : []),
+    ...(!floorUse.cleaning ? ["способ уборки"] : []),
+    ...(!floorUse.load ? ["нагрузка на пол"] : []),
+  ];
+}
+
+function guidedFloorContext(
+  profile: DemoCompanyProfile,
+  product: DemoProduct | null,
+) {
+  const guidance = profile.applicationGuidance;
+  if (!guidance) return profile.summary;
+  const productFacts = product
+    ? `Каталог подтверждает для «${product.name}»: ${product.features.join(
+        ", ",
+      )}.`
+    : "Каталог подключится к подбору после ответа клиента.";
+  return `${profile.summary} ${guidance.hypothesis} ${guidance.recommendation} ${productFacts} ${guidance.documentRequest}`;
 }
 
 function commercialEstimateFor(
@@ -791,7 +909,9 @@ function replyWithQuestions(
 ) {
   const intro = surface
     ? mentionsPhoto
-      ? `Фото приложено к заявке. Подберём краску для поверхности «${surface.surface}» и рассчитаем количество.`
+      ? surface.surface === "забор"
+        ? "Получили фото забора. Уточним материал, размеры, стороны покраски и цвет, затем подберём краску и рассчитаем количество."
+        : `Получили фотографию поверхности «${surface.surface}». Уточним материал и размеры, затем подберём краску и рассчитаем количество.`
       : `Задачу поняли: нужно подобрать краску для поверхности «${surface.surface}».`
     : "Запрос принят. Соберём точный подбор и расчёт.";
   const questions = missing
@@ -800,7 +920,12 @@ function replyWithQuestions(
   const closing = calculation
     ? `Количество уже рассчитано: ${decimal.format(
         calculation.roundedKg,
-      )} кг, или ${calculation.packages} ${calculation.packages === 1 ? "упаковка" : calculation.packages < 5 ? "упаковки" : "упаковок"}. После ответа подтвердим подбор и наличие.`
+      )} кг, или ${calculation.packages} ${countedNoun(
+        calculation.packages,
+        "упаковка",
+        "упаковки",
+        "упаковок",
+      )}. После ответа подтвердим подбор и наличие.`
     : "По ответу рассчитаем расход, округлим до целых упаковок и проверим наличие.";
   return {
     subject: product
@@ -810,6 +935,109 @@ function replyWithQuestions(
         : "Короткое уточнение по заказу краски",
     body: `Добрый день!\n\n${intro}\n\n${questions}\n\n${closing}`,
   };
+}
+
+function replyWithFloorGuidance(
+  profile: DemoCompanyProfile,
+  product: DemoProduct | null,
+  surface: SurfaceFacts,
+  requestText: string,
+) {
+  const guidance = profile.applicationGuidance;
+  if (!guidance) {
+    return replyWithQuestions(
+      ["назначение помещения, материал пола и нагрузка"],
+      null,
+      false,
+      product,
+    );
+  }
+  const productLine = product
+    ? `Если помещение используют как медицинский склад, пол бетонный, его моют нейтральным средством и по нему ездят тележки, первым вариантом станет краска «${product.name}». Карточка товара подтверждает такую уборку, нагрузку от техники и паспорт качества на партию.`
+    : "После уточнения назначения и материала пола подберём краску из каталога.";
+  const question = [
+    "Как используют помещение?",
+    `Чтобы подобрать покрытие${
+      surface.paintAreaM2
+        ? ` для ${decimal.format(surface.paintAreaM2)} м²`
+        : ""
+    }, выберите ближайший вариант:`,
+    "— медицинский склад: материал пола, средство для ежедневной уборки, техника на полу и нужные документы;",
+    "— обычный склад: материал пола, уборка и техника;",
+    "— другое помещение: назначение, материал пола, уборка и нагрузка.",
+  ].join("\n");
+  const requestedColor = colorLabelFromText(requestText);
+  const colorLine =
+    product && requestedColor && productHasRequestedColor(product, requestText)
+      ? `Запрошенный цвет «${requestedColor}» есть в каталоге.`
+      : requestedColor
+        ? `Учли запрошенный цвет «${requestedColor}».`
+        : "";
+  const documentRequest =
+    /ГОСТ|GMP|ISO|СанПиН|дезинф|дезсредств|химическ\p{L}*\s+стойк/iu.test(
+      requestText,
+    )
+      ? guidance.documentRequest
+      : "";
+  return {
+    subject: "Один вопрос для точного подбора краски",
+    body: [
+      "Добрый день!",
+      question,
+      "На сайте группы описаны фармацевтические и медицинские направления и складской комплекс. Похоже, помещение может быть складом.",
+      productLine,
+      colorLine,
+      documentRequest,
+      "Если помещение используют иначе, подберём покрытие по назначению, нагрузке и условиям уборки.",
+      surface.paintAreaM2
+        ? `После ответа рассчитаем заказ на ${decimal.format(
+            surface.paintAreaM2,
+          )} м², проверим цвет и свежий остаток на складе.`
+        : "После ответа рассчитаем количество краски и проверим остаток на складе.",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+}
+
+function productCoversRequestedUse(
+  product: DemoProduct | null,
+  requestText: string,
+) {
+  if (!product) return false;
+  const features = product.features.join(" ");
+  if (/масл/iu.test(requestText)) return /масл/iu.test(features);
+  if (/дезинф|дезсредств/iu.test(requestText)) {
+    return /дезинф|дезсредств/iu.test(features);
+  }
+  if (/(?:ГОСТ|GMP|ISO|СанПиН)/u.test(requestText)) {
+    const requested = requestText.match(
+      /(?:ГОСТ|GMP|ISO|СанПиН)[\s№:.-]*[\dА-ЯA-Z-]*/u,
+    )?.[0];
+    return Boolean(requested && features.includes(requested));
+  }
+  if (/нейтральн\p{L}*\s+(?:моющ\p{L}*\s+)?средств/iu.test(requestText)) {
+    return /ежедневн\p{L}*[^.]{0,80}нейтральн\p{L}*\s+(?:моющ\p{L}*\s+)?средств/iu.test(
+      features,
+    );
+  }
+  if (/влажн\p{L}*\s+уборк/iu.test(requestText)) {
+    return /влажн\p{L}*\s+уборк/iu.test(features);
+  }
+  return false;
+}
+
+function technicalReviewText(requestText: string) {
+  if (/масл/iu.test(requestText)) {
+    return "Клиент сообщил о регулярном контакте пола с моторным маслом. Агент собрал условия, расчёт и карточку краски; технолог проверит стойкость на образце и закрепит подходящее покрытие.";
+  }
+  if (/дезинф|дезсредств/iu.test(requestText)) {
+    return "Клиент использует дезинфицирующее средство. Агент передаст технологу название средства, режим уборки, расчёт и карточку краски для точного подтверждения.";
+  }
+  if (/(?:ГОСТ|GMP|ISO|СанПиН)/u.test(requestText)) {
+    return "Клиент указал обязательный документ. Агент передаст технологу точное требование, карточку краски и готовый расчёт для проверки комплекта поставки.";
+  }
+  return "Условия эксплуатации требуют проверки технолога. Агент уже собрал контекст, карточку краски и расчёт.";
 }
 
 export function productHasRequestedColor(
@@ -867,6 +1095,15 @@ export function buildDemoResult(
   const deliveryPlan = deliveryPlanFromText(fullText);
   const requestedColor = colorLabelFromText(fullText);
   const facts = orderFactsFromText(evidenceText);
+  const floorUse = floorUseFactsFromText(evidenceText);
+  const profile = profileFor(
+    {
+      inn: facts.inn,
+      company: input.company,
+      website: input.website,
+    },
+    catalog.companyProfiles,
+  );
   const fence: FenceFacts | null = facts.fence
     ? {
         ...facts.fence,
@@ -936,8 +1173,13 @@ export function buildDemoResult(
       missing.push("цвет или номер RAL");
     }
   }
-  if (asksCompatibility(evidenceText)) {
-    missing.push("совместимость покрытия");
+  const compatibilityRequested = asksCompatibility(evidenceText);
+  const compatibilityCovered = productCoversRequestedUse(
+    product,
+    evidenceText,
+  );
+  if (compatibilityRequested && !compatibilityCovered) {
+    missing.push("условие для проверки технологом");
   }
   const mentionedAttachment =
     /(?:вот|(?:прилаг|приклад|прилож|прикреп)\p{L}*)\s+(?:к\s+письму\s+)?(?:фото|фотограф\p{L}*|снимок)|(?:фото|фотограф\p{L}*|снимок)\s+(?:(?:прилаг|приклад|прилож|прикреп)\p{L}*|во\s+вложени\p{L}*|вложен\p{L}*)/iu.test(
@@ -946,12 +1188,38 @@ export function buildDemoResult(
   if (mentionedAttachment && !hasAttachedPhoto) {
     missing.push("приложите фотографию");
   }
+  const floorGuidance = floorGuidanceFor(profile, surface);
+  if (floorGuidance && surface) {
+    const floorGaps = guidedFloorGaps(surface, floorUse);
+    const attachmentGap = missing.includes("приложите фотографию")
+      ? ["приложите фотографию"]
+      : [];
+    const technicalGap =
+      floorGaps.length === 0 &&
+      missing.includes("условие для проверки технологом")
+      ? ["условие для проверки технологом"]
+      : [];
+    missing.splice(
+      0,
+      missing.length,
+      ...(floorGaps.length ? [floorGaps.join(", ")] : []),
+      ...technicalGap,
+      ...attachmentGap,
+    );
+  }
 
+  const technicalReview = Boolean(
+    product &&
+      requestedKg > 0 &&
+      compatibilityRequested &&
+      !compatibilityCovered,
+  );
   const hardRed =
     Boolean(product) &&
     requestedKg > 0 &&
     (requestedKg > (product?.stockKg ?? 0) ||
       hasSpecialTerms(fullText) ||
+      technicalReview ||
       quotedUnitPrices(fullText).some(
         (price) => price < (product?.minPricePerKg ?? 0),
       ));
@@ -962,7 +1230,6 @@ export function buildDemoResult(
         !surface.paintAreaM2 ||
         !surface.sides),
   );
-  const profile = profileFor(facts.inn, catalog.companyProfiles);
   const baseMarketView = marketView(product, catalog.market, requestedKg);
   const likelyTrialOrder = Boolean(
     profile &&
@@ -998,6 +1265,7 @@ export function buildDemoResult(
   const understood = [
     input.company ? `Компания: ${input.company}` : "Компания: уточним при заказе",
     ...(facts.inn ? [`ИНН: ${facts.inn}`] : []),
+    ...(requestedColor ? [`Цвет: ${requestedColor}`] : []),
     surface
       ? surface.kind === "fence"
         ? "Задача: покрасить забор"
@@ -1005,11 +1273,30 @@ export function buildDemoResult(
       : product
         ? `Краска: ${product.name}`
         : "Задача: подобрать краску",
+    ...(surface?.kind === "floor"
+      ? [
+          ...(floorUse.material
+            ? [`Материал пола: ${floorUse.material}`]
+            : []),
+          ...(floorUse.purpose
+            ? [`Назначение помещения: ${floorUse.purpose}`]
+            : []),
+          ...(floorUse.cleaning
+            ? [`Уборка: ${floorUse.cleaning}`]
+            : []),
+          ...(floorUse.load ? [`Нагрузка: ${floorUse.load}`] : []),
+        ]
+      : []),
     ...(hasAttachedPhoto ? ["Фотография из заявки получена"] : []),
     ...(calculation
       ? [
           `Площадь покраски: ${decimal.format(calculation.paintAreaM2)} м²`,
-          `Расчёт: ${calculation.packages} ${calculation.packages === 1 ? "упаковка" : calculation.packages < 5 ? "упаковки" : "упаковок"}, ${decimal.format(
+          `Расчёт: ${calculation.packages} ${countedNoun(
+            calculation.packages,
+            "упаковка",
+            "упаковки",
+            "упаковок",
+          )}, ${decimal.format(
             calculation.roundedKg,
           )} кг`,
         ]
@@ -1051,6 +1338,13 @@ export function buildDemoResult(
       ...(product && requestedKg
         ? [stockBasis(product, requestedKg, catalog)]
         : []),
+      ...(floorGuidance && profile
+        ? profile.sources.map((source) => ({
+            fact: source.fact,
+            source: source.title,
+            checkedAt: source.checkedAt,
+          }))
+        : []),
     ];
     if (calculation) {
       decisionBasis.unshift({
@@ -1081,8 +1375,11 @@ export function buildDemoResult(
       ...(calculation ? { calculation } : {}),
       market: view,
       research,
-      businessContext: surface
-        ? calculation
+      businessContext:
+        floorGuidance && profile
+          ? guidedFloorContext(profile, product)
+          : surface
+            ? calculation
           ? `Агент получил площадь и материал из ${
               calculation.source === "распознанное фото"
                 ? "описания фото"
@@ -1097,38 +1394,56 @@ export function buildDemoResult(
             : hasAttachedPhoto
               ? "Фото и описание задачи помогают определить поверхность. Материал, площадь и условия подтверждает клиент; эти данные определяют краску и количество упаковок."
               : "Описание задачи помогает определить поверхность. Материал, площадь и условия определят краску и количество упаковок."
-        : product
-          ? `Краска «${product.name}» найдена в каталоге. Короткий ответ клиента завершит расчёт.`
-          : "Агент сохранил известные факты и подготовил самый короткий путь к точному предложению.",
-      zoneReason: surface
-        ? hasAttachedPhoto
+            : product
+              ? `Краска «${product.name}» найдена в каталоге. Короткий ответ клиента завершит расчёт.`
+              : "Агент сохранил известные факты и подготовил самый короткий путь к точному предложению.",
+      zoneReason: floorGuidance
+        ? "Открытые сведения о компании изменили подбор: агент связал задачу клиента с каталогом и подготовил один вопрос для точного решения."
+        : surface
+          ? hasAttachedPhoto
           ? calculation
             ? "Фото содержит материал и площадь. Агент уже рассчитал расход и спрашивает только недостающие условия."
             : "Фото приложено к заявке. Клиент подтвердит недостающие сведения, затем агент рассчитает расход и упаковки."
           : calculation
             ? "Клиент назвал поверхность, материал и площадь. Агент уже рассчитал расход и спрашивает только недостающие условия."
             : "Клиент описал задачу своими словами. После короткого ответа агент рассчитает расход и упаковки."
-        : unknownSku
-          ? "Код краски нужно сверить с каталогом. Описание поверхности поможет сразу найти подходящую краску."
-          : "Агент понял основную потребность и спрашивает только данные, которые меняют подбор или расчёт.",
-      managerNote:
-        "Ответ клиента продолжит ту же карточку: агент дополнит факты, пересчитает заказ и снова проверит склад.",
+          : unknownSku
+            ? "Код краски нужно сверить с каталогом. Описание поверхности поможет сразу найти подходящую краску."
+            : "Агент понял основную потребность и спрашивает только данные, которые меняют подбор или расчёт.",
+      managerNote: floorGuidance
+        ? "Ответ клиента подтвердит назначение помещения, материал пола, уборку и нагрузку. Агент продолжит эту карточку, рассчитает количество и снова проверит склад."
+        : "Ответ клиента продолжит ту же карточку: агент дополнит факты, пересчитает заказ и снова проверит склад.",
       options: [],
-      reply: replyWithQuestions(
-        missing,
-        surface,
-        hasAttachedPhoto,
-        product,
-        calculation,
-      ),
-      checks: [
-        "Потребность клиента сохранена в карточке",
-        "Вопросы влияют на подбор или расчёт",
-        "Письмо собрано по правилам завода",
-      ],
+      reply:
+        floorGuidance && profile && surface
+          ? replyWithFloorGuidance(
+              profile,
+              product,
+              surface,
+              evidenceText,
+            )
+          : replyWithQuestions(
+              missing,
+              surface,
+              hasAttachedPhoto,
+              product,
+              calculation,
+            ),
+      checks: floorGuidance
+        ? [
+            "Открытые сведения связаны с задачей клиента",
+            "Вариант краски опирается на свойства из каталога",
+            "Материал, назначение, уборка и нагрузка собраны в одном вопросе",
+          ]
+        : [
+            "Потребность клиента сохранена в карточке",
+            "Вопросы влияют на подбор или расчёт",
+            "Письмо собрано по правилам завода",
+          ],
       sources: [
         "Письмо клиента",
         ...(product ? ["Каталог товаров", "Живой склад"] : []),
+        ...(floorGuidance ? ["Открытые страницы компании"] : []),
         "Правила продаж",
       ],
       decisionBasis,
@@ -1168,8 +1483,30 @@ export function buildDemoResult(
     : industry
       ? `Клиенту важно: ${industry.risk}. Что предлагает агент: ${industry.play}.`
       : `Подбор опирается на свойства краски: ${product.features.join(", ")}.`;
+  const floorFitLine =
+    floorGuidance &&
+    surface?.material === "бетон" &&
+    floorUse.purpose &&
+    floorUse.cleaning &&
+    floorUse.load
+      ? `Клиент подтвердил бетонный пол, назначение «${floorUse.purpose}», уборку «${floorUse.cleaning}» и нагрузку «${floorUse.load}». По карточке товара краска «${product.name}» ${product.features.join(
+          ", ",
+        )}.`
+      : "";
+  const floorClientFitLine = floorFitLine
+    ? `Для бетонного пола подобрали покрытие «${product.name}». Учли назначение «${floorUse.purpose}», ежедневную уборку и движение техники. По карточке товара покрытие ${product.features.join(
+        ", ",
+      )}.`
+    : "";
+  const technicalContext = technicalReview
+    ? technicalReviewText(evidenceText)
+    : "";
   const businessContext = profile
-    ? likelyTrialOrder
+    ? floorFitLine
+      ? `${profile.summary} ${floorFitLine} Агент рассчитал ${money.format(
+          requestedKg,
+        )} кг и снова проверил живой склад. ${technicalContext}`
+      : likelyTrialOrder
       ? `${profile.summary} Агент предполагает: заказ на ${money.format(
           requestedKg,
         )} кг служит пробной партией. ${
@@ -1220,6 +1557,13 @@ export function buildDemoResult(
       checkedAt: today,
     });
   }
+  if (technicalReview) {
+    decisionBasis.push({
+      fact: technicalReviewText(evidenceText),
+      source: "Ответ клиента и карточка товара",
+      checkedAt: today,
+    });
+  }
   if (profile) {
     decisionBasis.push(
       ...profile.sources.map((source) => ({
@@ -1230,10 +1574,61 @@ export function buildDemoResult(
     );
   }
 
-  if (shortage || specialTerms || belowMinimum) {
+  if (shortage || specialTerms || belowMinimum || technicalReview) {
     const availableNowKg =
       firstDeliveryKg || Math.min(product.stockKg, requestedKg);
     const remainder = Math.max(0, requestedKg - availableNowKg);
+    const supplierPlan = shortage
+      ? buildSupplierPlan(product, catalog.market, requestedKg)
+      : null;
+    const supplierDaysSaved = supplierPlan
+      ? Math.max(0, product.replenishmentDays - supplierPlan.deliveryDays)
+      : 0;
+    const supplierSaving = supplierPlan
+      ? Math.max(0, product.pricePerKg * requestedKg - supplierPlan.total)
+      : 0;
+    if (supplierPlan) {
+      decisionBasis.push({
+        fact: `Полный объём: ${money.format(
+          supplierPlan.ourKg,
+        )} кг со склада «Колер» и ${money.format(
+          supplierPlan.supplierKg,
+        )} кг у «${supplierPlan.supplierName}». Общая стоимость — ${money.format(
+          supplierPlan.total,
+        )} ₽, срок поставщика — ${supplierPlan.deliveryDays} ${countedNoun(
+          supplierPlan.deliveryDays,
+          "день",
+          "дня",
+          "дней",
+        )}.`,
+        source: "Учебные цены и наличие у других поставщиков",
+        checkedAt: supplierPlan.stockCheckedAt,
+      });
+      decisionBasis.push({
+        fact: `Агент сравнил ${supplierPlan.offersChecked} ${countedNoun(
+          supplierPlan.offersChecked,
+          "предложение",
+          "предложения",
+          "предложений",
+        )}. ${supplierPlan.eligibleOffers} ${countedNoun(
+          supplierPlan.eligibleOffers,
+          "поставщик может",
+          "поставщика могут",
+          "поставщиков могут",
+        )} привезти недостающие ${money.format(
+          supplierPlan.supplierKg,
+        )} кг. Выбран «${supplierPlan.supplierName}»: полный объём за ${
+          supplierPlan.deliveryDays
+        } ${countedNoun(
+          supplierPlan.deliveryDays,
+          "день",
+          "дня",
+          "дней",
+        )} по ${money.format(supplierPlan.supplierPricePerKg)} ₽/кг.`,
+        source: "Учебная таблица цен и наличия других поставщиков",
+        checkedAt: supplierPlan.stockCheckedAt,
+      });
+    }
     const compatibleAlternative = calculation
       ? null
       : catalog.products.find(
@@ -1246,7 +1641,9 @@ export function buildDemoResult(
       ? "После выбора варианта отложим доступную партию для вас."
       : "Назовите точный цвет, и мы отложим доступную партию для вас.";
     const firstReply = shortage
-      ? `Добрый день!\n\nПодобрали «${product.name}». Готовы отгрузить ${money.format(
+      ? `Добрый день!\n\nПодобрали «${product.name}». ${
+          floorClientFitLine ? `${floorClientFitLine} ` : ""
+        }Готовы отгрузить ${money.format(
           availableNowKg,
         )} кг сейчас и ${money.format(remainder)} кг через ${
           product.replenishmentDays
@@ -1259,8 +1656,85 @@ export function buildDemoResult(
           requestedKg,
         )} кг краски «${product.name}» по цене ${money.format(
           product.pricePerKg,
-        )} ₽/кг. Руководитель выбирает подходящую цену и порядок оплаты.`;
-    const options: AgentOption[] = shortage
+        )} ₽/кг. Можем сохранить эту цену при обычной оплате до отгрузки.`;
+    const technicalOptions: AgentOption[] = /масл/iu.test(evidenceText)
+      ? [
+      {
+        id: "проверка-образца",
+        title: "Проверить покрытие на образце",
+        rationale:
+          "Технолог получает образец вещества, условия уборки и нагрузку на пол. Клиент получает подтверждённый подбор до основной закупки.",
+        businessResult:
+          "Завод сохраняет заказ и закрепляет свойства покрытия результатом проверки.",
+        tradeoff: "Понадобится образец и короткая проверка технолога.",
+        reply: `Добрый день!\n\nДля бетонного пола и движения тележек первым вариантом стала краска «${product.name}». Контакт с моторным маслом технолог проверит на образце. Мы уже передали ему условия эксплуатации, карточку краски и предварительный расчёт ${money.format(
+          requestedKg,
+        )} кг.\n\nПосле проверки направим подтверждённое покрытие, цену и график поставки.`,
+      },
+      {
+        id: "пробный-участок",
+        title: "Сделать пробное нанесение",
+        rationale:
+          "Небольшой участок покажет сцепление, уборку и поведение покрытия в условиях мастерской.",
+        businessResult:
+          "Завод получает фактические данные и готовит основную поставку под реальные условия.",
+        tradeoff: "Основная закупка начнётся после осмотра пробного участка.",
+        reply: `Добрый день!\n\nПредлагаем сначала окрасить небольшой участок пола краской «${product.name}» и проверить его в рабочих условиях. На основную площадь предварительно рассчитано ${money.format(
+          requestedKg,
+        )} кг. После осмотра закрепим состав и график поставки.`,
+      },
+      {
+        id: "подбор-технолога",
+        title: "Подобрать покрытие под масло",
+        rationale:
+          "Технолог сверит частоту контакта, способ удаления масла и нагрузку, затем выберет покрытие с подтверждёнными свойствами.",
+        businessResult:
+          "Завод предлагает решение под условия клиента и сохраняет потенциал полного заказа.",
+        tradeoff: "Клиент уточнит вид масла и способ уборки.",
+        reply:
+          "Добрый день!\n\nТехнолог подберёт покрытие под контакт с моторным маслом. Пришлите название масла и опишите, как быстро его удаляют с пола. Уже учли площадь, бетонное основание и нагрузку.",
+      },
+        ]
+      : [
+          {
+            id: "сверить-требование",
+            title: "Сверить точное требование",
+            rationale:
+              "Технолог получает название документа или средства для уборки и сопоставляет его с паспортом качества и карточкой краски.",
+            businessResult:
+              "Завод готовит подтверждённый комплект поставки и сохраняет заказ.",
+            tradeoff:
+              "Клиент пришлёт точное название документа или средства.",
+            reply:
+              "Добрый день!\n\nПришлите точное название обязательного документа или средства для уборки. Технолог сверит требование с паспортом качества и карточкой краски, затем мы направим подтверждённое предложение.",
+          },
+          {
+            id: "проверка-технолога",
+            title: "Провести проверку технолога",
+            rationale:
+              "Технолог проверяет режим эксплуатации по образцу и закрепляет подходящее покрытие.",
+            businessResult:
+              "Завод подтверждает свойства до основной поставки.",
+            tradeoff: "Понадобится образец и время на проверку.",
+            reply: `Добрый день!\n\nТехнолог проверит покрытие для ваших условий. Площадь, бетонное основание, уборку и предварительный расчёт ${money.format(
+              requestedKg,
+            )} кг уже учли. После проверки направим состав, документы и график поставки.`,
+          },
+          {
+            id: "подобрать-покрытие",
+            title: "Подобрать покрытие по требованиям",
+            rationale:
+              "Технолог начинает с обязательного документа и режима уборки, затем выбирает продукт с подтверждёнными свойствами.",
+            businessResult:
+              "Завод формирует предложение под требования закупки.",
+            tradeoff: "Подбор продолжится после одного ответа клиента.",
+            reply:
+              "Добрый день!\n\nНапишите обязательный документ и средство для уборки. Технолог подберёт покрытие по этим требованиям. Остальные сведения о помещении и расчёт уже сохранены.",
+          },
+        ];
+    const options: AgentOption[] = technicalReview
+      ? technicalOptions
+      : shortage
       ? [
           {
             id: "две-поставки",
@@ -1275,6 +1749,78 @@ export function buildDemoResult(
             tradeoff: "Вторую партию доставим отдельно.",
             reply: firstReply,
           },
+          ...(supplierPlan
+            ? [
+                {
+                  id: "помочь-с-недостающим-объёмом",
+                  title: `Собрать ${money.format(
+                    requestedKg,
+                  )} кг вместе с «${supplierPlan.supplierName}»`,
+                  rationale: `После подтверждения партнёра клиент сможет получить все ${money.format(
+                    requestedKg,
+                  )} кг ориентировочно за ${supplierPlan.deliveryDays} ${countedNoun(
+                    supplierPlan.deliveryDays,
+                    "день",
+                    "дня",
+                    "дней",
+                  )}${
+                    supplierDaysSaved
+                      ? ` — на ${money.format(
+                          supplierDaysSaved,
+                        )} ${countedNoun(
+                          supplierDaysSaved,
+                          "день",
+                          "дня",
+                          "дней",
+                        )} раньше`
+                      : ""
+                  }. Общая стоимость — ${money.format(
+                    supplierPlan.total,
+                  )} ₽${
+                    supplierSaving
+                      ? `, на ${money.format(
+                          supplierSaving,
+                        )} ₽ меньше расчёта по цене «Колера»`
+                      : ""
+                  }.`,
+                  businessResult:
+                    "Завод продаёт свою часть, координирует общий график и помогает клиенту начать работу раньше.",
+                  tradeoff:
+                    "На каждом участке нужна краска одного производителя. Технолог сверит подготовку пола, цвет и совместимость материалов.",
+                  reply: `Добрый день!\n\nНа складе «Колера» доступно ${money.format(
+                    supplierPlan.ourKg,
+                  )} кг по ${money.format(
+                    supplierPlan.ourPricePerKg,
+                  )} ₽/кг. По данным от ${
+                    supplierPlan.stockCheckedAt
+                  } у «${supplierPlan.supplierName}» доступно ${money.format(
+                    supplierPlan.supplierStockKg,
+                  )} кг. Готовим запрос партнёру: подтвердить ${money.format(
+                    supplierPlan.supplierKg,
+                  )} кг; срок — ${supplierPlan.deliveryDays} ${countedNoun(
+                    supplierPlan.deliveryDays,
+                    "день",
+                    "дня",
+                    "дней",
+                  )}; ${requestedColor ? `цвет — «${requestedColor}»` : "цвет"}; совместимость материалов. Цена партнёра по проверенной строке — ${money.format(
+                    supplierPlan.supplierPricePerKg,
+                  )} ₽/кг; предварительная стоимость обеих частей — ${money.format(
+                    supplierPlan.total,
+                  )} ₽.${
+                    supplierDaysSaved
+                      ? `\n\nПосле подтверждения этот вариант может сократить ожидание на ${money.format(
+                          supplierDaysSaved,
+                        )} ${countedNoun(
+                          supplierDaysSaved,
+                          "день",
+                          "дня",
+                          "дней",
+                        )}${supplierSaving ? ` и сэкономить ${money.format(supplierSaving)} ₽` : ""} относительно расчёта всего объёма по цене «Колера».`
+                      : ""
+                  }\n\nПосле подтверждений пришлём единый график поставки.`,
+                },
+              ]
+            : []),
           ...(paymentAfterDelivery
             ? [
                 {
@@ -1306,7 +1852,7 @@ export function buildDemoResult(
                   title: `Поставить весь объём краской «${compatibleAlternative.name}»`,
                   rationale: `${money.format(
                     requestedKg,
-                  )} кг есть на складе. Каталог допускает эту краску как замену для задачи клиента.`,
+                  )} кг есть на складе. Эта краска подходит для задачи клиента.`,
                   businessResult:
                     "Завод выполняет весь заказ товаром со склада и получает оплату за весь заказ сразу.",
                   tradeoff: `Цена составит ${money.format(
@@ -1316,7 +1862,7 @@ export function buildDemoResult(
                     compatibleAlternative.pricePerKg,
                   )} ₽/кг${
                     requestedColor ? `, цвет ${requestedColor}` : ""
-                  }. Весь объём есть на складе. Каталог допускает эту краску как замену для вашей задачи.${
+                  }. Весь объём есть на складе. Эта краска подходит для вашей задачи.${
                     firstDeliveryKg
                       ? ` Учтём ваш график: ${money.format(
                           firstDeliveryKg,
@@ -1336,7 +1882,9 @@ export function buildDemoResult(
             businessResult:
               "Завод сохраняет полный заказ и заранее планирует ближайший выпуск.",
             tradeoff: "Производство подтвердит дату второй отгрузки.",
-            reply: `Добрый день!\n\nОтложим для вас ${money.format(
+                  reply: `Добрый день!\n\n${
+                    floorFitLine ? `${floorFitLine}\n\n` : ""
+                  }Отложим для вас ${money.format(
               availableNowKg,
             )} кг на складе и поставим оставшиеся ${money.format(
               remainder,
@@ -1350,8 +1898,9 @@ export function buildDemoResult(
             businessResult:
               "Завод получает реалистичный график заказа и планирует производство под срок клиента.",
             tradeoff: "Клиент ответит на два коротких вопроса.",
-            reply:
-              "Добрый день!\n\nНапишите, какой объём нужен для начала работ и к какой дате потребуется остальная краска. По ответу закрепим удобный график поставки.",
+            reply: `Добрый день!\n\n${
+              floorFitLine ? `${floorFitLine}\n\n` : ""
+            }Напишите, какой объём нужен для начала работ и к какой дате потребуется остальная краска. По ответу закрепим удобный график поставки.`,
           },
         ].slice(0, 3)
       : paymentAfterDelivery
@@ -1450,9 +1999,14 @@ export function buildDemoResult(
       ),
       ...(calculation ? { calculation } : {}),
       market: view,
+      ...(supplierPlan ? { supplierPlan } : {}),
       research,
       businessContext,
-      zoneReason: shortage
+      zoneReason: technicalReview
+        ? `${technicalReviewText(
+            evidenceText,
+          )} Агент подготовил три готовых хода для решения.`
+        : shortage
         ? [
             firstDeliveryKg
               ? `Клиент выбрал ${money.format(
@@ -1486,13 +2040,15 @@ export function buildDemoResult(
               product.minPricePerKg,
             )} ₽/кг. Агент подготовил варианты для руководителя.`
           : "Агент подготовил три выполнимых варианта по особым условиям клиента.",
-      managerNote: profile
+      managerNote: technicalReview
+        ? "Выберите способ проверки. Технолог уже получает описание помещения, карточку краски, расчёт и условие клиента."
+        : profile
         ? likelyTrialOrder
           ? profile.suggestedMove
           : "Уточнить график следующих закупок и заранее согласовать выпуск и доставку."
         : industry
           ? `Что предлагает агент: ${industry.play}. По этой цене завод зарабатывает на заказе.`
-          : "Выберите вариант, который сохраняет срок клиента и заработок завода.",
+          : "Выберите вариант, который помогает клиенту выполнить заказ и сохраняет заработок завода.",
       options,
       reply: {
         subject: `Предложение по заказу: ${product.name}`,
@@ -1504,9 +2060,11 @@ export function buildDemoResult(
         shortage
           ? "Склад подтвердил доступную первую партию"
           : "Весь объём подтверждён складом",
-        "Письмо собрано по правилам завода",
+        technicalReview
+          ? "Технолог получил условия и готовый план проверки"
+          : "Письмо собрано по правилам завода",
         view.items.length
-          ? "Сравнение цен содержит дату"
+          ? "Цены и наличие других поставщиков содержат дату проверки"
           : "Цена сверена с карточкой товара и правилом заработка",
       ],
       sources: [
@@ -1514,7 +2072,7 @@ export function buildDemoResult(
         "Каталог товаров",
         "Живой склад",
         "Правила продаж",
-        ...(view.items.length ? ["Цены других поставщиков"] : []),
+        ...(view.items.length ? ["Цены и наличие других поставщиков"] : []),
         ...(profile ? ["Проверенные открытые источники"] : []),
       ],
       decisionBasis,
@@ -1571,6 +2129,7 @@ export function buildDemoResult(
         input.company
           ? `Подготовили предложение для компании ${input.company}.`
           : "",
+        floorClientFitLine,
         `Подтверждаем наличие: ${money.format(
           requestedKg,
         )} кг краски «${product.name}»${
@@ -1603,7 +2162,7 @@ export function buildDemoResult(
       "Весь объём подтверждён складом",
       "Письмо собрано по правилам завода",
       view.items.length
-        ? "Сравнение цен содержит дату"
+        ? "Цены и наличие других поставщиков содержат дату проверки"
         : "Цена сверена с карточкой товара и правилом заработка",
     ],
     sources: [
@@ -1611,7 +2170,7 @@ export function buildDemoResult(
       "Каталог товаров",
       "Живой склад",
       "Правила продаж",
-      ...(view.items.length ? ["Цены других поставщиков"] : []),
+      ...(view.items.length ? ["Цены и наличие других поставщиков"] : []),
       ...(profile ? ["Проверенные открытые источники"] : []),
     ],
     decisionBasis,

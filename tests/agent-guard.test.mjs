@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import {
   applyReviewerResult,
   isCompleteAgentResult,
@@ -129,7 +130,7 @@ test("grounds a red order in catalog data and keeps visible copy clean", () => {
   assert.equal(result.product.pricePerKg, 349);
   assert.equal(result.options.length, 3);
   assert.match(result.market.summary, /Цена «Колер»: 349 ₽\/кг/);
-  assert.match(result.reply.body, /выберет руководитель/);
+  assert.match(result.reply.body, /выберите один подготовленный вариант/iu);
   assert.deepEqual(result.sources.slice(0, 3), [
     "Входящее письмо",
     "Каталог и остатки",
@@ -393,7 +394,10 @@ test("replaces an all-caps model reason with a calm fallback", () => {
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
 
-  assert.equal(result.zoneReason, "Краска, объём и цена подтверждены.");
+  assert.equal(
+    result.zoneReason,
+    "Весь объём подтверждён складом. По этой цене завод зарабатывает на заказе. Письмо готово.",
+  );
 });
 
 test("does not mark a search as source-checked without an opened URL", () => {
@@ -982,6 +986,258 @@ test("recomputes material gaps from the letter and removes the model quote", () 
   );
 });
 
+test("grounds a researched floor recommendation and removes invented sanitary claims", () => {
+  const draft = agentDraft({ sku: "КР-003", requestedKg: 0 });
+  draft.businessContext =
+    "КР-003 соответствует требованиям фармацевтического склада, ГОСТ и выдерживает дезинфекцию.";
+  draft.reply.body =
+    "Подтверждаем соответствие ГОСТ и ежедневную обработку дезинфицирующими средствами.";
+  draft.research = {
+    checked: true,
+    summary: "Компания работает в фармацевтической отрасли.",
+    sources: [
+      {
+        title: "О группе компаний «ПРОТЕК»",
+        url: "https://protek-group.ru/about/",
+        checkedAt: "2026-07-30",
+        fact: "Группа работает в фармацевтической и медицинской отраслях.",
+      },
+      {
+        title: "Направления бизнеса ГК «ПРОТЕК»",
+        url: "https://protek-group.ru/business/",
+        checkedAt: "2026-07-30",
+        fact: "Группа использует логистический парк со складами для мультитемпературного хранения.",
+      },
+    ],
+  };
+
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "ГК «ПРОТЕК»",
+    website: "protek-group.ru",
+    subject: "Помогите выбрать краску для пола",
+    body: "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
+  });
+  const visibleCopy = [
+    result.businessContext,
+    result.reply.body,
+    result.zoneReason,
+  ].join(" ");
+
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.product?.sku, "КР-003");
+  assert.equal(result.research.checked, true);
+  assert.equal(result.missing.length, 1);
+  assert.match(result.missing[0], /подскажите, пожалуйста/iu);
+  assert.match(result.businessContext, /агент предполагает/iu);
+  assert.match(
+    result.businessContext,
+    /подходит для цехов и складов.*выдерживает тележки и технику/iu,
+  );
+  assert.match(
+    result.reply.body,
+    /похоже, помещение может быть складом.*если (?:его|помещение) используют как медицинский склад.*первым вариантом станет краска/isu,
+  );
+  assert.doesNotMatch(
+    result.reply.body,
+    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*/iu,
+  );
+  assert.match(result.reply.body, /светло-серый.*есть в каталоге/iu);
+  assert.match(
+    result.reply.body,
+    /рассчитаем заказ на 800 м².*проверим цвет.*остаток на складе/isu,
+  );
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.doesNotMatch(
+    visibleCopy,
+    /КР-003 соответствует|соответстви\p{L}*\s+ГОСТ|выдерживает дезинфекц/iu,
+  );
+  assert.match(
+    result.decisionBasis.map((basis) => basis.source).join(" "),
+    /Карточка товара.*О группе компаний.*Направления бизнеса/iu,
+  );
+});
+
+test("continues a researched floor order from questions to both stock routes", () => {
+  const job = {
+    company: "ГК «ПРОТЕК»",
+    website: "protek-group.ru",
+    subject: "Помогите выбрать краску для пола",
+    body: [
+      "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
+      "Ответ клиента 1: Пол бетонный. Храним лекарства. Моем нейтральным средством. По полу ездят погрузчики.",
+    ].join("\n\n"),
+  };
+  const replenished = structuredClone(demoData);
+  replenished.products = replenished.products.map((product) =>
+    product.sku === "КР-003"
+      ? {
+          ...product,
+          stockKg: 700,
+          stockRevision: 12,
+          stockUpdatedAt: "2026-07-30T12:00:00+03:00",
+        }
+      : product,
+  );
+  const staleManagerOptions = [
+    {
+      id: "model-schedule",
+      title: "Согласовать график",
+      rationale: "Уточнить порядок работ и подготовить удобный график.",
+      tradeoff: "Клиент подтвердит порядок работ.",
+      reply: "Пришлите порядок работ, и мы подготовим удобный график.",
+    },
+    {
+      id: "model-production",
+      title: "Проверить ближайший выпуск",
+      rationale: "Производство назовёт ближайшую доступную дату.",
+      tradeoff: "Дата появится после проверки производства.",
+      reply: "Проверим ближайший выпуск и направим точную дату.",
+    },
+    {
+      id: "model-priority",
+      title: "Уточнить приоритет клиента",
+      rationale: "Клиент назовёт главный приоритет по сроку и поставке.",
+      tradeoff: "Понадобится один короткий ответ.",
+      reply: "Что важнее для вашего графика: первая партия или общая дата?",
+    },
+  ];
+
+  const beforeRestock = normalizeAgentResult(
+    agentDraft({
+      sku: "КР-003",
+      requestedKg: 0,
+      zone: "red",
+      options: staleManagerOptions,
+    }),
+    demoData,
+    job,
+  );
+  const afterRestock = normalizeAgentResult(
+    agentDraft({
+      sku: "КР-003",
+      requestedKg: 0,
+      zone: "red",
+      options: staleManagerOptions,
+    }),
+    replenished,
+    job,
+  );
+
+  assert.equal(beforeRestock.route, "manager");
+  assert.equal(beforeRestock.product.requestedKg, 620);
+  assert.match(beforeRestock.calculation?.explanation ?? "", /31 упаковку/iu);
+  assert.doesNotMatch(
+    beforeRestock.calculation?.explanation ?? "",
+    /31 упаковок/iu,
+  );
+  assert.deepEqual(beforeRestock.missing, []);
+  assert.match(
+    beforeRestock.understood.join(" "),
+    /медицинский склад|лекарства/iu,
+  );
+  assert.match(beforeRestock.understood.join(" "), /нейтральное моющее средство/iu);
+  assert.match(beforeRestock.understood.join(" "), /погрузчики/iu);
+  const supplierHelp = beforeRestock.options.find(
+    (option) => option.id === "помочь-с-недостающим-объёмом",
+  );
+  assert.ok(supplierHelp);
+  assert.ok(
+    beforeRestock.options.some((option) => option.id === "model-schedule"),
+  );
+  assert.equal(beforeRestock.supplierPlan?.ourKg, 420);
+  assert.equal(beforeRestock.supplierPlan?.supplierKg, 200);
+  assert.equal(beforeRestock.supplierPlan?.total, 254700);
+  assert.equal(beforeRestock.supplierPlan?.deliveryDays, 4);
+  assert.equal(beforeRestock.supplierPlan?.offersChecked, 3);
+  assert.equal(beforeRestock.supplierPlan?.eligibleOffers, 2);
+  const supplierCopy = `${supplierHelp.rationale} ${supplierHelp.reply}`;
+  assert.match(supplierCopy, /Индустрия Покрытий/iu);
+  assert.match(supplierCopy, /420 кг.*415 ₽/isu);
+  assert.match(supplierCopy, /200 кг.*402 ₽/isu);
+  assert.match(supplierHelp.reply, /254\s*700 ₽/u);
+  assert.match(supplierCopy, /4 дня/iu);
+  assert.match(supplierHelp.rationale, /на 6 дней раньше/iu);
+  assert.match(supplierHelp.rationale, /на 2\s*600 ₽ меньше/iu);
+  assert.doesNotMatch(
+    supplierHelp.reply,
+    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*/iu,
+  );
+  assert.match(
+    supplierHelp.reply,
+    /на складе «Колера» доступно 420 кг.*по данным от 30\.07\.2026, 10:40.*доступно 260 кг.*готовим запрос партнёру: подтвердить 200 кг; срок — 4 дня; цвет — «светло-серый»; совместимость.*после подтверждений пришлём единый график/isu,
+  );
+  assert.match(
+    supplierHelp.reply,
+    /после подтверждения.*(?:сократить ожидание|раньше).*6 дней.*2\s*600 ₽/isu,
+  );
+  assert.doesNotMatch(
+    supplierHelp.reply,
+    /подготовили способ собрать все|так вы получите весь объём/iu,
+  );
+
+  assert.equal(afterRestock.route, "ready");
+  assert.equal(afterRestock.zone, "green");
+  assert.equal(afterRestock.product.stockKg, 700);
+  assert.equal(afterRestock.product.requestedKg, 620);
+  assert.deepEqual(afterRestock.missing, []);
+  assert.equal(afterRestock.research.checked, true);
+  assert.doesNotMatch(afterRestock.reply.body, /что храните|чем его моете/iu);
+  assert.match(
+    afterRestock.reply.body,
+    /подходит для цехов и складов.*ежедневной влажной уборки нейтральным средством/isu,
+  );
+  assert.match(
+    afterRestock.decisionBasis
+      .map((basis) => basis.stockVersion)
+      .join(" "),
+    /12/u,
+  );
+});
+
+test("removes internal stand language from every client-facing letter", () => {
+  const draft = agentDraft({
+    sku: "КР-003",
+    requestedKg: 620,
+    zone: "red",
+    options: [
+      {
+        id: "internal-one",
+        title: "Первый вариант",
+        rationale: "Собрать объём по доступным данным.",
+        tradeoff: "Руководитель проверит срок.",
+        reply:
+          "Агент сверит учебную таблицу, после выбора руководителя подготовит письмо.",
+      },
+      {
+        id: "internal-two",
+        title: "Второй вариант",
+        rationale: "Уточнить полный график.",
+        tradeoff: "Понадобится один ответ.",
+        reply: "Учебный каталог подтвердит краску после этапа стенда.",
+      },
+    ],
+  });
+  const result = normalizeAgentResult(draft, demoData, {
+    company: "Склад",
+    subject: "Краска для пола",
+    body:
+      "Нужны 620 кг светло-серой краски для бетонного пола внутри склада.",
+  });
+  const clientCopy = [
+    result.reply.body,
+    ...result.options.map((option) => option.reply),
+  ].join("\n");
+
+  assert.doesNotMatch(
+    clientCopy,
+    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*|этап\p{L}*\s+стенд\p{L}*|выбор\p{L}*\s+руководител\p{L}*/iu,
+  );
+  assert.match(
+    clientCopy,
+    /на складе «Колера» доступно 420 кг.*Индустрия Покрытий.*готовим запрос партнёру: подтвердить 200 кг.*предварительная стоимость/isu,
+  );
+});
+
 test("keeps a shortage red when color and environment are missing", () => {
   const result = normalizeAgentResult(
     agentDraft({ sku: "КР-001", requestedKg: 800 }),
@@ -1382,7 +1638,7 @@ test("offers only an explicitly approved stocked analogue", () => {
   assert.ok(alternative);
   assert.match(
     alternative.reply,
-    /Каталог допускает эту краску как замену/iu,
+    /Эта краска подходит для вашей задачи/iu,
   );
   assert.equal(product.analogues.includes(approvedAnalogue.sku), true);
 });
@@ -1745,6 +2001,56 @@ test("passes the saved stock revision and timestamp into the live OpenCode catal
   assert.match(
     snapshotAdapter,
     /stockUpdatedAt\s*:[^,\n]{0,120}(?:stockUpdatedAt|updatedAt)/,
+  );
+});
+
+test("passes the supplier market saved with the order into OpenCode", async () => {
+  const source = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("function demoDataForJob(");
+  const end = source.indexOf("function storedJobJson(", start);
+  assert.ok(start >= 0 && end > start);
+  const demoDataForJob = runInNewContext(
+    `${source.slice(start, end)}\ndemoDataForJob`,
+    { demoData },
+  );
+  const liveMarket = [
+    {
+      id: "floor--supplier",
+      category: "краска для бетонного пола",
+      competitor: "Поставщик",
+      stockKg: 150,
+      stockCheckedAt: "30.07.2026, 15:20",
+      pricePerKg: 402,
+      deliveryDays: 4,
+    },
+  ];
+
+  const adapted = demoDataForJob({
+    inventorySnapshotJson: JSON.stringify({
+      version: 3,
+      capturedAt: "2026-07-30T12:20:00.000Z",
+      items: [],
+      market: liveMarket,
+    }),
+  });
+  const legacy = demoDataForJob({
+    inventorySnapshotJson: JSON.stringify({
+      version: 2,
+      capturedAt: "2026-07-29T12:20:00.000Z",
+      items: [],
+    }),
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(adapted.market)),
+    liveMarket,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(legacy.market)),
+    demoData.market,
   );
 });
 

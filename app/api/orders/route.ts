@@ -12,6 +12,7 @@ import {
   marketView,
   productHasRequestedColor,
   type AgentResult,
+  type SupplierPlan,
 } from "@/lib/demo-engine";
 import { getDemoDataWithInventory } from "@/lib/inventory";
 import { productInventoryChanged } from "@/lib/inventory-freshness.mjs";
@@ -25,6 +26,10 @@ import {
   appendResultHistory,
   insertResultHistoryWhen,
 } from "@/lib/result-history";
+import {
+  confirmSupplierPlan,
+  supplierPlanChangeDetail,
+} from "@/lib/supplier-plan.mjs";
 
 export const dynamic = "force-dynamic";
 
@@ -109,8 +114,23 @@ function routeLabel(result: AgentResult) {
   return "готов ответить";
 }
 
+export function supplierPlanEventDetail(plan: SupplierPlan) {
+  const formatKg = (value: number) =>
+    new Intl.NumberFormat("ru-RU").format(value);
+  return `В таблице «${plan.supplierName}» указано ${formatKg(
+    plan.supplierKg,
+  )} кг из доступных ${formatKg(plan.supplierStockKg)} кг по ${formatKg(
+    plan.supplierPricePerKg,
+  )} ₽/кг, срок ${plan.deliveryDays} дн., данные от ${
+    plan.stockCheckedAt
+  }. Наша часть — ${formatKg(
+    plan.ourKg,
+  )} кг, весь заказ — ${formatKg(plan.total)} ₽.`;
+}
+
 export function reserveEventDetail(
   product: NonNullable<AgentResult["product"]>,
+  supplierPlan?: SupplierPlan | null,
 ) {
   const formatKg = (value: number) =>
     new Intl.NumberFormat("ru-RU").format(value);
@@ -129,7 +149,16 @@ export function reserveEventDetail(
       : "";
 
   const color = product.color ? `, цвет ${product.color}` : "";
-  return `${formatKg(reservedKg)} кг краски «${product.name}»${color} закреплены за карточкой.${remaining} В рабочей системе этот шаг передаст резерв в учётную систему.`;
+  const supplier =
+    supplierPlan
+      ? ` Перед резервом повторно проверено предложение другого поставщика. ${supplierPlanEventDetail(
+          supplierPlan,
+        )}`
+      : "";
+  const handoff = supplierPlan
+    ? "В рабочей системе этот шаг передаст резерв нашей части в учётную систему."
+    : "В рабочей системе этот шаг передаст резерв в учётную систему.";
+  return `${formatKg(reservedKg)} кг краски «${product.name}»${color} закреплены за карточкой.${remaining}${supplier} ${handoff}`;
 }
 
 export function approvedProductForOption(
@@ -269,7 +298,7 @@ export function preserveConfirmedResearch(
   };
 }
 
-function snapshotFromDemoData(
+export function snapshotFromDemoData(
   data: Awaited<ReturnType<typeof getDemoDataWithInventory>>,
 ) {
   const items = data.products.map((product) => ({
@@ -289,6 +318,7 @@ function snapshotFromDemoData(
     version,
     capturedAt: new Date().toISOString(),
     items,
+    market: data.market.map((offer) => ({ ...offer })),
   };
 }
 
@@ -332,6 +362,7 @@ function inputWithConversation(
 
 function stagedEvents(orderId: string, result: AgentResult) {
   const route = routeOf(result);
+  const supplierPlan = result.supplierPlan ?? null;
   const rows = [
     {
       orderId,
@@ -346,6 +377,24 @@ function stagedEvents(orderId: string, result: AgentResult) {
       detail: result.understood.join(" · "),
     },
   ];
+
+  if (result.research?.checked) {
+    rows.push({
+      orderId,
+      stage: "company-context",
+      title: "Агент изучил сведения о компании",
+      detail: [
+        result.research.summary,
+        result.research.sources.length
+          ? `Источники: ${result.research.sources
+              .map((source) => source.title)
+              .join(", ")}.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    });
+  }
 
   if (route === "needs_info") {
     rows.push({
@@ -373,13 +422,15 @@ function stagedEvents(orderId: string, result: AgentResult) {
             : "Агент проверил цену по карточке товара",
         detail: result.market.summary,
       },
-      ...(result.research?.checked
+      ...(supplierPlan
         ? [
             {
               orderId,
-              stage: "company-context",
-              title: "Сведения о компании учтены",
-              detail: result.research.summary,
+              stage: "partner-stock",
+              title: "Агент нашёл, где собрать полный объём",
+              detail: `${supplierPlanEventDetail(
+                supplierPlan,
+              )} Учебный источник проверен перед подготовкой вариантов.`,
             },
           ]
         : []),
@@ -900,6 +951,32 @@ export async function PATCH(request: Request) {
     );
   }
 
+  const recordSupplierRefreshNeeded = async (
+    step: string,
+    plan: SupplierPlan,
+    market: unknown[],
+  ) => {
+    const guard = and(
+      eq(orders.id, id),
+      eq(orders.status, order.status),
+      sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
+      sql`coalesce(${orders.sentAt}, '') = ${order.sentAt ?? ""}`,
+    )!;
+    await insertOrderEventWhen(
+      db,
+      {
+        orderId: id,
+        stage: "partner-stock",
+        title: "Нужен свежий расчёт совместной поставки",
+        detail: `Перед ${step} система перечитала данные поставщика. ${supplierPlanChangeDetail(
+          plan,
+          market,
+        )} Агент подготовит новый выполнимый вариант.`,
+      },
+      guard,
+    );
+  };
+
   if (action === "send_clarification") {
     if (order.status !== "clarification_ready" || !order.resultJson) {
       return Response.json(
@@ -1124,17 +1201,6 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
-    if (
-      order.status !== "error" &&
-      !(await savedResultUsesOldInventory(order))
-    ) {
-      return Response.json(
-        {
-          error: "Карточка уже рассчитана по свежему складу.",
-        },
-        { status: 409 },
-      );
-    }
     const conversation = storedJson<ConversationMessage[]>(
       order.conversationJson,
       [],
@@ -1144,6 +1210,23 @@ export async function PATCH(request: Request) {
       null,
     );
     const liveData = await getDemoDataWithInventory();
+    const inventoryOutdated = await savedResultUsesOldInventory(order);
+    const supplierOutdated = Boolean(
+      previousResult?.supplierPlan &&
+        !confirmSupplierPlan(previousResult.supplierPlan, liveData.market),
+    );
+    if (
+      order.status !== "error" &&
+      !inventoryOutdated &&
+      !supplierOutdated
+    ) {
+      return Response.json(
+        {
+          error: "Карточка уже рассчитана по свежим данным.",
+        },
+        { status: 409 },
+      );
+    }
     const inventorySnapshot = snapshotFromDemoData(liveData);
     const currentItemForPreviousResult = inventorySnapshot.items.find(
       (item) => item.sku === previousResult?.product?.sku,
@@ -1154,13 +1237,33 @@ export async function PATCH(request: Request) {
     const previousItem = previousItems?.find(
       (item) => item.sku === previousResult?.product?.sku,
     );
+    const dataChanges = [];
+    if (
+      previousItem &&
+      currentItemForPreviousResult &&
+      previousItem.stockKg !== currentItemForPreviousResult.stockKg
+    ) {
+      dataChanges.push(
+        `Наш склад: ${previousItem.stockKg ?? "—"} → ${
+          currentItemForPreviousResult.stockKg
+        } кг.`,
+      );
+    }
+    if (supplierOutdated && previousResult?.supplierPlan) {
+      dataChanges.push(
+        supplierPlanChangeDetail(previousResult.supplierPlan, liveData.market),
+      );
+    }
     const stockChange =
-      previousItem && currentItemForPreviousResult
-        ? `Остаток: ${previousItem.stockKg ?? "—"} → ${currentItemForPreviousResult.stockKg} кг.`
-        : `Склад перечитан по свежим данным.`;
+      dataChanges.join(" ") || "Склад перечитан по свежим данным.";
     const live = await bridgeOnline();
 
     if (live) {
+      const liveMode = supplierOutdated
+        ? inventoryOutdated
+          ? "opencode-inventory-supplier-recalculate"
+          : "opencode-supplier-recalculate"
+        : "opencode-recalculate";
       const transitionGuard = and(
         eq(orders.id, id),
         eq(orders.status, order.status),
@@ -1175,7 +1278,12 @@ export async function PATCH(request: Request) {
         {
           orderId: id,
           stage: "recalculate",
-          title: "Новый остаток передан агенту",
+          title:
+            supplierOutdated && inventoryOutdated
+              ? "Свежие данные склада и поставщика переданы агенту"
+              : supplierOutdated
+                ? "Свежее предложение передано агенту"
+                : "Новый остаток передан агенту",
           detail: `${stockChange} Модель для заказов заново готовит решение, письмо и варианты для руководителя.`,
           state: "active",
         },
@@ -1187,7 +1295,7 @@ export async function PATCH(request: Request) {
           status: "queued",
           inventorySnapshotJson: JSON.stringify(inventorySnapshot),
           roundNo: order.roundNo + 1,
-          mode: "opencode-recalculate",
+          mode: liveMode,
           managerDecision: null,
           managerOptionId: null,
           managerDecidedAt: null,
@@ -1245,11 +1353,15 @@ export async function PATCH(request: Request) {
       db,
       {
         orderId: id,
-        roundNo: order.roundNo,
+        roundNo: order.roundNo + 1,
         result,
         status: nextStatus,
-        reason: "Склад перечитан",
-        sourceKey: `inventory:${order.roundNo}:${result.product?.sku ?? "none"}:${currentItem?.revision ?? inventorySnapshot.version}`,
+        reason: supplierOutdated
+          ? inventoryOutdated
+            ? "Поставщик и склад перечитаны"
+            : "Поставщик перечитан"
+          : "Склад перечитан",
+        sourceKey: `recalculate:${order.roundNo + 1}:${result.product?.sku ?? "none"}:${currentItem?.revision ?? inventorySnapshot.version}`,
         inventorySnapshot,
         agentModel: "Готовая инструкция",
         reviewerModel: "Проверка программы",
@@ -1267,7 +1379,13 @@ export async function PATCH(request: Request) {
         detail: `${stockChange} ${decisionChange} ${result.zoneReason}`,
       },
       ...stagedEvents(id, result).filter((event) =>
-        ["inventory", "market", "review", "decision"].includes(event.stage),
+        [
+          "inventory",
+          "market",
+          "partner-stock",
+          "review",
+          "decision",
+        ].includes(event.stage),
       ),
     ];
     const eventQueries = transitionEvents.map((event) =>
@@ -1286,6 +1404,7 @@ export async function PATCH(request: Request) {
         managerDecision: null,
         managerOptionId: null,
         managerDecidedAt: null,
+        roundNo: order.roundNo + 1,
         updatedAt: sql`CURRENT_TIMESTAMP`,
       })
       .where(transitionGuard)
@@ -1338,6 +1457,29 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
+    let confirmedSupplierPlan: SupplierPlan | null = null;
+    if (result.supplierPlan) {
+      const liveData = await getDemoDataWithInventory();
+      confirmedSupplierPlan = confirmSupplierPlan(
+        result.supplierPlan,
+        liveData.market,
+      );
+      if (!confirmedSupplierPlan) {
+        await recordSupplierRefreshNeeded(
+          "подготовкой резерва",
+          result.supplierPlan,
+          liveData.market,
+        );
+        return Response.json(
+          {
+            error:
+              "Данные поставщика обновились. Пересчитайте карточку — агент сразу соберёт свежий вариант.",
+            recalculate: true,
+          },
+          { status: 409 },
+        );
+      }
+    }
 
     const now = new Date().toISOString();
     const transitionGuard = and(
@@ -1355,7 +1497,10 @@ export async function PATCH(request: Request) {
         orderId: id,
         stage: "reserve",
         title: "Резерв товара подготовлен",
-        detail: reserveEventDetail(result.product),
+        detail: reserveEventDetail(
+          result.product,
+          confirmedSupplierPlan,
+        ),
         createdAt: now,
       },
       transitionGuard,
@@ -1405,6 +1550,31 @@ export async function PATCH(request: Request) {
       );
     }
 
+    const result = storedJson<AgentResult | null>(order.resultJson, null);
+    let confirmedSupplierPlan: SupplierPlan | null = null;
+    if (result?.supplierPlan) {
+      const liveData = await getDemoDataWithInventory();
+      confirmedSupplierPlan = confirmSupplierPlan(
+        result.supplierPlan,
+        liveData.market,
+      );
+      if (!confirmedSupplierPlan) {
+        await recordSupplierRefreshNeeded(
+          "записью отправки",
+          result.supplierPlan,
+          liveData.market,
+        );
+        return Response.json(
+          {
+            error:
+              "Данные поставщика обновились. Пересчитайте карточку — агент сразу подготовит свежее письмо.",
+            recalculate: true,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const now = new Date().toISOString();
     const transitionGuard = and(
       eq(orders.id, id),
@@ -1421,8 +1591,11 @@ export async function PATCH(request: Request) {
         orderId: id,
         stage: "sent",
         title: "Отправка ответа записана",
-        detail:
-          "Письмо и время отправки сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.",
+        detail: confirmedSupplierPlan
+          ? `Перед записью отправки повторно проверены цена, объём, срок и дата поставщика. ${supplierPlanEventDetail(
+              confirmedSupplierPlan,
+            )} Письмо и время сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.`
+          : "Письмо и время отправки сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.",
         createdAt: now,
       },
       transitionGuard,
@@ -1491,6 +1664,34 @@ export async function PATCH(request: Request) {
   }
 
   const liveData = await getDemoDataWithInventory();
+  const now = new Date().toISOString();
+  let confirmedSupplierPlan: SupplierPlan | null = null;
+  if (option.id === "помочь-с-недостающим-объёмом") {
+    confirmedSupplierPlan = result.supplierPlan
+      ? confirmSupplierPlan(result.supplierPlan, liveData.market)
+      : null;
+    if (!confirmedSupplierPlan) {
+      await recordSupplierRefreshNeeded(
+        "решением руководителя",
+        result.supplierPlan!,
+        liveData.market,
+      );
+      return Response.json(
+        {
+          error:
+            "Данные поставщика обновились. Пересчитайте карточку — агент сразу соберёт свежий вариант.",
+          recalculate: true,
+        },
+        { status: 409 },
+      );
+    }
+    result.supplierPlan = {
+      ...confirmedSupplierPlan,
+      confirmedAt: now,
+    };
+  } else {
+    delete result.supplierPlan;
+  }
   const currentInput = inputWithConversation(
     order,
     storedJson<ConversationMessage[]>(order.conversationJson, []),
@@ -1517,7 +1718,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Полного объёма предложенной краски уже нет на складе. Пересчитайте карточку — руководитель получит свежие варианты.",
+            "Остаток краски изменился. Пересчитайте карточку — руководитель получит варианты по свежим данным.",
         },
         { status: 409 },
       );
@@ -1680,7 +1881,6 @@ export async function PATCH(request: Request) {
     ? "clarification_ready"
     : "ready_to_send";
 
-  const now = new Date().toISOString();
   const transitionGuard = and(
     eq(orders.id, id),
     eq(orders.status, "awaiting_approval"),
@@ -1711,7 +1911,11 @@ export async function PATCH(request: Request) {
       orderId: id,
       stage: "approval",
       title: "Руководитель выбрал следующий ход",
-      detail: option.title,
+      detail: confirmedSupplierPlan
+        ? `${option.title}. Перед решением повторно проверены цена, объём, срок и дата. ${supplierPlanEventDetail(
+            confirmedSupplierPlan,
+          )}`
+        : option.title,
       createdAt: now,
     },
     transitionGuard,
