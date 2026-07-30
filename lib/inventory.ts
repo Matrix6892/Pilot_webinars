@@ -162,7 +162,7 @@ function validateUpdate(input: InventoryUpdateInput) {
   }
   if (!actor) {
     throw new InventoryValidationError(
-      "Откройте пульт ведущего и повторите изменение.",
+      "Откройте панель администратора и повторите изменение.",
     );
   }
 

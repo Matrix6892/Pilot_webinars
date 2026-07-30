@@ -82,7 +82,7 @@ export async function GET(request: Request) {
       requeued.map((item) => ({
         orderId: item.id,
         stage: "retry",
-        title: "Карточка вернулась в очередь",
+        title: "Заказ вернулся в очередь",
         detail:
           "Предыдущий запуск остановился. Письмо и история сохранены, обработка продолжится с теми же данными.",
       })),
@@ -109,7 +109,7 @@ export async function GET(request: Request) {
     stage: "understanding",
     title: "Модель для заказов разбирает письмо",
     detail:
-      "Агент собирает задачу клиента, выбирает источники и читает снимок склада этой карточки.",
+      "Агент собирает задачу клиента, выбирает источники и сверяет остаток на момент расчёта для этого заказа.",
     state: "active",
   });
 
@@ -267,7 +267,7 @@ export async function POST(request: Request) {
               ? "Свежие данные изменили решение"
               : isSupplierRecalculation
                 ? "Свежее предложение изменило решение"
-                : "Свежий склад изменил решение"
+                : "Новый остаток изменил решение"
             : status === "ready_to_send"
             ? "Следующий шаг: готов ответить"
             : status === "clarification_ready"
@@ -337,7 +337,7 @@ export async function POST(request: Request) {
       stage: "error",
       title: "Работу можно продолжить",
       detail:
-        "Письмо и журнал сохранены. Запустите карточку ещё раз.",
+        "Письмо и журнал сохранены. Запустите обработку заказа ещё раз.",
       state: "error",
     });
     return Response.json({ ok: true });

@@ -276,7 +276,7 @@ test("keeps a complete green letter aligned with the customer's color and delive
       notes: ["Добавьте в письмо цвет и срок доставки."],
       blockingIssues: [],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -672,7 +672,7 @@ test("turns a mistaken red fence draft into exact yellow questions", () => {
       notes: [],
       blockingIssues: ["Для подбора краски нужны сведения клиента"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -836,7 +836,7 @@ test("grounds wall and floor area calculations without asking for kilograms", ()
         notes: [],
         blockingIssues: [],
       },
-      "opencode/gpt-5.6-sol",
+      "opencode-go/deepseek-v4-pro",
       demoData,
       job,
     );
@@ -908,7 +908,7 @@ test("records a fence photo only when the live order contains an attachment", ()
       notes: [],
       blockingIssues: ["Материал и размеры подтвердит клиент"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -923,7 +923,7 @@ test("records a fence photo only when the live order contains an attachment", ()
       notes: [],
       blockingIssues: ["Материал и размеры подтвердит клиент"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     {
       ...job,
@@ -1053,7 +1053,7 @@ test("grounds a researched floor recommendation and removes invented sanitary cl
   );
   assert.match(
     result.decisionBasis.map((basis) => basis.source).join(" "),
-    /Карточка товара.*О группе компаний.*Направления бизнеса/iu,
+    /Описание краски в каталоге.*О группе компаний.*Направления бизнеса/iu,
   );
 });
 
@@ -1704,7 +1704,7 @@ test("blocks a green reply after a negative model review", () => {
       notes: ["Нужно подтвердить дату отгрузки"],
       blockingIssues: ["В письме обещан неподтверждённый срок"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1739,7 +1739,7 @@ test("does not reuse client copy rejected by the reviewer", () => {
       notes: [],
       blockingIssues: ["Дата и время доставки не подтверждены"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1798,7 +1798,7 @@ test("removes unsupported business conclusions after a negative review", () => {
       notes: [],
       blockingIssues: ["Срок доставки и риск оплаты не подтверждены"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1861,7 +1861,7 @@ test("keeps source company names when rebuilding understanding after review", ()
       notes: [],
       blockingIssues: ["Условие требует подтверждения"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1894,7 +1894,7 @@ test("keeps a deterministic SKU mismatch note after a negative review", () => {
       notes: [],
       blockingIssues: ["Модель выбрала другой продукт"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1919,7 +1919,7 @@ test("mentions the catalogue when product is known and quantity is missing", () 
       notes: [],
       blockingIssues: ["Количество не указано"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -1953,7 +1953,7 @@ test("explains a completed public search with no confirmed sources", () => {
       notes: [],
       blockingIssues: ["Источник не найден"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -2073,7 +2073,7 @@ test("rejects reviewer approval when blocking issues are not empty", () => {
       notes: [],
       blockingIssues: ["В письме осталось неподтверждённое обещание"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -2105,7 +2105,7 @@ test("requires reviewer approval to be the boolean true", () => {
       notes: [],
       blockingIssues: [],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -2133,7 +2133,7 @@ test("requires blockingIssues to be an explicit empty array", () => {
       notes: [],
       blockingIssues: "",
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -2167,7 +2167,7 @@ test("keeps a safe clarification yellow after a negative review", () => {
       notes: [],
       blockingIssues: ["Уточнение не снимает риск применения"],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );
@@ -2222,7 +2222,7 @@ for (const [boundary, job] of [
         notes: [],
         blockingIssues: ["Условие требует решения"],
       },
-      "opencode/gpt-5.6-sol",
+      "opencode-go/deepseek-v4-pro",
       demoData,
       job,
     );
@@ -2252,7 +2252,7 @@ test("accepts complete grounded live results on all three routes", () => {
       greenJob,
     ),
     review,
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     greenJob,
   );
@@ -2264,7 +2264,7 @@ test("accepts complete grounded live results on all three routes", () => {
   const yellow = applyReviewerResult(
     normalizeAgentResult(agentDraft(), demoData, yellowJob),
     review,
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     yellowJob,
   );
@@ -2280,7 +2280,7 @@ test("accepts complete grounded live results on all three routes", () => {
       redJob,
     ),
     review,
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     redJob,
   );
@@ -2312,7 +2312,7 @@ test("rejects a contradictory or partial live result", () => {
       notes: [],
       blockingIssues: [],
     },
-    "opencode/gpt-5.6-sol",
+    "opencode-go/deepseek-v4-pro",
     demoData,
     job,
   );

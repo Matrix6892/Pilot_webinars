@@ -77,7 +77,7 @@ export async function POST(request: Request) {
   if (!limit.allowed) {
     const response = errorResponse(
       429,
-      "Стенд получил много фотографий. Подождите немного и повторите загрузку.",
+      "Система получила много фотографий. Подождите немного и повторите загрузку.",
       "upload_rate_limited",
     );
     response.headers.set("Retry-After", String(limit.retryAfterSeconds));

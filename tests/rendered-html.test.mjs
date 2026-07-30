@@ -48,9 +48,9 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(page, /<OrderStand \/>/);
   assert.match(
     stand,
-    /Клиент пишет своими словами\.\s*Агент ведёт заказ до письма клиенту/,
+    /Клиент пишет своими словами\.\s*Агент ведёт заказ до готового ответа/,
   );
-  assert.match(stand, /На стенде форму отправляют/);
+  assert.match(stand, /Форма запускает тот же рабочий путь/);
   assert.match(stand, /Медицинский склад/);
   assert.match(stand, /Обычный склад/);
   assert.match(stand, /Другое помещение/);
@@ -70,29 +70,29 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /в строке партнёра видно/);
   assert.match(stand, /до полного\s+заказа/);
   assert.match(stand, /Расчёт для сравнения; сейчас у «Колера» доступно/);
-  assert.match(stand, /В учебной строке от/);
+  assert.match(stand, /В строке таблицы поставщиков от/);
   assert.match(stand, /Цены и наличие у других поставщиков/);
-  assert.match(stand, /Где начинается агентная работа/);
+  assert.match(stand, /Что агент делает сам/);
   assert.match(
     stand,
-    /Чат помогает подготовить текст[\s\S]*?агент ждёт ответ клиента[\s\S]*?пересчитывает план/,
+    /Страница заказа хранит письмо,[\s\S]*?Агент ждёт\s+ответ клиента[\s\S]*?пересчитывает план/,
   );
   assert.match(stand, /Описание заказа и фото/);
   assert.match(stand, /Модель для фото описала видимые детали/);
-  assert.match(stand, /Модель для фото описывает видимое/);
+  assert.match(stand, /Модель для фото описывает только видимое/);
   assert.match(
     stand,
     /Поставка двумя партиями опирается на подтверждённый остаток/,
   );
   assert.match(stand, /сравнение с ценами других поставщиков/);
   assert.match(stand, /остаток на момент расчёта/);
-  assert.match(stand, /Проверенные данные/);
-  assert.match(stand, /Сведения о клиенте/);
-  assert.match(stand, /Общая память/);
+  assert.match(stand, /Сверка перед обещанием/);
+  assert.match(stand, /Открытые данные о компании клиента/);
+  assert.match(stand, /Страница заказа и журнал/);
   assert.match(stand, /<details className="zone-guide" open>/);
   assert.match(
     stand,
-    /bridgeOnline[\s\S]*?Модель для фото описывает видимые детали[\s\S]*?Стенд читает заявку, обращается к живому складу, считает заказ/,
+    /bridgeOnline[\s\S]*?Модель для фото описывает только видимое[\s\S]*?Сайт читает заявку, обращается к живому складу, считает заказ/,
   );
   assert.match(stand, /Google[- ]таблиц|Google Таблиц/iu);
   assert.match(stand, /Другой пример/);
@@ -104,7 +104,7 @@ test("ships the Колер product surface and removes the starter", async () =>
     stand,
     /Boolean\(draft\.attachment\) && \(!product \|\| !routeQuantity\)/,
   );
-  assert.match(stand, /Фотография останется в карточке/);
+  assert.match(stand, /Фотография останется на странице заказа/);
   assert.match(
     stand,
     /Заявка и фотография войдут в открытый журнал вебинара/,
@@ -169,7 +169,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /Почему агент так решил/);
   assert.match(stand, /карточк\[аи\]\.\*продолж\|тем же номером/);
-  assert.match(stand, /Карточка и история переписки/);
+  assert.match(stand, /Страница заказа и история переписки/);
   assert.match(
     stand,
     /Исходное письмо, вопросы и ответы клиента сохраняются под одним номером заявки/,
@@ -188,7 +188,15 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Команда улучшает правила по журналу/);
   assert.match(
     stand,
-    /GPT-5\.6 Sol предлагает правки, руководитель принимает/,
+    /GPT-5\.6 Sol готовит новую редакцию инструкции/,
+  );
+  assert.match(
+    stand,
+    /учебный источник проверен перед подготовкой вариантов[\s\S]*?Данные из таблицы поставщиков сверены перед подготовкой вариантов/,
+  );
+  assert.match(
+    stand,
+    /function dateFromStorage[\s\S]*?formatEventTime[\s\S]*?dateFromStorage\(value\)/,
   );
   assert.match(stand, /Работа за сегодня в одной таблице/);
   assert.match(stand, /Скачать журнал за сегодня/);
@@ -196,7 +204,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Скопировать формулу для Google Таблиц/);
   assert.match(
     stand,
-    /bridgeOnline \? \([\s\S]*?Обработка заявки[\s\S]*?Подготовленные правила и живой склад/,
+    /bridgeOnline \? \([\s\S]*?Обработка заявки[\s\S]*?Подготовленные правила и текущий остаток/,
   );
   assert.doesNotMatch(stand, /disabled=\{!bridgeOnline\}/);
   assert.match(stand, /role="progressbar"/);
@@ -212,7 +220,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(
     stand,
-    /Агент завершил поиск и оставил в карточке только проверяемые\s+факты/,
+    /Агент завершил поиск и оставил на странице заказа только\s+проверяемые факты/,
   );
   assert.match(
     stand,
@@ -264,8 +272,8 @@ test("ships the Колер product surface and removes the starter", async () =>
     agentRoute,
     /eq\(orderEvents\.state, "active"\)[\s\S]*?set\(\{ state: "done" \}\)|set\(\{ state: "done" \}\)[\s\S]*?eq\(orderEvents\.state, "active"\)/,
   );
-  assert.match(ordersRoute, /Карточка продолжила работу/);
-  assert.match(stand, /Повторить эту карточку/);
+  assert.match(ordersRoute, /Работа с заказом продолжилась/);
+  assert.match(stand, /Повторить этот заказ/);
   assert.match(stand, /const latestOrderStorageKey = "koler-latest-order"/);
   assert.match(
     stand,
@@ -273,13 +281,13 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(
     stand,
-    /На стенде участник на минуту принимает роль руководителя/,
+    /Во время вебинара участник на минуту принимает роль руководителя/,
   );
   assert.match(
     stand,
     /humanizeText\(visibleTransition\.beforeReply\)[\s\S]*?humanizeText\(visibleTransition\.afterReply\)/,
   );
-  assert.match(stand, /Запускаем карточку снова/);
+  assert.match(stand, /Запускаем заказ снова/);
   assert.match(stand, /action:\s*"retry"/);
   assert.match(ordersRoute, /datetime\('now', '-1 minute'\)/);
   assert.match(
@@ -367,7 +375,7 @@ test("explains the stand calculation, manager role and saved recalculation", asy
   );
   assert.match(
     stand,
-    /Обе версии сохранились в карточке и журнале\.\s+Свежее письмо ждёт\s+вашего подтверждения\./,
+    /Обе версии сохранились на странице заказа и в журнале\.\s+Свежее\s+письмо ждёт вашего подтверждения\./,
   );
 });
 
@@ -401,7 +409,7 @@ test("prepares a contract reserve before the stand send", async () => {
   assert.match(stand, /Подготовить резерв товара/);
   assert.match(
     stand,
-    /Рабочая система\s+передаст его в учётную систему компании/,
+    /Рабочая\s+система передаст резерв в учётную систему компании/,
   );
   assert.match(stand, /Путь ответа клиенту/);
   assert.match(
@@ -458,7 +466,7 @@ test("names the model roles honestly in the visible activity log", async () => {
     /stage === "review"[\s\S]*?\/модел\/iu\.test\(title\)[\s\S]*?"Модель проверки"[\s\S]*?"Программа проверки"/,
   );
   assert.match(eventActor, /stage === "review-fallback"[\s\S]*?"Программа проверки"/);
-  assert.match(eventActor, /"model"[\s\S]*?"Программа стенда"/);
+  assert.match(eventActor, /"model"[\s\S]*?"Система"/);
   assert.match(stand, /actor: eventActor\(item\.stage, item\.title\)/);
   assert.match(eventKind, /stage === "model"\) return "Выбор модели"/);
   assert.match(

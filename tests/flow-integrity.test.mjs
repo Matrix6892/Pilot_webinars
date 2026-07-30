@@ -130,7 +130,7 @@ test("guards recalculation with fresh-stock and compare-and-set checks", async (
   );
   assert.match(
     route,
-    /result\.market\.items\.length > 0[\s\S]*?"Агент сравнил нашу цену с ценами других поставщиков"[\s\S]*?"Агент проверил цену по карточке товара"/,
+    /result\.market\.items\.length > 0[\s\S]*?"Агент сравнил нашу цену с ценами других поставщиков"[\s\S]*?"Агент проверил цену по описанию краски в каталоге"/,
   );
 });
 
@@ -522,7 +522,7 @@ test("reserves only the stock-confirmed part of a split delivery", async () => {
       requestedKg: 100,
       stockKg: 40,
     }),
-    "40 кг краски «Краска для дерева на улице» закреплены за карточкой. Оставшиеся 60 кг записаны в выбранный план поставки. В рабочей системе этот шаг передаст резерв в учётную систему.",
+    "40 кг краски «Краска для дерева на улице» закреплены за заказом. Оставшиеся 60 кг записаны в выбранный план поставки. В рабочей системе этот шаг передаст резерв в учётную систему.",
   );
   assert.equal(
     reserveEventDetail({
@@ -530,7 +530,7 @@ test("reserves only the stock-confirmed part of a split delivery", async () => {
       requestedKg: 100,
       stockKg: 180,
     }),
-    "100 кг краски «Краска для дерева на улице» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.",
+    "100 кг краски «Краска для дерева на улице» закреплены за заказом. В рабочей системе этот шаг передаст резерв в учётную систему.",
   );
   assert.equal(
     reserveEventDetail({
@@ -538,7 +538,7 @@ test("reserves only the stock-confirmed part of a split delivery", async () => {
       requestedKg: 1100,
       stockKg: 1100,
     }),
-    "1 100 кг краски «Краска для бетонного пола» закреплены за карточкой. В рабочей системе этот шаг передаст резерв в учётную систему.",
+    "1 100 кг краски «Краска для бетонного пола» закреплены за заказом. В рабочей системе этот шаг передаст резерв в учётную систему.",
   );
 });
 
@@ -582,7 +582,7 @@ test("rechecks the other supplier before approval, reserve and send", async () =
     assert.match(branch, /confirmSupplierPlan\(/);
     assert.match(
       branch,
-      /Данные поставщика обновились\. Пересчитайте карточку/,
+      /Данные поставщика обновились\. Пересчитайте заказ/,
     );
     assert.match(branch, /recalculate:\s*true/);
     assert.match(branch, /\{ status: 409 \}/);
@@ -707,7 +707,7 @@ test("applies an approved stocked analogue to the product and reserve", async ()
   );
   assert.match(
     approval,
-    /approvedProduct\.stockKg < originalProduct\.requestedKg[\s\S]*?Остаток краски изменился\. Пересчитайте карточку/,
+    /approvedProduct\.stockKg < originalProduct\.requestedKg[\s\S]*?Остаток краски изменился\. Пересчитайте заказ/,
   );
 });
 

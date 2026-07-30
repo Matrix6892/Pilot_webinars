@@ -11,7 +11,7 @@ type HistoryReason =
   | "Поставщик и склад перечитаны"
   | "Решение рабочей модели"
   | "Вариант руководителя подтверждён"
-  | "Карточка продолжила работу";
+  | "Работа с заказом продолжилась";
 
 function resultRoute(result: AgentResult) {
   if (result.route) return result.route;

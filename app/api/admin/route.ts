@@ -25,7 +25,7 @@ export async function POST(request: Request) {
   if (!isAdminAuthConfigured()) {
     return Response.json(
       {
-        error: "Код ведущего ещё не настроен.",
+        error: "Код администратора ещё не настроен.",
         code: "admin_auth_not_configured",
       },
       { status: 503, headers: noStoreHeaders },
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
   if (Number.isFinite(contentLength) && contentLength > 1_024) {
     return Response.json(
       {
-        error: "Введите короткий код ведущего.",
+        error: "Введите короткий код администратора.",
         code: "admin_payload_too_large",
       },
       { status: 413, headers: noStoreHeaders },
@@ -59,7 +59,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error:
-          "Пульт получил несколько попыток входа. Подождите немного и введите код снова.",
+          "После нескольких попыток вход временно приостановлен. Подождите немного и введите код снова.",
         code: "admin_rate_limited",
       },
       {
@@ -90,14 +90,14 @@ export async function POST(request: Request) {
       : "";
   if (!code) {
     return Response.json(
-      { error: "Введите код ведущего.", code: "admin_code_required" },
+      { error: "Введите код администратора.", code: "admin_code_required" },
       { status: 400, headers: noStoreHeaders },
     );
   }
   if (!(await verifyAdminCode(code))) {
     return Response.json(
       {
-        error: "Код не подошёл. Введите код ведущего ещё раз.",
+        error: "Код не подошёл. Введите код администратора ещё раз.",
         code: "invalid_admin_code",
       },
       { status: 401, headers: noStoreHeaders },

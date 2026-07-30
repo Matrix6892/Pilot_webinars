@@ -63,10 +63,12 @@ const visionInstruction = await readFile(
 const allowedModels = new Set(modelCatalog.options.map((model) => model.id));
 const modelLabel = (id) =>
   modelCatalog.options.find((model) => model.id === id)?.label ?? id;
-const fallbackPrimary =
+const requestedPrimary =
   process.env.OPENCODE_PRIMARY_MODEL ?? modelCatalog.default;
-const strongReviewer =
-  process.env.OPENCODE_REVIEWER_MODEL ?? "opencode/gpt-5.6-sol";
+const fallbackPrimary = allowedModels.has(requestedPrimary)
+  ? requestedPrimary
+  : modelCatalog.default;
+const strongReviewer = "opencode-go/deepseek-v4-pro";
 const visionModel = "opencode-go/mimo-v2.5";
 const agentApiTimeoutMs = 12_000;
 const openCodeTimeoutMs = 120_000;
@@ -662,7 +664,7 @@ async function processJob(job) {
       job.id,
       "model",
       "Выбран исполнитель",
-      `${modelLabel(primaryModel)} получил инструкцию редакции 5.6.`,
+      `${modelLabel(primaryModel)} получил инструкцию, подготовленную GPT-5.6 Sol.`,
     );
     await addEvent(
       job.id,

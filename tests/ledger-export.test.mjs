@@ -94,7 +94,7 @@ test("exports the incoming request and prepared agent email as separate full-tex
   assert.equal(incoming["Полный текст"], longBody);
   assert.equal(incoming["Состояние записи"], "Клиент отправил письмо");
   assert.equal(
-    incoming["Состояние карточки"],
+    incoming["Состояние заказа"],
     "Агент подготовил ответ · следующий шаг — резерв товара",
   );
   assert.match(incoming["Номер записи"], /^№\d{4} · входящее письмо$/);
@@ -255,7 +255,7 @@ test("keeps every conversation message and manager decision on its own timed row
   );
 
   assert.equal(rows.length, 4);
-  assert.equal(sentQuestion["Состояние записи"], "Стенд записал отправку");
+  assert.equal(sentQuestion["Состояние записи"], "Система записала отправку");
   assert.equal(sentQuestion["Этап переписки №"], "1");
   assert.equal(sentQuestion["Время отправки"], "29.07.2026 · 12:01:00");
   assert.equal(customerReply["Полный текст"], customerText);
@@ -384,7 +384,7 @@ test("labels the saved company context as a separate agent step", () => {
   );
 });
 
-test("labels sent cards and sent events as stand-only actions", () => {
+test("labels recorded sends without claiming external email delivery", () => {
   const csv = buildLedgerCsv({
     orders: [
       {
@@ -425,8 +425,8 @@ test("labels sent cards and sent events as stand-only actions", () => {
     (row) => row["Тип записи"] === "Запись отправки",
   );
 
-  assert.equal(incoming["Состояние карточки"], "Стенд записал отправку");
-  assert.equal(agentEmail["Состояние записи"], "Стенд записал отправку");
+  assert.equal(incoming["Состояние заказа"], "Система записала отправку");
+  assert.equal(agentEmail["Состояние записи"], "Система записала отправку");
   assert.equal(sentEvent["Этап агента"], "Запись отправки");
   assert.equal(sentEvent["Отправитель"], "Агент отдела продаж");
   assert.equal(sentEvent["Название события"], "Запись отправки");
@@ -452,7 +452,7 @@ test("assigns a readable record type and sender to every known event stage", () 
     ["market", "Сравнение цен других поставщиков", "Агент отдела продаж"],
     ["review", "Проверка ответа", "Программа проверки"],
     ["understanding", "Анализ заявки", "Агент отдела продаж"],
-    ["received", "Приём заявки", "Программа стенда"],
+    ["received", "Приём заявки", "Система"],
   ];
   const csv = buildLedgerCsv({
     orders: [
@@ -516,6 +516,15 @@ test("rewrites old internal phrases into clear ledger copy", () => {
         state: "done",
         createdAt: "2026-07-29T10:03:00.000Z",
       },
+      {
+        id: 32,
+        orderId: "legacy-copy",
+        stage: "partner-stock",
+        title: "Агент нашёл, где собрать полный объём",
+        detail: "Учебный источник проверен перед подготовкой вариантов.",
+        state: "done",
+        createdAt: "2026-07-29T10:03:30.000Z",
+      },
     ],
     inventoryChanges: [
       {
@@ -542,9 +551,13 @@ test("rewrites old internal phrases into clear ledger copy", () => {
   const stockChange = rows.find(
     (row) => row["Тип записи"] === "Изменение склада",
   );
+  const supplier = rows.find(
+    (row) =>
+      row["Тип записи"] === "Проверка наличия у другого поставщика",
+  );
 
   assert.equal(
-    incoming["Состояние карточки"],
+    incoming["Состояние заказа"],
     "Агент подготовил резерв товара",
   );
   assert.equal(
@@ -555,7 +568,14 @@ test("rewrites old internal phrases into clear ledger copy", () => {
     stockChange["Причина изменения склада"],
     "40 кг осталось после других заказов",
   );
-  assert.doesNotMatch(csv, /согласован|после резервов|выгодной границы/iu);
+  assert.equal(
+    supplier["Полный текст"],
+    "Данные из таблицы поставщиков сверены перед подготовкой вариантов.",
+  );
+  assert.doesNotMatch(
+    csv,
+    /согласован|после резервов|выгодной границы|учебный источник/iu,
+  );
 });
 
 test("exports Google-safe dates and readable model names", () => {
@@ -581,7 +601,7 @@ test("exports Google-safe dates and readable model names", () => {
         conversationJson: "[]",
         roundNo: 1,
         agentModel: "opencode-go/deepseek-v4-flash",
-        reviewerModel: "opencode/gpt-5.6-sol",
+        reviewerModel: "opencode-go/deepseek-v4-pro",
         sentAt: "2026-07-29T21:26:42.260Z",
         createdAt: "2026-07-29T21:18:13.000Z",
         updatedAt: "2026-07-29T21:26:42.260Z",
@@ -601,7 +621,7 @@ test("exports Google-safe dates and readable model names", () => {
         zoneReason: "Краска, объём и цена подтверждены.",
         optionsJson: "[]",
         agentModel: "opencode-go/deepseek-v4-pro",
-        reviewerModel: "opencode/gpt-5.6-sol",
+        reviewerModel: "opencode-go/deepseek-v4-pro",
         createdAt: "2026-07-29T21:25:24.000Z",
       },
     ],
@@ -617,10 +637,10 @@ test("exports Google-safe dates and readable model names", () => {
   assert.equal(finalLetter["Дата и время"], "30.07.2026 · 00:26:42");
   assert.equal(finalLetter["Время отправки"], "30.07.2026 · 00:26:42");
   assert.equal(finalLetter["Модель для заказов"], "DeepSeek V4 Flash");
-  assert.equal(finalLetter["Модель для проверки"], "GPT-5.6 Sol");
+  assert.equal(finalLetter["Модель для проверки"], "DeepSeek V4 Pro");
   assert.equal(savedDecision["Дата и время"], "30.07.2026 · 00:25:24");
   assert.equal(savedDecision["Модель для заказов"], "DeepSeek V4 Pro");
-  assert.equal(savedDecision["Модель для проверки"], "GPT-5.6 Sol");
+  assert.equal(savedDecision["Модель для проверки"], "DeepSeek V4 Pro");
   assert.equal(
     savedDecision["Состояние записи"],
     "Агент сохранил решение",
@@ -742,7 +762,7 @@ test("humanizes every user and model text field and names stock writers", () => 
   assert.equal(event["Полный текст"], expectedText);
   assert.deepEqual(
     new Set(stockRows.map((row) => row["Кто изменил склад"])),
-    new Set(["Ведущий", "Таблица склада"]),
+    new Set(["Администратор", "Таблица склада"]),
   );
   assert.ok(
     stockRows.some(
@@ -787,7 +807,7 @@ test("gives every model step a specific Russian presentation", () => {
       "Выбор данных",
       "Выбор данных для решения",
       "Агент отдела продаж",
-      "Карточка заказа",
+      "Страница заказа",
       "Система завершила шаг",
     ],
     [
@@ -811,13 +831,13 @@ test("gives every model step a specific Russian presentation", () => {
       "Результат поиска",
       "Сведения для решения собраны",
       "Агент отдела продаж",
-      "Карточка заказа",
+      "Страница заказа",
       "Система завершила шаг",
     ],
     [
       "review-result",
       "Результат проверки",
-      "Проверка GPT-5.6 Sol завершена",
+      "Проверка DeepSeek V4 Pro завершена",
       "Модель проверки",
       "Агент отдела продаж",
       "Система завершила шаг",
@@ -850,7 +870,7 @@ test("gives every model step a specific Russian presentation", () => {
       "vision-fallback",
       "Вопросы по фотографии",
       "Подготовка вопросов по фотографии",
-      "Программа стенда",
+      "Система",
       "Агент отдела продаж",
       "Агент подготовил уточняющие вопросы",
     ],
@@ -978,7 +998,7 @@ test("exports the exact sent letter with its subject, body and send time after r
   const sentLetter = rows.find(
     (row) =>
       row["Тип записи"] === "Письмо агента" &&
-      row["Состояние записи"] === "Стенд записал отправку",
+      row["Состояние записи"] === "Система записала отправку",
   );
 
   assert.ok(sentLetter);

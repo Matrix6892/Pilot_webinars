@@ -431,7 +431,7 @@ test("continues the floor card through a customer reply and a live stock change"
   );
   assert.match(
     beforeRestock.decisionBasis.map((basis) => basis.source).join(" "),
-    /цен и наличия других поставщиков/iu,
+    /цен и наличия поставщиков/iu,
   );
 
   assert.equal(afterRestock.route, "ready");
@@ -809,7 +809,7 @@ test("keeps a named standard or disinfectant pending verification", () => {
   assert.match(result.missing.join(" "), /документ|ГОСТ|средств|технолог/iu);
   assert.match(
     optionCopy,
-    /точное название.*(?:документ|средств).*технолог.*паспортом качества.*карточкой краски/isu,
+    /точное название.*(?:документ|средств).*технолог.*паспортом качества.*описанием краски в каталоге/isu,
   );
   assert.match(
     `${result.zoneReason} ${result.managerNote}`,

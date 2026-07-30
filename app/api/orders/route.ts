@@ -158,7 +158,7 @@ export function reserveEventDetail(
   const handoff = supplierPlan
     ? "В рабочей системе этот шаг передаст резерв нашей части в учётную систему."
     : "В рабочей системе этот шаг передаст резерв в учётную систему.";
-  return `${formatKg(reservedKg)} кг краски «${product.name}»${color} закреплены за карточкой.${remaining}${supplier} ${handoff}`;
+  return `${formatKg(reservedKg)} кг краски «${product.name}»${color} закреплены за заказом.${remaining}${supplier} ${handoff}`;
 }
 
 export function approvedProductForOption(
@@ -368,7 +368,7 @@ function stagedEvents(orderId: string, result: AgentResult) {
       orderId,
       stage: "received",
       title: "Заказ принят",
-      detail: "Письмо получило номер и рабочую карточку.",
+      detail: "Письмо получило номер заказа.",
     },
     {
       orderId,
@@ -419,7 +419,7 @@ function stagedEvents(orderId: string, result: AgentResult) {
         title:
           result.market.items.length > 0
             ? "Агент сравнил нашу цену с ценами других поставщиков"
-            : "Агент проверил цену по карточке товара",
+            : "Агент проверил цену по описанию краски в каталоге",
         detail: result.market.summary,
       },
       ...(supplierPlan
@@ -430,7 +430,7 @@ function stagedEvents(orderId: string, result: AgentResult) {
               title: "Агент нашёл, где собрать полный объём",
               detail: `${supplierPlanEventDetail(
                 supplierPlan,
-              )} Учебный источник проверен перед подготовкой вариантов.`,
+              )} Данные из таблицы поставщиков сверены перед подготовкой вариантов.`,
             },
           ]
         : []),
@@ -523,14 +523,14 @@ export async function GET(request: Request) {
 
   const id = clean(url.searchParams.get("id"), 80);
   if (!id) {
-    return Response.json({ error: "Укажите номер карточки." }, { status: 400 });
+    return Response.json({ error: "Укажите номер заказа." }, { status: 400 });
   }
 
   const db = getDb();
   let [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
   if (!order) {
     return Response.json(
-      { error: "Карточка не найдена. Создайте новый заказ." },
+      { error: "Заказ не найден. Создайте новый заказ." },
       { status: 404 },
     );
   }
@@ -575,7 +575,7 @@ export async function GET(request: Request) {
         roundNo: recovered.roundNo,
         result,
         status: recoveredStatus,
-        reason: "Карточка продолжила работу",
+        reason: "Работа с заказом продолжилась",
         sourceKey: `continuation:${recovered.roundNo}:${inventorySnapshot.version}`,
         inventorySnapshot,
         agentModel: "Расчёт по готовой инструкции",
@@ -593,9 +593,9 @@ export async function GET(request: Request) {
       await db.insert(orderEvents).values({
         orderId: id,
         stage: "fallback",
-        title: "Карточка продолжила работу",
+        title: "Работа с заказом продолжилась",
         detail:
-          "Карточка продолжила работу по той же инструкции и свежим данным.",
+          "Агент продолжил работу с тем же заказом по свежим данным.",
       });
       const continuation = stagedEvents(id, result).filter(
         (event) =>
@@ -677,7 +677,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error:
-          "Стенд получил много заявок. Подождите немного и отправьте письмо снова.",
+          "Система получила много заявок. Подождите немного и отправьте письмо снова.",
       },
       {
         status: 429,
@@ -711,7 +711,7 @@ export async function POST(request: Request) {
     const retryId = clean(payload.id, 80);
     if (!retryId) {
       return Response.json(
-        { error: "Укажите номер карточки." },
+        { error: "Укажите номер заказа." },
         { status: 400 },
       );
     }
@@ -724,7 +724,7 @@ export async function POST(request: Request) {
       .limit(1);
     if (!failedOrder) {
       return Response.json(
-        { error: "Карточка не найдена. Создайте новый заказ." },
+        { error: "Заказ не найден. Создайте новый заказ." },
         { status: 404 },
       );
     }
@@ -732,7 +732,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error:
-            "Откройте карточку из того же окна, где вы её создали, или войдите в пульт ведущего.",
+            "Откройте заказ из того же окна, где вы его создали, или войдите в панель администратора.",
         },
         { status: 403 },
       );
@@ -755,9 +755,9 @@ export async function POST(request: Request) {
       {
         orderId: retryId,
         stage: "retry",
-        title: "Карточка снова поставлена в очередь",
+        title: "Заказ снова поставлен в очередь",
         detail:
-          "Номер карточки, переписка, прежние решения и снимок склада сохранены.",
+          "Номер заказа, переписка, прежние решения и остаток на момент расчёта сохранены.",
       },
       transitionGuard,
     );
@@ -782,7 +782,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error:
-            "Карточка уже продолжила работу. Показываем последнее состояние.",
+            "Работа с заказом уже продолжилась. Показываем последнее состояние.",
         },
         { status: 409 },
       );
@@ -846,7 +846,7 @@ export async function POST(request: Request) {
       orderId: id,
       stage: "received",
       title: "Заказ принят",
-      detail: `Карточка передана исполнителю: ${modelLabel(selectedModel)}.`,
+      detail: `Заказ передан выбранной модели: ${modelLabel(selectedModel)}.`,
     });
   } else {
     const result = buildDemoResult(
@@ -904,7 +904,7 @@ export async function PATCH(request: Request) {
     return Response.json(
       {
         error:
-          "Карточки сейчас активно обновляются. Подождите немного и повторите действие.",
+          "Заказы сейчас активно обновляются. Подождите немного и повторите действие.",
       },
       {
         status: 429,
@@ -930,14 +930,14 @@ export async function PATCH(request: Request) {
   const action = clean(payload.action, 40) || "approve";
   const optionId = clean(payload.optionId, 80);
   if (!id) {
-    return Response.json({ error: "Укажите номер карточки." }, { status: 400 });
+    return Response.json({ error: "Укажите номер заказа." }, { status: 400 });
   }
 
   const db = getDb();
   const [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
   if (!order) {
     return Response.json(
-      { error: "Карточка не найдена. Создайте новый заказ." },
+      { error: "Заказ не найден. Создайте новый заказ." },
       { status: 404 },
     );
   }
@@ -945,7 +945,7 @@ export async function PATCH(request: Request) {
     return Response.json(
       {
         error:
-          "Откройте карточку из того же окна, где вы её создали, или войдите в пульт ведущего.",
+          "Откройте заказ из того же окна, где вы его создали, или войдите в панель администратора.",
       },
       { status: 403 },
     );
@@ -980,14 +980,14 @@ export async function PATCH(request: Request) {
   if (action === "send_clarification") {
     if (order.status !== "clarification_ready" || !order.resultJson) {
       return Response.json(
-        { error: "Вопросы уже отправлены или карточка перешла дальше." },
+        { error: "Вопросы уже отправлены или заказ перешёл к следующему шагу." },
         { status: 409 },
       );
     }
     const result = storedJson<AgentResult | null>(order.resultJson, null);
     if (!result || routeOf(result) !== "needs_info") {
       return Response.json(
-        { error: "Карточка уже перешла к следующему шагу." },
+        { error: "Заказ уже перешёл к следующему шагу." },
         { status: 409 },
       );
     }
@@ -1037,7 +1037,7 @@ export async function PATCH(request: Request) {
     const [updated] = updatedOrders;
     if (!updated) {
       return Response.json(
-        { error: "Карточка уже обновилась. Показываем свежие данные." },
+        { error: "Заказ уже обновился. Показываем свежие данные." },
         { status: 409 },
       );
     }
@@ -1054,7 +1054,7 @@ export async function PATCH(request: Request) {
     }
     if (order.status !== "awaiting_customer") {
       return Response.json(
-        { error: "Карточка уже обработала этот ответ." },
+        { error: "Этот ответ клиента уже учтён в заказе." },
         { status: 409 },
       );
     }
@@ -1095,7 +1095,7 @@ export async function PATCH(request: Request) {
         .returning({ id: orders.id });
       if (!queued) {
         return Response.json(
-          { error: "Карточка уже обновилась. Показываем свежие данные." },
+          { error: "Заказ уже обновился. Показываем свежие данные." },
           { status: 409 },
         );
       }
@@ -1187,7 +1187,7 @@ export async function PATCH(request: Request) {
     const [updated] = updatedOrders ?? [];
     if (!updated) {
       return Response.json(
-        { error: "Карточка уже обновилась. Показываем свежие данные." },
+        { error: "Заказ уже обновился. Показываем свежие данные." },
         { status: 409 },
       );
     }
@@ -1222,7 +1222,7 @@ export async function PATCH(request: Request) {
     ) {
       return Response.json(
         {
-          error: "Карточка уже рассчитана по свежим данным.",
+          error: "Заказ уже рассчитан по свежим данным.",
         },
         { status: 409 },
       );
@@ -1312,7 +1312,7 @@ export async function PATCH(request: Request) {
         return Response.json(
           {
             error:
-              "Карточка уже получила свежие данные. Показываем последнее решение.",
+              "Заказ уже получил свежие данные. Показываем последнее решение.",
           },
           { status: 409 },
         );
@@ -1422,7 +1422,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Карточка уже получила свежий расчёт. Показываем последнее решение.",
+            "Заказ уже получил свежий расчёт. Показываем последнее решение.",
         },
         { status: 409 },
       );
@@ -1437,7 +1437,7 @@ export async function PATCH(request: Request) {
   if (action === "reserve") {
     if (order.status !== "ready_to_send" || order.sentAt) {
       return Response.json(
-        { error: "Резерв товара уже подготовлен или карточка перешла дальше." },
+        { error: "Резерв товара уже подготовлен или заказ перешёл дальше." },
         { status: 409 },
       );
     }
@@ -1445,7 +1445,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Склад обновился. Пересчитайте карточку — агент сразу подготовит свежий объём для резерва.",
+            "Склад обновился. Пересчитайте заказ — агент сразу подготовит свежий объём для резерва.",
         },
         { status: 409 },
       );
@@ -1473,7 +1473,7 @@ export async function PATCH(request: Request) {
         return Response.json(
           {
             error:
-              "Данные поставщика обновились. Пересчитайте карточку — агент сразу соберёт свежий вариант.",
+              "Данные поставщика обновились. Пересчитайте заказ — агент сразу соберёт свежий вариант.",
             recalculate: true,
           },
           { status: 409 },
@@ -1520,7 +1520,7 @@ export async function PATCH(request: Request) {
     const [reservedOrder] = reservedOrders;
     if (!reservedOrder) {
       return Response.json(
-        { error: "Карточка уже обновилась. Показываем свежие данные." },
+        { error: "Заказ уже обновился. Показываем свежие данные." },
         { status: 409 },
       );
     }
@@ -1535,7 +1535,7 @@ export async function PATCH(request: Request) {
           error:
             order.status === "ready_to_send"
               ? "Сначала подготовьте резерв товара."
-              : "Письмо ждёт следующий шаг в карточке.",
+              : "Письмо ждёт следующего шага по заказу.",
         },
         { status: 409 },
       );
@@ -1544,7 +1544,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Склад обновился. Пересчитайте карточку — агент сразу подготовит свежее письмо.",
+            "Склад обновился. Пересчитайте заказ — агент сразу подготовит свежее письмо.",
         },
         { status: 409 },
       );
@@ -1567,7 +1567,7 @@ export async function PATCH(request: Request) {
         return Response.json(
           {
             error:
-              "Данные поставщика обновились. Пересчитайте карточку — агент сразу подготовит свежее письмо.",
+              "Данные поставщика обновились. Пересчитайте заказ — агент сразу подготовит свежее письмо.",
             recalculate: true,
           },
           { status: 409 },
@@ -1616,7 +1616,7 @@ export async function PATCH(request: Request) {
     const [sentOrder] = sentOrders;
     if (!sentOrder) {
       return Response.json(
-        { error: "Карточка уже обновилась. Показываем свежие данные." },
+        { error: "Заказ уже обновился. Показываем свежие данные." },
         { status: 409 },
       );
     }
@@ -1633,7 +1633,7 @@ export async function PATCH(request: Request) {
 
   if (order.status !== "awaiting_approval") {
     return Response.json(
-      { error: "Карточка уже получила решение." },
+      { error: "Решение по заказу уже принято." },
       { status: 409 },
     );
   }
@@ -1641,7 +1641,7 @@ export async function PATCH(request: Request) {
     return Response.json(
       {
         error:
-          "Склад обновился. Пересчитайте карточку — руководитель получит свежие варианты.",
+          "Склад обновился. Пересчитайте заказ — руководитель получит свежие варианты.",
       },
       { status: 409 },
     );
@@ -1650,7 +1650,7 @@ export async function PATCH(request: Request) {
   const result = storedJson<AgentResult | null>(order.resultJson, null);
   if (!result) {
     return Response.json(
-      { error: "Решение готовится. Обновите карточку через несколько секунд." },
+      { error: "Решение готовится. Обновите заказ через несколько секунд." },
       { status: 404 },
     );
   }
@@ -1679,7 +1679,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Данные поставщика обновились. Пересчитайте карточку — агент сразу соберёт свежий вариант.",
+            "Данные поставщика обновились. Пересчитайте заказ — агент сразу соберёт свежий вариант.",
           recalculate: true,
         },
         { status: 409 },
@@ -1718,7 +1718,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Остаток краски изменился. Пересчитайте карточку — руководитель получит варианты по свежим данным.",
+            "Остаток краски изменился. Пересчитайте заказ — руководитель получит варианты по свежим данным.",
         },
         { status: 409 },
       );
@@ -1746,7 +1746,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "У выбранной краски другой набор цветов. Пересчитайте карточку — агент предложит вариант для цвета клиента.",
+            "У выбранной краски другой набор цветов. Пересчитайте заказ — агент предложит вариант для цвета клиента.",
         },
         { status: 409 },
       );
@@ -1762,7 +1762,7 @@ export async function PATCH(request: Request) {
       return Response.json(
         {
           error:
-            "Остаток предложенной краски обновился. Пересчитайте карточку — руководитель получит свежие варианты.",
+            "Остаток предложенной краски обновился. Пересчитайте заказ — руководитель получит свежие варианты.",
         },
         { status: 409 },
       );
@@ -1823,7 +1823,7 @@ export async function PATCH(request: Request) {
             )} ₽/кг. Завод зарабатывает при цене от ${formatted.format(
               sourceProduct.minPricePerKg,
             )} ₽/кг.`,
-            source: "Карточка выбранной краски",
+            source: "Описание выбранной краски в каталоге",
             checkedAt,
           },
           ...(result.market.items.length
@@ -1867,13 +1867,13 @@ export async function PATCH(request: Request) {
     result.zoneReason =
       "Руководитель выбрал следующий ход. Агент подготовил короткий вопрос клиенту.";
     result.managerNote =
-      "Отправьте подготовленный вопрос клиенту. Ответ продолжит эту карточку.";
+      "Отправьте подготовленный вопрос клиенту. Ответ продолжит работу с тем же заказом.";
     result.review = {
       ...result.review,
       verdict: "Вопрос готов к отправке",
       notes: [
         "Вопрос соответствует выбранному варианту",
-        "Ответ клиента продолжит ту же карточку",
+        "Ответ клиента продолжит тот же заказ",
       ],
     };
   }
@@ -1941,7 +1941,7 @@ export async function PATCH(request: Request) {
   const [approvedOrder] = approvedOrders;
   if (!approvedOrder) {
     return Response.json(
-      { error: "Карточка уже обновилась. Показываем свежие данные." },
+      { error: "Заказ уже обновился. Показываем свежие данные." },
       { status: 409 },
     );
   }

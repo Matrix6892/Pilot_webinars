@@ -33,7 +33,7 @@ export async function PATCH(request: Request) {
   if (!actor) {
     return errorResponse(
       401,
-      "Откройте пульт ведущего и повторите изменение.",
+      "Откройте панель администратора и повторите изменение.",
       "unauthorized",
     );
   }

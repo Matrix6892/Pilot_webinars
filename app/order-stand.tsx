@@ -264,7 +264,7 @@ const zoneCopy = {
     short: "Агент задаёт точные вопросы",
     description:
       "Агент собрал известное и просит только те данные, которые меняют подбор или расчёт.",
-    next: "Отправьте вопросы и продолжите ту же карточку после ответа.",
+    next: "Отправьте вопросы и продолжите заказ на той же странице после ответа.",
   },
   red: {
     name: "Решает руководитель",
@@ -273,7 +273,7 @@ const zoneCopy = {
     description:
       "Склад подтверждает часть объёма или клиент просит особую цену, оплату после поставки либо срочный срок. Агент готовит выполнимые варианты.",
     next:
-      "Выберите вариант. Если нужен ответ клиента, продолжите карточку; готовое письмо пройдёт резерв и запись отправки.",
+      "Выберите вариант. Если нужен ответ клиента, продолжите заказ на той же странице; готовое письмо пройдёт резерв и запись отправки.",
   },
 } satisfies Record<
   ScenarioZone,
@@ -299,8 +299,15 @@ function formatMoney(value: number) {
   return new Intl.NumberFormat("ru-RU").format(value);
 }
 
+function dateFromStorage(value: string) {
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  return new Date(normalized);
+}
+
 function formatEventTime(value: string) {
-  const date = new Date(value);
+  const date = dateFromStorage(value);
   return Number.isNaN(date.getTime())
     ? ""
     : new Intl.DateTimeFormat("ru-RU", {
@@ -312,10 +319,7 @@ function formatEventTime(value: string) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return "время сохранено в журнале";
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
-    ? `${value.replace(" ", "T")}Z`
-    : value;
-  const date = new Date(normalized);
+  const date = dateFromStorage(value);
   return Number.isNaN(date.getTime())
     ? value
     : new Intl.DateTimeFormat("ru-RU", {
@@ -326,8 +330,146 @@ function formatDateTime(value?: string | null) {
       }).format(date);
 }
 
+function replacementWithInitialCase(source: string, replacement: string) {
+  if (!/^[А-ЯЁA-Z]/u.test(source)) return replacement;
+  return replacement[0].toLocaleUpperCase("ru-RU") + replacement.slice(1);
+}
+
 function humanizeText(value: string) {
   return value
+    .replace(/^Пульт ведущего/u, "Панель администратора")
+    .replace(/^Код ведущего/u, "Код администратора")
+    .replace(/^Программа стенда/u, "Система")
+    .replace(/^Правила стенда/u, "Правила обработки заказов")
+    .replace(/^Стенд получил/u, "Система получила")
+    .replace(/^Стенд сохранил/u, "Система сохранила")
+    .replace(/^Стенд записал/u, "Система записала")
+    .replace(/пульт ведущего/giu, "панель администратора")
+    .replace(/код ведущего/giu, "код администратора")
+    .replace(/программа стенда/giu, "система")
+    .replace(/правила стенда/giu, "правила обработки заказов")
+    .replace(/на стенде/giu, "на странице заказа")
+    .replace(/стенд получил/giu, "система получила")
+    .replace(/стенд сохранил/giu, "система сохранила")
+    .replace(/стенд записал/giu, "система записала")
+    .replace(
+      /учебн(?:ые|ых|ыми)\s+цен(?:ы|ах|ами)\s+поставщиков/giu,
+      "цены из таблицы поставщиков",
+    )
+    .replace(/учебная таблица цен/giu, "таблица поставщиков")
+    .replace(/учебную таблицу цен/giu, "таблицу поставщиков")
+    .replace(/учебной таблице цен/giu, "таблице поставщиков")
+    .replace(
+      /учебный источник проверен перед подготовкой вариантов\.?/giu,
+      "Данные из таблицы поставщиков сверены перед подготовкой вариантов.",
+    )
+    .replace(
+      /(^|[^\p{L}])(сервисом)(?=$|[^\p{L}])/giu,
+      (_, prefix: string, word: string) =>
+        `${prefix}${replacementWithInitialCase(word, "системой")}`,
+    )
+    .replace(
+      /(^|[^\p{L}])(сервиса)(?=$|[^\p{L}])/giu,
+      (_, prefix: string, word: string) =>
+        `${prefix}${replacementWithInitialCase(word, "системы")}`,
+    )
+    .replace(
+      /(^|[^\p{L}])(сервису|сервисе)(?=$|[^\p{L}])/giu,
+      (_, prefix: string, word: string) =>
+        `${prefix}${replacementWithInitialCase(word, "системе")}`,
+    )
+    .replace(
+      /(^|[^\p{L}])(сервис)(?=$|[^\p{L}])/giu,
+      (_, prefix: string, word: string) =>
+        `${prefix}${replacementWithInitialCase(word, "система")}`,
+    )
+    .replace(/стендом/giu, (match) =>
+      replacementWithInitialCase(match, "системой"),
+    )
+    .replace(/стенда/giu, (match) =>
+      replacementWithInitialCase(match, "системы"),
+    )
+    .replace(/стенду|стенде/giu, (match) =>
+      replacementWithInitialCase(match, "системе"),
+    )
+    .replace(/стенд/giu, (match) =>
+      replacementWithInitialCase(match, "система"),
+    )
+    .replace(/в карточке (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "в описании краски в каталоге"),
+    )
+    .replace(/с карточкой (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "с описанием краски в каталоге"),
+    )
+    .replace(/из карточки (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "из описания краски в каталоге"),
+    )
+    .replace(/карточкой (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "описанием краски в каталоге"),
+    )
+    .replace(/карточке (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "описании краски в каталоге"),
+    )
+    .replace(/карточки (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "описания краски в каталоге"),
+    )
+    .replace(/карточк(?:а|у) (?:краски|товара)/giu, (match) =>
+      replacementWithInitialCase(match, "описание краски в каталоге"),
+    )
+    .replace(/карточкой заказа/giu, (match) =>
+      replacementWithInitialCase(match, "страницей заказа"),
+    )
+    .replace(/карточке заказа/giu, (match) =>
+      replacementWithInitialCase(match, "странице заказа"),
+    )
+    .replace(/карточку заказа/giu, (match) =>
+      replacementWithInitialCase(match, "страницу заказа"),
+    )
+    .replace(/карточки заказа/giu, (match) =>
+      replacementWithInitialCase(match, "страницы заказа"),
+    )
+    .replace(/карточка заказа/giu, (match) =>
+      replacementWithInitialCase(match, "страница заказа"),
+    )
+    .replace(/карточка компании/giu, (match) =>
+      replacementWithInitialCase(match, "страница компании"),
+    )
+    .replace(/карточк[аи]\s+продолж(?:ила|ится)/giu, (match) =>
+      replacementWithInitialCase(
+        match,
+        /ится$/iu.test(match) ? "заказ продолжится" : "заказ продолжил работу",
+      ),
+    )
+    .replace(/запустите карточку снова/giu, (match) =>
+      replacementWithInitialCase(match, "запустите заказ снова"),
+    )
+    .replace(/номер карточки/giu, (match) =>
+      replacementWithInitialCase(match, "номер заказа"),
+    )
+    .replace(/карточками/giu, (match) =>
+      replacementWithInitialCase(match, "страницами заказов"),
+    )
+    .replace(/карточкой/giu, (match) =>
+      replacementWithInitialCase(match, "страницей заказа"),
+    )
+    .replace(/карточках/giu, (match) =>
+      replacementWithInitialCase(match, "страницах заказов"),
+    )
+    .replace(/карточке/giu, (match) =>
+      replacementWithInitialCase(match, "странице заказа"),
+    )
+    .replace(/карточку/giu, (match) =>
+      replacementWithInitialCase(match, "страницу заказа"),
+    )
+    .replace(/карточек/giu, (match) =>
+      replacementWithInitialCase(match, "страниц заказов"),
+    )
+    .replace(/карточки/giu, (match) =>
+      replacementWithInitialCase(match, "страницы заказа"),
+    )
+    .replace(/карточка/giu, (match) =>
+      replacementWithInitialCase(match, "страница заказа"),
+    )
     .replace(
       /(\d[\d\s]*)\s*кг\s+остал(?:ось|ись)\s+после\s+резервов/giu,
       (_, quantity: string) =>
@@ -485,7 +627,7 @@ function positiveChecks(result: AgentResult) {
       result.calculation
         ? "Расход и число упаковок рассчитаны"
         : "Агент собрал вопросы для точного расчёта",
-      "Карточка продолжится под тем же номером",
+      "Заказ продолжится под тем же номером",
       ...checks,
     ].filter((item, index, rows) => rows.indexOf(item) === index);
   }
@@ -671,7 +813,7 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
     reason: calculatedQuantity
       ? `Агент рассчитает ${formatMoney(calculatedQuantity)} кг по площади и проверит этот объём по складу.`
       : draft.attachment
-      ? "Краска, объём, место работ и цвет уже указаны. Фотография останется в карточке."
+      ? "Краска, объём, место работ и цвет уже указаны. Фотография останется на странице заказа."
       : "Краска, объём, место работ и цвет уже указаны.",
   } as const;
 }
@@ -786,8 +928,6 @@ export function OrderStand() {
   const selectedMarketIdRef = useRef("");
   const lastOrderStatusRef = useRef<string | null>(null);
   const mailBodyRef = useRef<HTMLTextAreaElement>(null);
-  const isComparativeStrongModel =
-    selectedModel === "opencode/gpt-5.6-sol";
   const closeModal = useCallback(() => setModal(null), []);
   const orderActionHeaders = useCallback(
     () => ({
@@ -1189,7 +1329,7 @@ export function OrderStand() {
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
         throw new Error(
-          data.error ?? "Обновите карточку и выберите вариант снова.",
+          data.error ?? "Обновите страницу заказа и выберите вариант снова.",
         );
       }
       setSupplierRefreshNeeded(false);
@@ -1199,7 +1339,7 @@ export function OrderStand() {
       setError(
         approvalError instanceof Error
           ? approvalError.message
-          : "Обновите карточку и выберите вариант снова.",
+          : "Обновите страницу заказа и выберите вариант снова.",
       );
     } finally {
       setApproving("");
@@ -1223,7 +1363,8 @@ export function OrderStand() {
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
         throw new Error(
-          data.error ?? "Обновите карточку и подготовьте резерв товара снова.",
+          data.error ??
+            "Обновите страницу заказа и подготовьте резерв товара снова.",
         );
       }
       setSupplierRefreshNeeded(false);
@@ -1233,7 +1374,7 @@ export function OrderStand() {
       setError(
         reserveError instanceof Error
           ? reserveError.message
-          : "Обновите карточку и подготовьте резерв товара снова.",
+          : "Обновите страницу заказа и подготовьте резерв товара снова.",
       );
     } finally {
       setReserving(false);
@@ -1257,7 +1398,10 @@ export function OrderStand() {
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
         throw new Error(
-          data.error ?? "Обновите карточку и повторите отправку на стенде.",
+          humanizeText(
+            data.error ??
+              "Обновите страницу заказа и повторите запись отправки.",
+          ),
         );
       }
       setSupplierRefreshNeeded(false);
@@ -1266,8 +1410,8 @@ export function OrderStand() {
     } catch (sendError) {
       setError(
         sendError instanceof Error
-          ? sendError.message
-          : "Обновите карточку и повторите отправку на стенде.",
+          ? humanizeText(sendError.message)
+          : "Обновите страницу заказа и повторите запись отправки.",
       );
     } finally {
       setSending(false);
@@ -1290,7 +1434,7 @@ export function OrderStand() {
       const data = (await response.json()) as { error?: string };
       if (!response.ok) {
         throw new Error(
-          data.error ?? "Обновите карточку и отправьте вопросы снова.",
+          data.error ?? "Обновите страницу заказа и отправьте вопросы снова.",
         );
       }
       await loadOrder(orderId);
@@ -1299,7 +1443,7 @@ export function OrderStand() {
       setError(
         actionError instanceof Error
           ? actionError.message
-          : "Обновите карточку и отправьте вопросы снова.",
+          : "Обновите страницу заказа и отправьте вопросы снова.",
       );
     } finally {
       setClarifying(false);
@@ -1323,7 +1467,8 @@ export function OrderStand() {
       const data = (await response.json()) as { error?: string };
       if (!response.ok) {
         throw new Error(
-          data.error ?? "Проверьте ответ клиента и продолжите карточку.",
+          data.error ??
+            "Проверьте ответ клиента и продолжите заказ на той же странице.",
         );
       }
       setCustomerAnswer("");
@@ -1333,7 +1478,7 @@ export function OrderStand() {
       setError(
         actionError instanceof Error
           ? actionError.message
-          : "Проверьте ответ клиента и продолжите карточку.",
+          : "Проверьте ответ клиента и продолжите заказ на той же странице.",
       );
     } finally {
       setContinuing(false);
@@ -1349,7 +1494,7 @@ export function OrderStand() {
     const data = (await response.json()) as { error?: string };
     if (!response.ok) {
       throw new Error(
-        data.error ?? "Обновите склад и пересчитайте карточку снова.",
+        data.error ?? "Обновите склад и пересчитайте заказ снова.",
       );
     }
   };
@@ -1372,7 +1517,7 @@ export function OrderStand() {
       setError(
         actionError instanceof Error
           ? actionError.message
-          : "Обновите склад и пересчитайте карточку снова.",
+          : "Обновите склад и пересчитайте заказ снова.",
       );
     } finally {
       setRecalculating(false);
@@ -1395,7 +1540,7 @@ export function OrderStand() {
       const data = (await response.json()) as { error?: string };
       if (!response.ok) {
         throw new Error(
-          data.error ?? "Обновите карточку и повторите запуск.",
+          data.error ?? "Обновите страницу заказа и повторите запуск.",
         );
       }
       await loadOrder(orderId);
@@ -1404,7 +1549,7 @@ export function OrderStand() {
       setError(
         retryError instanceof Error
           ? retryError.message
-          : "Обновите карточку и повторите запуск.",
+          : "Обновите страницу заказа и повторите запуск.",
       );
     } finally {
       setRetrying(false);
@@ -1430,7 +1575,9 @@ export function OrderStand() {
       };
       if (!response.ok || !data.authenticated) {
         throw new Error(
-          data.error ?? "Проверьте код ведущего и повторите вход.",
+          humanizeText(
+            data.error ?? "Проверьте код администратора и повторите вход.",
+          ),
         );
       }
       setAdminAuthenticated(true);
@@ -1441,12 +1588,12 @@ export function OrderStand() {
         (offer) => offer.id === marketOfferId,
       );
       if (selectedOffer) setMarketStock(String(selectedOffer.stockKg));
-      setInventoryMessage("Пульт ведущего открыт.");
+      setInventoryMessage("Панель администратора открыта.");
     } catch (adminError) {
       setInventoryError(
         adminError instanceof Error
-          ? adminError.message
-          : "Проверьте код ведущего и повторите вход.",
+          ? humanizeText(adminError.message)
+          : "Проверьте код администратора и повторите вход.",
       );
     } finally {
       setAdminBusy(false);
@@ -1460,7 +1607,7 @@ export function OrderStand() {
     try {
       await fetch("/api/admin", { method: "DELETE" });
       setAdminAuthenticated(false);
-      setInventoryMessage("Пульт ведущего закрыт.");
+      setInventoryMessage("Панель администратора закрыта.");
       setMarketMessage("");
     } finally {
       setAdminBusy(false);
@@ -1530,7 +1677,9 @@ export function OrderStand() {
           setInventoryStock(String(data.current.stockKg));
         }
         throw new Error(
-          data.error ?? "Обновите данные склада и повторите изменение.",
+          humanizeText(
+            data.error ?? "Обновите данные склада и повторите изменение.",
+          ),
         );
       }
 
@@ -1563,8 +1712,8 @@ export function OrderStand() {
         ]);
         setInventoryMessage(
           bridgeOnline
-            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент пересчитывает ту же карточку; новое решение и письмо появятся здесь.`
-            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Новое решение и письмо сохранились в той же карточке.`,
+            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент пересчитывает заказ; новое решение и письмо появятся на его странице.`
+            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Новое решение и письмо сохранились на странице заказа.`,
         );
       } else {
         setInventoryMessage(
@@ -1644,7 +1793,9 @@ export function OrderStand() {
         !data.changed
       ) {
         throw new Error(
-          data.error ?? "Обновите данные партнёров и повторите изменение.",
+          humanizeText(
+            data.error ?? "Обновите данные партнёров и повторите изменение.",
+          ),
         );
       }
 
@@ -1691,10 +1842,10 @@ export function OrderStand() {
         ]);
         setMarketMessage(
           !orderRecalculated
-            ? `${changeText} Текущий вариант уже опирается на свежие данные; карточка сохранилась без изменений.`
+            ? `${changeText} Текущий вариант уже опирается на свежие данные; страница заказа сохранилась без изменений.`
             : bridgeOnline
-            ? `${changeText} Агент пересчитывает ту же карточку; обновлённый вариант появится в ней.`
-            : `${changeText} Обновлённый вариант и письмо сохранены в той же карточке.`,
+            ? `${changeText} Агент пересчитывает заказ; обновлённый вариант появится на его странице.`
+            : `${changeText} Обновлённый вариант и письмо сохранены на странице заказа.`,
         );
       } else {
         setMarketMessage(
@@ -1841,28 +1992,29 @@ export function OrderStand() {
           <div className="hero-intro">
             <p className="eyebrow">Живой путь одного заказа</p>
             <h1 id="main-title">
-              Клиент пишет своими словами. Агент ведёт заказ до письма клиенту
+              Клиент пишет своими словами. Агент ведёт заказ до готового ответа
             </h1>
             <p className="hero-lead">
-              На стенде форму отправляют в тот же рабочий путь, который в
-              компании запускает входящее письмо. Агент понимает задачу,
-              сверяет каталог, живой склад и предложения поставщиков, а когда
-              это помогает продаже —{" "}
+              Форма запускает тот же рабочий путь, который в компании начинает
+              входящее письмо. На странице заказа в одном месте остаются
+              письмо, фото, вопросы и ответы, расчёты, варианты и решения.
+              Агент понимает задачу, сверяет каталог, текущий остаток на складе
+              и таблицу поставщиков, а когда это влияет на подбор —{" "}
               {bridgeOnline
-                ? "изучает открытые сведения о компании"
+                ? "сам ищет открытые сведения о компании"
                 : "использует подготовленные сведения о компании"}
               , готовит следующий шаг и сохраняет всю историю в общей таблице.
             </p>
           </div>
 
           <aside className="agent-difference">
-            <span>Где начинается агентная работа</span>
+            <span>Что агент делает сам</span>
             <p>
-              Чат помогает подготовить текст. Здесь агент ждёт ответ клиента,
-              перечитывает склад, пересчитывает план и продолжает ту же
-              карточку. Заявка «Хочу покрасить этот забор» с фотографией
-              превращается в точные вопросы, подбор краски, расчёт килограммов и
-              проверку наличия.
+              Страница заказа хранит письмо, фото и весь контекст. Агент ждёт
+              ответ клиента, заново сверяет остаток, пересчитывает план и
+              продолжает работу под тем же номером. Заявка «Хочу покрасить этот
+              забор» превращается в точные вопросы, подбор краски, расчёт
+              килограммов и проверку наличия.
             </p>
           </aside>
 
@@ -1879,26 +2031,36 @@ export function OrderStand() {
               <small>
                 {bridgeOnline
                   ? "Текст и фото превращаются в факты и вопросы"
-                  : "Текст превращается в факты и вопросы, фото остаётся в карточке"}
+                  : "Текст превращается в факты и вопросы, фото остаётся на странице заказа"}
               </small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>03</span>
-              <strong>Проверенные данные</strong>
-              <small>Каталог, остаток и учебные цены поставщиков</small>
+              <strong>Сверка перед обещанием</strong>
+              <small>
+                Каталог подтверждает товар, склад — остаток, таблица
+                поставщиков даёт цену и срок для расчёта
+              </small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>04</span>
-              <strong>Сведения о клиенте</strong>
-              <small>Когда это помогает продаже: чем занимается компания</small>
+              <strong>Открытые данные о компании клиента</strong>
+              <small>
+                {bridgeOnline
+                  ? "Агент находит и показывает источники, когда данные влияют на подбор"
+                  : "Примеры показывают такой поиск, когда сведения влияют на подбор"}
+              </small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
               <span>05</span>
-              <strong>Выбор следующего действия</strong>
-              <small>Ответ, один вопрос или три варианта руководителю</small>
+              <strong>Готовый следующий шаг</strong>
+              <small>
+                Если заказ выполним, агент готовит ответ. Если нужны особые
+                условия, приносит руководителю готовые варианты
+              </small>
             </article>
             <i aria-hidden="true">→</i>
             <article>
@@ -1909,8 +2071,8 @@ export function OrderStand() {
             <i aria-hidden="true">→</i>
             <article>
               <span>07</span>
-              <strong>Общая память</strong>
-              <small>Карточка, журнал и таблица за день</small>
+              <strong>Страница заказа и журнал</strong>
+              <small>Все материалы заказа и результат дня остаются доступными</small>
             </article>
           </div>
           <ol className="system-map-mobile" aria-label="Путь заказа">
@@ -1924,22 +2086,29 @@ export function OrderStand() {
             <li>
               <span>2</span>
               <div>
-                <strong>Подбор и проверка</strong>
-                <small>Каталог, склад, поставщики и сведения о клиенте</small>
+                <strong>Подбор и сверка</strong>
+                <small>
+                  Каталог, цена, остаток и открытые данные о компании клиента
+                </small>
               </div>
             </li>
             <li>
               <span>3</span>
               <div>
                 <strong>Решение</strong>
-                <small>Ответ, точный вопрос или варианты руководителю</small>
+                <small>
+                  Если заказ выполним, агент готовит ответ. Для особых условий
+                  приносит руководителю готовые варианты
+                </small>
               </div>
             </li>
             <li>
               <span>4</span>
               <div>
-                <strong>Действие и история</strong>
-                <small>Резерв, запись отправки и общий журнал</small>
+                <strong>Страница заказа</strong>
+                <small>
+                  Письмо, фото, вопросы, расчёты, решения и общий журнал
+                </small>
               </div>
             </li>
           </ol>
@@ -1950,28 +2119,24 @@ export function OrderStand() {
               <li>
                 <strong>
                   {bridgeOnline
-                    ? isComparativeStrongModel
-                      ? "GPT-5.6 Sol обрабатывает заказ для сравнения"
-                      : "Рабочая модель ведёт каждый заказ"
+                    ? "Рабочая модель ведёт каждый заказ"
                     : "Система работает по готовым правилам"}
                 </strong>
                 <small>
                   {bridgeOnline
-                    ? isComparativeStrongModel
-                      ? "Та же модель отдельно ведёт заказ и отдельно проверяет готовое решение."
-                      : `${modelLabel(selectedModel)} читает письмо, выбирает источники и готовит ответ по заданным правилам.`
-                    : "Стенд читает заявку, проверяет текущий склад и показывает весь путь заказа."}
+                    ? `${modelLabel(selectedModel)} разбирает заявку, берёт данные из разрешённых источников и готовит ответ по заданным правилам.`
+                    : "Сайт читает заявку, проверяет текущий склад и показывает весь путь заказа."}
                 </small>
               </li>
               <li>
                 <strong>
                   {bridgeOnline
                     ? "Модель для фото описывает видимое"
-                    : "Фото сохраняется в карточке"}
+                    : "Фото сохраняется на странице заказа"}
                 </strong>
                 <small>
                   {bridgeOnline
-                    ? "Описывает видимые детали. Материал и размеры подтверждает клиент."
+                    ? "Описывает только видимое. Материал и размеры подтверждает клиент."
                     : "Система задаёт вопросы о материале, размерах и окрашиваемых сторонах по тексту заявки."}
                 </small>
               </li>
@@ -1983,8 +2148,8 @@ export function OrderStand() {
                 </strong>
                 <small>
                   {bridgeOnline
-                    ? "По умолчанию GPT-5.6 Sol проверяет факты, числа и обещания отдельным запуском."
-                    : "GPT-5.6 Sol заранее подготовила правила и критерии. Ведущий подключает модели для отдельной проверки решения."}
+                    ? "DeepSeek V4 Pro отдельным запуском проверяет факты, числа и обещания."
+                    : "GPT-5.6 Sol заранее подготовила правила и критерии. Администратор подключает рабочие модели."}
                 </small>
               </li>
               <li>
@@ -2005,7 +2170,7 @@ export function OrderStand() {
               <summary>Как работает демонстрация</summary>
               <p>
                 {bridgeOnline
-                  ? "Компьютер ведущего запускает выбранную модель. Сайт хранит карточки и журнал."
+                  ? "Компьютер администратора запускает выбранную модель. Сайт хранит страницы заказов и журнал."
                   : "Сайт обрабатывает заявки по тем же правилам и живым данным склада."}{" "}
                 В рабочей системе письмо из почтового ящика создаёт заявку, а
                 готовый ответ уходит с корпоративной почты.
@@ -2013,7 +2178,10 @@ export function OrderStand() {
             </details>
           </div>
 
-          <div className="source-dock" aria-label="Источники и правила стенда">
+          <div
+            className="source-dock"
+            aria-label="Источники и правила обработки заказов"
+          >
             <a href={sheetUrl} target="_blank" rel="noreferrer">
               <span>Общая таблица вебинара</span>
               Заказы, действия и результат дня
@@ -2066,7 +2234,7 @@ export function OrderStand() {
             <p>
               Например: «Хочу покрасить забор». Добавьте фото — агент уточнит
               материал и размеры, подберёт краску и рассчитает заказ. В рабочей
-              системе карточку создаёт письмо из ящика компании.
+              системе страницу заказа создаёт письмо из ящика компании.
             </p>
             <div className="demo-start-actions">
               <button type="button" onClick={startFenceExample}>
@@ -2192,7 +2360,7 @@ export function OrderStand() {
                   <small>
                     {bridgeOnline
                       ? "Добавьте фото забора, стены или пола. Модель для фото опишет видимые детали, агент уточнит материал, размеры, стороны покраски и желаемый цвет, подберёт краску и посчитает килограммы."
-                      : "Добавьте фото забора, стены или пола. Агент сохранит его в карточке, уточнит материал, размеры, стороны покраски и желаемый цвет, подберёт краску и посчитает килограммы."}
+                      : "Добавьте фото забора, стены или пола. Агент сохранит его на странице заказа, уточнит материал, размеры, стороны покраски и желаемый цвет, подберёт краску и посчитает килограммы."}
                   </small>
                 </div>
                 <label className="photo-upload-button">
@@ -2235,7 +2403,7 @@ export function OrderStand() {
                       <small>
                         {bridgeOnline
                           ? "Модель для фото опишет видимые детали. Материал, размеры, стороны покраски и желаемый цвет подтвердит клиент."
-                          : "Фото сохранится в карточке. Агент задаст вопросы о материале, размерах, сторонах покраски и желаемом цвете."}
+                          : "Фото сохранится на странице заказа. Агент задаст вопросы о материале, размерах, сторонах покраски и желаемом цвете."}
                       </small>
                       <button
                         className="photo-remove-button"
@@ -2256,7 +2424,7 @@ export function OrderStand() {
               )}
               {photoError && (
                 <div className="photo-status is-error" role="alert">
-                  {photoError}
+                  {humanizeText(photoError)}
                 </div>
               )}
 
@@ -2278,15 +2446,13 @@ export function OrderStand() {
                 ) : (
                   <div className="mail-model-status">
                     <span>Обработка заявки</span>
-                    <strong>Подготовленные правила и живой склад</strong>
+                    <strong>Подготовленные правила и текущий остаток</strong>
                   </div>
                 )}
                 <small>
                   {bridgeOnline
-                    ? isComparativeStrongModel
-                      ? "GPT-5.6 Sol ведёт заказ для сравнения. Затем отдельный запуск проверяет факты, числа и условия."
-                      : `${modelLabel(selectedModel)} обрабатывает ежедневный заказ. GPT-5.6 Sol отдельно проверяет факты, числа и условия.`
-                    : "Ведущий подключает ежедневную модель и отдельную проверку для демонстрации с моделями."}
+                    ? `${modelLabel(selectedModel)} обрабатывает ежедневный заказ. DeepSeek V4 Pro отдельно проверяет факты, числа и условия.`
+                    : "Администратор подключает ежедневную модель и отдельную проверку для показа работы с моделями."}
                 </small>
               </div>
 
@@ -2305,14 +2471,16 @@ export function OrderStand() {
                     : "Заявка войдёт в открытый журнал вебинара"}
                 </strong>
                 <span>
-                  Используйте учебные названия и открытые данные. Личные и
-                  коммерческие сведения оставьте за пределами стенда.
+                  Используйте вымышленные названия и открытые данные. Личные и
+                  коммерческие сведения не добавляйте.
                 </span>
               </div>
 
               <div className="mail-actions">
                 <button className="send-button" type="submit" disabled={submitting}>
-                  <span>{submitting ? "Создаём карточку…" : "Отправить агенту"}</span>
+                  <span>
+                    {submitting ? "Создаём страницу заказа…" : "Отправить агенту"}
+                  </span>
                   <span aria-hidden="true">→</span>
                 </button>
                 <small>
@@ -2338,10 +2506,10 @@ export function OrderStand() {
               <div className="empty-process">
                 <div>
                   <p className="eyebrow">После отправки</p>
-                  <h2>Здесь появится карточка заказа</h2>
+                  <h2>Здесь появится страница заказа</h2>
                   <p>
-                    Номер карточки, исходное письмо, найденные факты, решение и
-                    готовый ответ останутся в одной карточке.
+                    Письмо, фото, вопросы и ответы, расчёты, варианты и решения
+                    останутся в одном месте под одним номером.
                   </p>
                 </div>
                 <ol className="process-preview">
@@ -2352,16 +2520,19 @@ export function OrderStand() {
                   </li>
                   <li>
                     <span aria-hidden="true">•</span>
-                    <strong>Проверка фактов</strong>
-                    <small>Каталог, живой остаток и учебные цены поставщиков</small>
+                    <strong>Сверка перед обещанием</strong>
+                    <small>
+                      Каталог подтверждает товар, склад — остаток, таблица
+                      поставщиков даёт цену и срок для расчёта
+                    </small>
                   </li>
                   <li>
                     <span aria-hidden="true">•</span>
-                    <strong>Сведения о клиенте</strong>
+                    <strong>Открытые данные о компании клиента</strong>
                     <small>
                       {bridgeOnline
-                        ? "Модель ищет сведения по сайту, ИНН и названию; ссылки остаются для проверки"
-                        : "Некоторые примеры показывают подготовленные сведения и ссылки"}
+                        ? "Агент ищет открытые данные по сайту, ИНН и названию, когда они влияют на подбор; ссылки остаются для проверки"
+                        : "Некоторые примеры показывают подготовленные открытые сведения и ссылки"}
                     </small>
                   </li>
                   <li>
@@ -2375,8 +2546,11 @@ export function OrderStand() {
                   </li>
                   <li>
                     <span aria-hidden="true">•</span>
-                    <strong>Что делать дальше</strong>
-                    <small>Ответ, вопросы или варианты руководителю</small>
+                    <strong>Готовый следующий шаг</strong>
+                    <small>
+                      Если заказ выполним, агент готовит ответ. Для особых
+                      условий приносит руководителю готовые варианты
+                    </small>
                   </li>
                 </ol>
               </div>
@@ -2389,7 +2563,7 @@ export function OrderStand() {
                       type="button"
                       onClick={() => setModal("order")}
                     >
-                      Исходное письмо · заявка {orderNumber(orderId)} ↗
+                      Страница заказа · заявка {orderNumber(orderId)} ↗
                     </button>
                     <h2>{order?.subject ?? "Принимаем заказ…"}</h2>
                     <small>
@@ -2463,7 +2637,7 @@ export function OrderStand() {
                       <div className="event-index">··</div>
                       <div>
                         <h3>Агент продолжает работу</h3>
-                        <p>Новый результат появится в этой карточке.</p>
+                        <p>Новый результат появится на этой странице заказа.</p>
                       </div>
                       <span className="event-pulse" />
                     </article>
@@ -2475,7 +2649,7 @@ export function OrderStand() {
                     <div>
                       <strong>Работу можно продолжить</strong>
                       <p>
-                        Письмо, номер карточки, переписка и история сохранены.
+                        Письмо, номер заказа, переписка и история сохранены.
                       </p>
                     </div>
                     <button
@@ -2487,8 +2661,8 @@ export function OrderStand() {
                       }
                     >
                       {retrying
-                        ? "Запускаем карточку снова…"
-                        : "Повторить эту карточку"}
+                        ? "Запускаем заказ снова…"
+                        : "Повторить этот заказ"}
                     </button>
                   </div>
                 )}
@@ -2526,7 +2700,7 @@ export function OrderStand() {
 
             {error && (
               <div className="error-banner" role="alert">
-                {error}
+                {humanizeText(error)}
               </div>
             )}
           </div>
@@ -2536,9 +2710,7 @@ export function OrderStand() {
           <div className="control-intro">
             <p className="eyebrow">
               {bridgeOnline
-                ? isComparativeStrongModel
-                  ? "Сравнение моделей"
-                  : "Ежедневная модель и отдельная проверка"
+                ? "Ежедневная модель и отдельная проверка"
                 : "Автоматическая обработка по правилам"}
             </p>
             <h2>
@@ -2548,32 +2720,24 @@ export function OrderStand() {
             </h2>
             <p>
               {bridgeOnline
-                ? isComparativeStrongModel
-                  ? "GPT-5.6 Sol сначала обрабатывает заказ, затем новым запуском проверяет готовое решение. Программа подтверждает цены и остатки перед каждым действием."
-                  : `${modelLabel(selectedModel)} обрабатывает заказ по готовым правилам. GPT-5.6 Sol отдельно проверяет факты и обещания. Программа подтверждает цены и остатки перед каждым действием.`
+                ? `${modelLabel(selectedModel)} обрабатывает заказ по готовым правилам. DeepSeek V4 Pro отдельно проверяет факты и обещания. Программа подтверждает цены и остатки перед каждым действием.`
                 : "Система читает заявку, сверяет склад и собирает ответ по подготовленным правилам. При подключении моделей сохраняется тот же путь и те же проверки."}
             </p>
           </div>
           <div className="control-grid">
             <article>
-              <span>
-                {bridgeOnline && isComparativeStrongModel
-                  ? "Сравнительный запуск"
-                  : "Ежедневная работа"}
-              </span>
+              <span>Ежедневная работа</span>
               <strong>
                 {bridgeOnline
-                  ? isComparativeStrongModel
-                    ? "GPT-5.6 Sol обрабатывает заказ"
-                    : `${modelLabel(selectedModel)} обрабатывает заказ`
+                  ? `${modelLabel(selectedModel)} обрабатывает заказ`
                   : "Система обрабатывает заказ по правилам"}
               </strong>
               <p>
                 {bridgeOnline
-                  ? `Модель для фото описывает видимые детали. ${modelLabel(
+                  ? `Модель для фото описывает только видимое. ${modelLabel(
                       selectedModel,
-                    )} читает письмо, обращается к источникам и собирает ответ по шагам.`
-                  : "Стенд читает заявку, обращается к живому складу, считает заказ и показывает решение. В живом режиме те же шаги выполняют выбранные модели."}
+                    )} разбирает заявку, обращается к разрешённым источникам и собирает ответ по шагам.`
+                  : "Сайт читает заявку, обращается к живому складу, считает заказ и показывает решение. В живом режиме те же шаги выполняют выбранные модели."}
               </p>
             </article>
             <article>
@@ -2585,7 +2749,7 @@ export function OrderStand() {
               </strong>
               <p>
                 {bridgeOnline
-                  ? "GPT-5.6 Sol подготовила правила и критерии. По умолчанию она же отдельным запуском проверяет факты и обещания каждого ответа. Команда может передать журнал модели и получить предложения; руководитель выбирает правки."
+                  ? "GPT-5.6 Sol подготовила правила и критерии. DeepSeek V4 Pro отдельным запуском проверяет факты и обещания каждого ответа. Команда может передать журнал GPT-5.6 Sol для новой редакции инструкции; руководитель выбирает правки."
                   : "GPT-5.6 Sol заранее подготовила правила и критерии. Команда может передать журнал модели и получить предложения; руководитель выбирает правки."}
               </p>
               <button type="button" onClick={() => setModal("instructions")}>
@@ -2593,12 +2757,12 @@ export function OrderStand() {
               </button>
             </article>
             <article>
-              <span>Точные факты</span>
-              <strong>Программа проверяет условия</strong>
+              <span>Сверка перед обещанием</span>
+              <strong>Каталог, цена и остаток сходятся</strong>
               <p>
                 {bridgeOnline
-                  ? "Перед каждым ответом программа сверяет цену, остаток и правила. Модель выбирает: ответить, уточнить или передать решение руководителю."
-                  : "При каждом расчёте программа сверяет цену, остаток и правила. Готовые правила определяют следующий шаг: ответить, уточнить или передать решение руководителю."}
+                  ? "Перед готовым ответом программа подтверждает товар по каталогу, цену по таблице поставщиков и объём по живому складу. Модель выбирает: ответить, уточнить или передать решение руководителю."
+                  : "При каждом расчёте программа подтверждает товар по каталогу, цену по таблице поставщиков и объём по живому складу. Готовые правила определяют следующий шаг."}
               </p>
               <button
                 type="button"
@@ -2646,8 +2810,7 @@ export function OrderStand() {
         <section className="day-result" id="day-result">
           <div className="day-heading">
             <div>
-              <p className="eyebrow">Общий результат за сегодня</p>
-              <h2>Стенд запоминает работу участников</h2>
+              <h2>Общий результат за сегодня</h2>
             </div>
             <p>
               Заявки, уточнения, решения, отправки и изменения склада собираются
@@ -2656,7 +2819,7 @@ export function OrderStand() {
           </div>
           <div className="metric-grid">
             <article>
-              <span>Карточек</span>
+              <span>Заказов</span>
               <strong>{stats.total}</strong>
               <small>создано сегодня</small>
             </article>
@@ -2711,8 +2874,7 @@ export function OrderStand() {
         <strong>Колер</strong>
         <span>
           Данные о красках и запасах, сгенерированные для демонстрации на
-          вебинаре. Примеры цен других поставщиков и учебные заявки подготовлены
-          для показа.
+          вебинаре.
         </span>
         <span>Модель для заказов · живой склад · журнал всех заказов</span>
       </footer>
@@ -3059,18 +3221,18 @@ function ResultPanel({
         <div className="manager-heading">
           <span>Решение</span>
           <div>
-            <small>Решение руководителя на стенде</small>
+            <small>Решение руководителя на странице заказа</small>
             <h3>Выберите подходящий вариант для клиента и завода</h3>
           </div>
         </div>
         <p className="manager-note">
-          Сначала выберите следующий шаг. Сведения о клиенте, расчёты и
+          Сначала выберите следующий шаг. Данные о компании клиента, расчёты и
           источники остаются ниже для проверки.
         </p>
         <p className="manager-role-note">
-          На стенде участник на минуту принимает роль руководителя и выбирает
-          один вариант. В рабочей системе такое решение получает сотрудник с
-          полномочиями.
+          Во время вебинара участник на минуту принимает роль руководителя и
+          выбирает один вариант. В рабочей системе такое решение получает
+          сотрудник с полномочиями.
         </p>
         <fieldset
           className="option-grid"
@@ -3182,7 +3344,7 @@ function ResultPanel({
               Агент перечитает цену, доступный объём, срок и дату проверки.
             </strong>
             <small>
-              После пересчёта карточка покажет выполнимый вариант и сохранит
+              После пересчёта страница заказа покажет выполнимый вариант и сохранит
               прежнее решение в журнале.
             </small>
           </div>
@@ -3260,16 +3422,16 @@ function ResultPanel({
             </article>
           </div>
           <small>
-            Обе версии сохранились в карточке и журнале. Свежее письмо ждёт
-            вашего подтверждения.
+            Обе версии сохранились на странице заказа и в журнале. Свежее
+            письмо ждёт вашего подтверждения.
           </small>
         </section>
       )}
 
       {!canManageOrder && (
         <div className="read-only-note" role="note">
-          Карточка открыта для просмотра. Действия доступны участнику, который
-          создал её, и ведущему вебинара.
+          Страница заказа открыта для просмотра. Действия доступны участнику,
+          который создал её, и администратору.
         </div>
       )}
 
@@ -3383,8 +3545,8 @@ function ResultPanel({
               </div>
             ) : (
               <small>
-                Агент завершил поиск и оставил в карточке только проверяемые
-                факты.
+                Агент завершил поиск и оставил на странице заказа только
+                проверяемые факты.
               </small>
             )}
             {researchHypothesis(result) && (
@@ -3399,9 +3561,10 @@ function ResultPanel({
             )}
             {!usesOpenCode(order.mode) && (
               <small className="research-mode-note">
-                Карточка использует подготовленные источники. При подключении
-                модель для заказов может проверить сайт, ИНН или условия
-                заказа, открыть нужные страницы и сохранить факты со ссылками.
+                Страница заказа использует подготовленные источники. При
+                подключении модель для заказов может проверить сайт, ИНН или
+                условия заказа, открыть нужные страницы и сохранить факты со
+                ссылками.
               </small>
             )}
           </div>
@@ -3698,10 +3861,11 @@ function ResultPanel({
             </span>
           </div>
           <small className="supplier-source-note">
-            В учебной строке от {supplierPlan.stockCheckedAt} указано{" "}
-            {formatMoney(supplierPlan.supplierStockKg)} кг. Рабочая система
-            получит эти данные из подключённого прайса, кабинета поставщика
-            или открытой страницы.
+            В строке таблицы поставщиков от {supplierPlan.stockCheckedAt}{" "}
+            указано {formatMoney(supplierPlan.supplierStockKg)} кг. Данные
+            таблицы подготовлены для показа на вебинаре. Рабочая система
+            получит их из подключённого прайса, кабинета поставщика или
+            открытой страницы.
           </small>
         </section>
       )}
@@ -3710,7 +3874,7 @@ function ResultPanel({
         <section className="conversation-flow" aria-labelledby="conversation-title">
           <div className="conversation-heading">
             <span>Этап переписки {order.roundNo ?? 1}</span>
-            <h3 id="conversation-title">Переписка в одной карточке</h3>
+            <h3 id="conversation-title">Вся переписка на странице заказа</h3>
           </div>
           <div>
             {earlierConversation.length > 0 && (
@@ -3849,8 +4013,8 @@ function ResultPanel({
                 : "Подготовить резерв товара"}
             </button>
             <small>
-              Стенд сохранит подготовленный резерв в журнале. Рабочая система
-              передаст его в учётную систему компании.
+              Запись о подготовленном резерве появится в журнале. Рабочая
+              система передаст резерв в учётную систему компании.
             </small>
           </div>
         )}
@@ -3869,7 +4033,7 @@ function ResultPanel({
         )}
         {sent && (
           <div className="sent-note">
-            Отправка ответа записана. Карточка вошла в результат дня.
+            Отправка ответа записана. Заказ вошёл в результат дня.
           </div>
         )}
       </div>
@@ -3884,7 +4048,7 @@ function ResultPanel({
         >
           <div className="customer-reply-intro">
             <span>Ответ клиента</span>
-            <h3>Добавьте детали и продолжите ту же карточку</h3>
+            <h3>Добавьте детали и продолжите тот же заказ</h3>
             <p>
               Агент объединит письмо, фото и ответ, рассчитает расход и снова
               проверит живой склад.
@@ -3908,7 +4072,7 @@ function ResultPanel({
                 </div>
                 <small>
                   Текст появится ниже. Его можно дополнить перед продолжением
-                  карточки.
+                  заказа.
                 </small>
               </div>
             )}
@@ -3919,7 +4083,7 @@ function ResultPanel({
                 onChange={(event) =>
                   onCustomerAnswerChange(event.target.value)
                 }
-                placeholder="Ответьте на вопрос агента своими словами — карточка продолжится под тем же номером."
+                placeholder="Ответьте на вопрос агента своими словами — заказ продолжится под тем же номером."
                 rows={4}
                 required
               />
@@ -3930,7 +4094,7 @@ function ResultPanel({
             disabled={continuing || customerAnswer.trim().length < 3}
           >
             {continuing
-              ? "Агент дополняет карточку…"
+              ? "Агент дополняет заказ…"
               : "Передать ответ агенту"}
           </button>
         </form>
@@ -3977,7 +4141,7 @@ function DecisionProofs({
         ) ?? {
           fact:
             "Исходное письмо, вопросы и ответы клиента сохраняются под одним номером заявки.",
-          source: "Карточка и история переписки",
+          source: "Страница заказа и история переписки",
           checkedAt: "во время этого расчёта",
         }
       );
@@ -4068,7 +4232,7 @@ function DecisionProofs({
                     </a>
                   ) : basis && /поставщик/i.test(basis.source) ? (
                     <a href={sheetUrl} target="_blank" rel="noreferrer">
-                      Открыть учебную таблицу цен ↗
+                      Открыть таблицу поставщиков ↗
                     </a>
                   ) : (
                     humanizeText(
@@ -4160,18 +4324,18 @@ function LiveInventoryPanel({
     >
       <div className="live-inventory-intro">
         <p className="eyebrow">
-          Ведущий меняет склад и остаток партнёра
+          Администратор меняет склад и остаток партнёра
         </p>
         <h2 id="live-inventory-title">
           Новый остаток сразу меняет решение по заказу
         </h2>
         <p>
-          Новый остаток сразу появляется в открытой карточке. У ведущего
-          пересчёт запускается сам, в другой вкладке участник запускает его
-          одной кнопкой. Уменьшите остаток — агент принесёт руководителю
-          готовые варианты и проверит недостающий объём у других поставщиков.
-          Пополните склад — агент обновит решение и письмо. Обе версии
-          сохранятся рядом.
+          Новый остаток сразу появляется на открытой странице заказа. После
+          изменения в панели администратора пересчёт запускается сам; в другой
+          вкладке участник запускает его одной кнопкой. Уменьшите остаток —
+          агент найдёт недостающий объём у поставщиков и принесёт руководителю
+          готовые варианты с объёмом, ценой и сроком. Пополните склад — агент
+          обновит решение и письмо. Обе версии сохранятся рядом.
         </p>
         <button type="button" onClick={onOpenCatalog}>
           Открыть каталог и весь склад
@@ -4203,11 +4367,11 @@ function LiveInventoryPanel({
         <div className="presenter-console">
           <div className="console-head">
             <div>
-              <span>Пульт ведущего</span>
+              <span>Панель администратора</span>
               <strong>
                 {authenticated
                   ? "Можно менять остаток"
-                  : "Войдите по коду ведущего"}
+                  : "Войдите по коду администратора"}
               </strong>
             </div>
             {authenticated && (
@@ -4217,7 +4381,7 @@ function LiveInventoryPanel({
                 onClick={() => void onSignOut()}
                 disabled={busy || marketBusy}
               >
-                Закрыть пульт
+                Закрыть панель
               </button>
             )}
           </div>
@@ -4369,7 +4533,7 @@ function LiveInventoryPanel({
                         {selectedMarketOffer.stockCheckedAt ??
                           selectedMarketOffer.updatedAt ??
                           selectedMarketOffer.checkedAt ??
-                          "в учебной таблице"}
+                          "в таблице поставщиков"}
                       </small>
                     )}
                   </label>
@@ -4417,17 +4581,17 @@ function LiveInventoryPanel({
                 </form>
                 {market.length === 0 && (
                   <div className="market-loading" role="status">
-                    Загружаем учебную таблицу партнёров…
+                    Загружаем таблицу поставщиков…
                   </div>
                 )}
                 {marketMessage && (
                   <div className="inventory-message" role="status">
-                    {marketMessage}
+                    {humanizeText(marketMessage)}
                   </div>
                 )}
                 {marketError && (
                   <div className="inventory-error" role="alert">
-                    {marketError}
+                    {humanizeText(marketError)}
                   </div>
                 )}
               </section>
@@ -4435,7 +4599,7 @@ function LiveInventoryPanel({
           ) : (
             <form className="admin-login" onSubmit={onSignIn}>
               <label>
-                <span>Код ведущего</span>
+                <span>Код администратора</span>
                 <input
                   type="password"
                   autoComplete="current-password"
@@ -4445,19 +4609,21 @@ function LiveInventoryPanel({
                 />
               </label>
               <button type="submit" disabled={busy || !adminCode.trim()}>
-                {busy ? "Открываем пульт…" : "Открыть пульт"}
+                {busy
+                  ? "Открываем панель…"
+                  : "Открыть панель администратора"}
               </button>
             </form>
           )}
 
           {message && (
             <div className="inventory-message" role="status">
-              {message}
+              {humanizeText(message)}
             </div>
           )}
           {error && (
             <div className="inventory-error" role="alert">
-              {error}
+              {humanizeText(error)}
             </div>
           )}
         </div>
@@ -4527,7 +4693,7 @@ function LedgerTable({
           "model",
         ].includes(stage)
       ) {
-        return "Программа стенда";
+        return "Система";
       }
       return "Агент отдела продаж";
     };
@@ -4563,7 +4729,7 @@ function LedgerTable({
         return "Поиск сведений";
       }
       if (stage === "decision") return "Решение агента";
-      return "Шаг карточки";
+      return "Шаг заказа";
     };
     const rows = [
       ...orders.map((item) => ({
@@ -4590,7 +4756,7 @@ function LedgerTable({
                 "Поставщик перечитан",
                 "Поставщик и склад перечитаны",
               ].includes(item.reason)
-            ? "Программа стенда"
+            ? "Система"
             : "Агент отдела продаж",
         orderId: item.orderId,
         company:
@@ -4623,7 +4789,7 @@ function LedgerTable({
         createdAt: item.createdAt,
         kind: "Живой склад",
         actor:
-          item.actor === "sheets-sync" ? "Таблица склада" : "Ведущий",
+          item.actor === "sheets-sync" ? "Таблица склада" : "Администратор",
         orderId: "",
         company: "Весь склад",
         title: `${
@@ -4666,9 +4832,9 @@ function LedgerTable({
           <h3 id="ledger-title">Работа за сегодня в одной таблице</h3>
           <p>
             Обращение клиента, шаги агента, решения, черновики ответов и
-            изменения склада попадают сюда сами. У строк заказа есть номер
-            карточки — по нему открывается вся карточка. Изменения относятся
-            ко всему складу.
+            изменения склада попадают сюда сами. У каждого заказа есть номер —
+            по нему открывается вся страница заказа. Изменения относятся ко
+            всему складу.
           </p>
         </div>
         <div className="ledger-actions">
@@ -4705,9 +4871,9 @@ function LedgerTable({
           <strong>{ledgerSummary.orders}</strong>{" "}
           {countNoun(
             ledgerSummary.orders,
-            "карточка",
-            "карточки",
-            "карточек",
+            "заказ",
+            "заказа",
+            "заказов",
           )}
         </span>
         <span>
@@ -4860,7 +5026,7 @@ function Modal({
   const titles = {
     catalog: "Каталог и остатки",
     instructions: "Правила обработки заявок",
-    order: "Заявка глазами агента",
+    order: "Страница заказа глазами агента",
   };
 
   return (
@@ -4892,8 +5058,8 @@ function Modal({
         {name === "catalog" && (
           <>
             <p className="modal-lead">
-              Агент читает живые остатки перед каждым новым расчётом. Ведущий
-              может изменить их во время показа. Карточка
+              Агент читает живые остатки перед каждым новым расчётом.
+              Администратор может изменить их во время показа. Страница заказа
               сохраняет краску, остаток и время расчёта, поэтому всегда видно,
               какой остаток учёл агент и почему выбрал этот шаг.
             </p>
@@ -5031,14 +5197,16 @@ function Modal({
         {name === "instructions" && (
           <>
             <p className="modal-lead">
-              GPT-5.6 Sol подготовила правила и критерии проверки. Подключённая
-              модель обрабатывает заказ по этим правилам. Автоматический режим
-              применяет те же правила к живому складу.
+              GPT-5.6 Sol подготовила правила и критерии проверки. Она
+              участвует только в создании и улучшении инструкций. DeepSeek V4
+              Flash обрабатывает ежедневные заказы, DeepSeek V4 Pro отдельно
+              проверяет ответы. Автоматический режим применяет те же правила к
+              живому складу.
             </p>
             <ol className="plain-rules">
               <li>
                 <span>1</span>
-                <p>Предлагаем объём, который подтверждает живой склад.</p>
+                <p>Предлагаем объём, который подтверждает текущий остаток.</p>
               </li>
               <li>
                 <span>2</span>
@@ -5083,8 +5251,8 @@ function Modal({
                   <div>
                     <strong>Команда улучшает правила по журналу</strong>
                     <small>
-                      GPT-5.6 Sol предлагает правки, руководитель принимает
-                      новую редакцию
+                      GPT-5.6 Sol готовит новую редакцию инструкции,
+                      руководитель утверждает изменения
                     </small>
                   </div>
                 </a>
@@ -5149,7 +5317,7 @@ function Modal({
                   <span>
                     {usesOpenCode(order.mode)
                       ? "Модель для фото описала видимые детали. Агент использует это наблюдение и просит подтвердить материал и размеры."
-                      : "Фото сохранено в карточке. Агент просит подтвердить материал и размеры."}
+                      : "Фото сохранено на странице заказа. Агент просит подтвердить материал и размеры."}
                   </span>
                 </figcaption>
               </figure>
