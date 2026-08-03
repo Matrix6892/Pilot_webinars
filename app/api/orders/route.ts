@@ -1,4 +1,13 @@
-import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 import { ensureDb, getDb, insertOrderEventWhen } from "@/db";
 import {
   orderEvents,
@@ -14,6 +23,11 @@ import {
   type AgentResult,
   type SupplierPlan,
 } from "@/lib/demo-engine";
+import {
+  decodeStoredAgentResult,
+  isCompleteAgentResult,
+  managerFallbackAgentResult,
+} from "@/lib/agent-guard.mjs";
 import { getDemoDataWithInventory } from "@/lib/inventory";
 import { productInventoryChanged } from "@/lib/inventory-freshness.mjs";
 import {
@@ -22,16 +36,37 @@ import {
   orderActionKeyHash,
 } from "@/lib/order-access";
 import { checkRequestLimits } from "@/lib/request-limit";
-import {
-  appendResultHistory,
-  insertResultHistoryWhen,
-} from "@/lib/result-history";
+import { insertResultHistoryWhen } from "@/lib/result-history";
 import {
   confirmSupplierPlan,
   supplierPlanChangeDetail,
 } from "@/lib/supplier-plan.mjs";
+import { resolveVisionImageUrl } from "@/lib/upload-guard.mjs";
 
 export const dynamic = "force-dynamic";
+
+const noStoreHeaders = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+};
+const orderCapabilityCookiePrefix = "koler_order_capability_";
+const orderCapabilityMaxAgeSeconds = 24 * 60 * 60;
+const clientOrderIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const clientActionKeyPattern = /^[0-9a-f]{64}$/iu;
+const responseJson = globalThis.Response.json.bind(globalThis.Response);
+export function noStoreResponseInit(init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+  for (const [name, value] of Object.entries(noStoreHeaders)) {
+    headers.set(name, value);
+  }
+  return { ...init, headers };
+}
+const Response = {
+  json(body: unknown, init: ResponseInit = {}) {
+    return responseJson(body, noStoreResponseInit(init));
+  },
+};
 
 type ConversationMessage = {
   role: "agent" | "customer";
@@ -49,6 +84,83 @@ function clean(value: unknown, max: number) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
+function orderCapabilityCookieName(orderId: string) {
+  return `${orderCapabilityCookiePrefix}${orderId}`;
+}
+
+function orderCapabilityCookie(orderId: string, actionKey: string) {
+  return [
+    `${orderCapabilityCookieName(orderId)}=${actionKey}`,
+    "Path=/api/orders",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+    `Max-Age=${orderCapabilityMaxAgeSeconds}`,
+  ].join("; ");
+}
+
+function createdOrderResponse({
+  id,
+  actionKey,
+  mode,
+  bridgeOnline,
+  recorded,
+  status = 201,
+  idempotent = false,
+}: {
+  id: string;
+  actionKey: string;
+  mode: string;
+  bridgeOnline: boolean;
+  recorded: boolean;
+  status?: number;
+  idempotent?: boolean;
+}) {
+  const response = Response.json(
+    { id, actionKey, mode, bridgeOnline, recorded, idempotent },
+    { status },
+  );
+  response.headers.append("Set-Cookie", orderCapabilityCookie(id, actionKey));
+  return response;
+}
+
+function cookieValue(request: Request, name: string) {
+  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
+  }
+  return "";
+}
+
+function eventMetadata(order: {
+  roundNo: number;
+  claimId?: string | null;
+  attemptNo?: number | null;
+}) {
+  return {
+    roundNo: order.roundNo,
+    claimId: order.claimId ?? null,
+    attemptNo: order.attemptNo ?? null,
+  };
+}
+
+export async function canReadOrder(
+  request: Request,
+  expectedHash: string | null,
+  orderId: string,
+) {
+  if (await canChangeOrder(request, expectedHash)) return true;
+  const capability = cookieValue(
+    request,
+    orderCapabilityCookieName(orderId),
+  );
+  if (!/^[0-9a-f]{64}$/i.test(capability)) return false;
+  const headers = new Headers(request.headers);
+  headers.set("x-order-key", capability);
+  return canChangeOrder(new Request(request.url, { headers }), expectedHash);
+}
+
 function storedJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
   try {
@@ -58,17 +170,135 @@ function storedJson<T>(value: string | null, fallback: T): T {
   }
 }
 
-function safeAttachment(value: unknown): Attachment | null {
+export function storedAgentResult(value: string | null) {
+  if (!value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return managerFallbackAgentResult(
+      {
+        subject: "Сохранённый заказ",
+        body: "Сохранённый результат повреждён.",
+        roundNo: 1,
+      },
+      { reason: "Сохранённый результат повреждён и передан на ручную проверку." },
+    ) as AgentResult;
+  }
+  const decoded = decodeStoredAgentResult(parsed);
+  return decoded && isCompleteAgentResult(decoded)
+    ? (decoded as AgentResult)
+    : (managerFallbackAgentResult(
+        {
+          subject: "Сохранённый заказ",
+          body: "Сохранённый результат не прошёл проверку.",
+          roundNo: 1,
+        },
+        { reason: "Сохранённый результат передан на ручную проверку." },
+      ) as AgentResult);
+}
+
+export function safeAttachment(value: unknown): Attachment | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
   const src = clean(item.src, 240);
-  if (!src.startsWith("/")) return null;
+  if (!resolveVisionImageUrl(src, "https://koler.invalid")) return null;
   const name = clean(item.name, 160);
   const alt = clean(item.alt, 240);
   return name && alt ? { name, src, alt } : null;
 }
 
-const allowedModels = new Set(modelCatalog.options.map((model) => model.id));
+const allowedModels = new Set(
+  modelCatalog.options
+    .filter((model) => model.roles.includes("primary"))
+    .map((model) => model.id),
+);
+const recordedDemoKinds = new Set(["fence-photo"]);
+
+export function clientCreateIdentity(payload: Record<string, unknown>) {
+  const rawId = payload.clientOrderId;
+  const rawKey = payload.clientActionKey;
+  if (
+    (rawId !== undefined && typeof rawId !== "string") ||
+    (rawKey !== undefined && typeof rawKey !== "string")
+  ) {
+    return { error: "client_identity_invalid" as const };
+  }
+  const clientOrderId = typeof rawId === "string" ? rawId.trim() : "";
+  const clientActionKey = typeof rawKey === "string" ? rawKey.trim() : "";
+  if (clientOrderId && !clientOrderIdPattern.test(clientOrderId)) {
+    return { error: "client_order_id_invalid" as const };
+  }
+  if (clientActionKey && !clientActionKeyPattern.test(clientActionKey)) {
+    return { error: "client_action_key_invalid" as const };
+  }
+  return {
+    clientOrderId: clientOrderId || null,
+    clientActionKey: clientActionKey || null,
+  } as const;
+}
+
+export function createRequestFingerprint(payload: Record<string, unknown>) {
+  const executionMode = clean(payload.executionMode, 20);
+  const demoKind = clean(payload.demoKind, 40);
+  const recorded = executionMode === "recorded" && recordedDemoKinds.has(demoKind);
+  const attachment = safeAttachment(payload.attachment);
+  return {
+    subject: clean(payload.subject, 180),
+    body: clean(payload.body, 4_000),
+    company: clean(payload.company, 140),
+    website: clean(payload.website, 240),
+    requestedModel: requestedModel(payload.model),
+    mode: recorded ? "recorded-demo" : "opencode-live",
+    attachmentJson: attachment ? JSON.stringify(attachment) : null,
+  };
+}
+
+export function matchesCreateRequest(
+  order: {
+    subject: string;
+    body: string;
+    company: string;
+    website: string;
+    requestedModel: string | null;
+    mode: string;
+    attachmentJson: string | null;
+  },
+  fingerprint: ReturnType<typeof createRequestFingerprint>,
+) {
+  return (
+    order.subject === fingerprint.subject &&
+    order.body === fingerprint.body &&
+    order.company === fingerprint.company &&
+    order.website === fingerprint.website &&
+    order.requestedModel === fingerprint.requestedModel &&
+    order.mode === fingerprint.mode &&
+    order.attachmentJson === fingerprint.attachmentJson
+  );
+}
+
+export function resolveCreateReplay(
+  existing: {
+    id: string;
+    actionTokenHash: string | null;
+    mode: string;
+  } & Parameters<typeof matchesCreateRequest>[0] | null,
+  actionTokenHash: string,
+  fingerprint: ReturnType<typeof createRequestFingerprint>,
+) {
+  if (!existing) return { kind: "create" as const };
+  if (
+    existing.actionTokenHash !== actionTokenHash ||
+    !matchesCreateRequest(existing, fingerprint)
+  ) {
+    return { kind: "conflict" as const };
+  }
+  return {
+    kind: "replay" as const,
+    id: existing.id,
+    mode: existing.mode,
+  };
+}
 
 function modelLabel(id: string) {
   return modelCatalog.options.find((model) => model.id === id)?.label ?? id;
@@ -105,6 +335,30 @@ function statusForResult(result: AgentResult) {
   if (route === "manager") return "awaiting_approval";
   if (route === "needs_info") return "clarification_ready";
   return "ready_to_send";
+}
+
+export function supplierPlanAfterApproval(
+  supplierPlan: SupplierPlan | null | undefined,
+  optionId: string,
+  confirmedSupplierPlan: SupplierPlan | null,
+  confirmedAt: string,
+  approvedAlternative = false,
+) {
+  if (optionId === "confirm-supplier-plan") {
+    return confirmedSupplierPlan
+      ? { ...confirmedSupplierPlan, confirmedAt }
+      : undefined;
+  }
+  if (approvedAlternative || !supplierPlan) return undefined;
+  return { ...supplierPlan };
+}
+
+export function approvalStatus(
+  needsCustomerReply: boolean,
+  commitment: AgentResult["commitment"],
+) {
+  if (needsCustomerReply) return "clarification_ready" as const;
+  return commitment === "none" ? ("error" as const) : ("ready_to_send" as const);
 }
 
 function routeLabel(result: AgentResult) {
@@ -207,6 +461,7 @@ export function approvedProductForOption(
 export function optionNeedsCustomerReply(
   option: AgentResult["options"][number],
 ) {
+  if (option.followUpActor) return option.followUpActor === "customer";
   return (
     ["clarify", "график-клиента"].includes(option.id) ||
     /(?:\?|назовите|укажите|ответьте|напишите|уточните|направьте|сообщите|пришлите|подтвердите|что для вас|к какой дате)/iu.test(
@@ -326,7 +581,7 @@ async function savedResultUsesOldInventory(order: {
   inventorySnapshotJson: string | null;
   resultJson: string | null;
 }) {
-  const result = storedJson<AgentResult | null>(order.resultJson, null);
+  const result = storedAgentResult(order.resultJson);
   if (!result?.product?.sku) return false;
 
   const snapshot = storedJson<Record<string, unknown> | null>(
@@ -335,6 +590,20 @@ async function savedResultUsesOldInventory(order: {
   );
   const liveData = await getDemoDataWithInventory();
   return productInventoryChanged(snapshot, result, liveData.products);
+}
+
+export function confirmedSupplierPlanForSnapshot(
+  order: { inventorySnapshotJson: string | null },
+  plan: SupplierPlan,
+  market: unknown[],
+) {
+  const snapshot = storedJson<{ market?: unknown[] } | null>(
+    order.inventorySnapshotJson,
+    null,
+  );
+  if (!Array.isArray(snapshot?.market)) return null;
+  const snapshotPlan = confirmSupplierPlan(plan, snapshot.market);
+  return snapshotPlan ? confirmSupplierPlan(snapshotPlan, market) : null;
 }
 
 function inputWithConversation(
@@ -360,7 +629,15 @@ function inputWithConversation(
   };
 }
 
-function stagedEvents(orderId: string, result: AgentResult) {
+function stagedEvents(
+  orderId: string,
+  result: AgentResult,
+  metadata: {
+    roundNo?: number | null;
+    claimId?: string | null;
+    attemptNo?: number | null;
+  } = { roundNo: 1, claimId: null, attemptNo: 0 },
+) {
   const route = routeOf(result);
   const supplierPlan = result.supplierPlan ?? null;
   const rows = [
@@ -455,26 +732,7 @@ function stagedEvents(orderId: string, result: AgentResult) {
     detail: result.zoneReason,
   });
 
-  return rows;
-}
-
-async function processAutonomously(
-  order: {
-    subject: string;
-    body: string;
-    company: string;
-    website: string;
-    attachmentJson: string | null;
-  },
-  conversation: ConversationMessage[],
-) {
-  const liveData = await getDemoDataWithInventory();
-  const inventorySnapshot = snapshotFromDemoData(liveData);
-  const result = buildDemoResult(
-    inputWithConversation(order, conversation),
-    liveData,
-  );
-  return { liveData, inventorySnapshot, result };
+  return rows.map((event) => ({ ...event, ...metadata }));
 }
 
 export async function GET(request: Request) {
@@ -483,9 +741,13 @@ export async function GET(request: Request) {
   if (url.searchParams.get("system") === "1") {
     return Response.json({
       bridgeOnline: await bridgeOnline(),
-      provider: "OpenCode Go",
-      agent: "OpenCode",
-      models: modelCatalog.options,
+      provider: "DeepSeek API",
+      agent: "Колер",
+      runner: "OpenCode",
+      reviewerProvider: "OpenCode Go",
+      models: modelCatalog.options.filter((model) =>
+        model.roles.includes("primary"),
+      ),
     });
   }
 
@@ -523,88 +785,41 @@ export async function GET(request: Request) {
 
   const id = clean(url.searchParams.get("id"), 80);
   if (!id) {
-    return Response.json({ error: "Укажите номер заказа." }, { status: 400 });
+    return Response.json(
+      { error: "Укажите номер заказа." },
+      { status: 400, headers: noStoreHeaders },
+    );
   }
 
   const db = getDb();
-  let [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
-  if (!order) {
+  const [capability] = await db
+    .select({ actionTokenHash: orders.actionTokenHash })
+    .from(orders)
+    .where(eq(orders.id, id))
+    .limit(1);
+  if (!capability) {
     return Response.json(
       { error: "Заказ не найден. Создайте новый заказ." },
-      { status: 404 },
+      { status: 404, headers: noStoreHeaders },
+    );
+  }
+  if (!(await canReadOrder(request, capability.actionTokenHash, id))) {
+    return Response.json(
+      { error: "Откройте заказ из того же окна или войдите в панель администратора." },
+      { status: 403, headers: noStoreHeaders },
     );
   }
 
-  if (
-    ["queued", "processing"].includes(order.status) &&
-    !(await bridgeOnline())
-  ) {
-    const conversation = storedJson<ConversationMessage[]>(
-      order.conversationJson,
-      [],
+  const [order] = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.id, id))
+    .limit(1);
+  if (!order) {
+    return Response.json(
+      { error: "Заказ не найден. Создайте новый заказ." },
+      { status: 404, headers: noStoreHeaders },
     );
-    const { result, inventorySnapshot } = await processAutonomously(
-      order,
-      conversation,
-    );
-    const recoveredStatus = statusForResult(result);
-    const [recovered] = await db
-      .update(orders)
-      .set({
-        status: recoveredStatus,
-        zone: result.zone,
-        mode: "autonomous-demo",
-        resultJson: JSON.stringify(result),
-        inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-        agentModel: "Расчёт по готовой инструкции",
-        reviewerModel: "Проверка программы",
-        updatedAt: sql`CURRENT_TIMESTAMP`,
-      })
-      .where(
-        and(
-          eq(orders.id, id),
-          inArray(orders.status, ["queued", "processing"]),
-          lt(orders.updatedAt, sql`datetime('now', '-1 minute')`),
-        ),
-      )
-      .returning();
-
-    if (recovered) {
-      await appendResultHistory({
-        orderId: id,
-        roundNo: recovered.roundNo,
-        result,
-        status: recoveredStatus,
-        reason: "Работа с заказом продолжилась",
-        sourceKey: `continuation:${recovered.roundNo}:${inventorySnapshot.version}`,
-        inventorySnapshot,
-        agentModel: "Расчёт по готовой инструкции",
-        reviewerModel: "Проверка программы",
-      });
-      await db
-        .update(orderEvents)
-        .set({ state: "done" })
-        .where(
-          and(
-            eq(orderEvents.orderId, id),
-            eq(orderEvents.state, "active"),
-          ),
-        );
-      await db.insert(orderEvents).values({
-        orderId: id,
-        stage: "fallback",
-        title: "Работа с заказом продолжилась",
-        detail:
-          "Агент продолжил работу с тем же заказом по свежим данным.",
-      });
-      const continuation = stagedEvents(id, result).filter(
-        (event) =>
-          event.stage !== "received" &&
-          (order.status !== "processing" || event.stage !== "understanding"),
-      );
-      if (continuation.length) await db.insert(orderEvents).values(continuation);
-      order = recovered;
-    }
   }
 
   const events = await db
@@ -618,37 +833,60 @@ export async function GET(request: Request) {
     .where(eq(orderResultHistory.orderId, id))
     .orderBy(asc(orderResultHistory.id));
 
-  return Response.json({
-    order: {
-      ...order,
-      result: storedJson<AgentResult | null>(order.resultJson, null),
-      attachment: storedJson<Attachment | null>(order.attachmentJson, null),
-      conversation: storedJson<ConversationMessage[]>(
-        order.conversationJson,
-        [],
-      ),
-      inventorySnapshot: storedJson<Record<string, unknown> | null>(
-        order.inventorySnapshotJson,
-        null,
-      ),
-      actionTokenHash: undefined,
-      resultJson: undefined,
-      attachmentJson: undefined,
-      conversationJson: undefined,
-      inventorySnapshotJson: undefined,
+  return Response.json(
+    {
+      bridgeOnline: await bridgeOnline(),
+      order: {
+        ...order,
+        result: storedAgentResult(order.resultJson),
+        attachment: storedJson<Attachment | null>(order.attachmentJson, null),
+        conversation: storedJson<ConversationMessage[]>(
+          order.conversationJson,
+          [],
+        ),
+        inventorySnapshot: storedJson<Record<string, unknown> | null>(
+          order.inventorySnapshotJson,
+          null,
+        ),
+        actionTokenHash: undefined,
+        resultJson: undefined,
+        attachmentJson: undefined,
+        conversationJson: undefined,
+        inventorySnapshotJson: undefined,
+        claimId: undefined,
+        claimedBy: undefined,
+      },
+      events,
+      resultHistory: resultHistory.map((item) => {
+        const result = storedAgentResult(item.resultJson);
+        return {
+          id: item.id,
+          orderId: item.orderId,
+          roundNo: item.roundNo,
+          zone: item.zone,
+          route: item.route,
+          status: item.status,
+          reason: item.reason,
+          replySubject: result?.reply.subject ?? "",
+          replyBody: result?.reply.body ?? "",
+          zoneReason: result?.zoneReason ?? "",
+          optionsJson: JSON.stringify(result?.options ?? []),
+          result,
+          inventorySnapshot: storedJson<Record<string, unknown> | null>(
+            item.inventorySnapshotJson,
+            null,
+          ),
+          agentModel: item.agentModel,
+          reviewerModel: item.reviewerModel,
+          sourceKey: item.sourceKey,
+          createdAt: item.createdAt,
+          resultJson: undefined,
+          inventorySnapshotJson: undefined,
+        };
+      }),
     },
-    events,
-    resultHistory: resultHistory.map((item) => ({
-      ...item,
-      result: storedJson<AgentResult | null>(item.resultJson, null),
-      inventorySnapshot: storedJson<Record<string, unknown> | null>(
-        item.inventorySnapshotJson,
-        null,
-      ),
-      resultJson: undefined,
-      inventorySnapshotJson: undefined,
-    })),
-  });
+    { headers: noStoreHeaders },
+  );
 }
 
 export async function POST(request: Request) {
@@ -706,6 +944,10 @@ export async function POST(request: Request) {
   const selectedModel = requestedModel(payload.model);
   const attachment = safeAttachment(payload.attachment);
   const action = clean(payload.action, 40);
+  const demoKind = clean(payload.demoKind, 40);
+  const recordedMode =
+    clean(payload.executionMode, 20) === "recorded" &&
+    recordedDemoKinds.has(demoKind);
 
   if (action === "retry") {
     const retryId = clean(payload.id, 80);
@@ -717,6 +959,26 @@ export async function POST(request: Request) {
     }
 
     const db = getDb();
+    const [failedCapability] = await db
+      .select({ actionTokenHash: orders.actionTokenHash })
+      .from(orders)
+      .where(eq(orders.id, retryId))
+      .limit(1);
+    if (!failedCapability) {
+      return Response.json(
+        { error: "Заказ не найден. Создайте новый заказ." },
+        { status: 404, headers: noStoreHeaders },
+      );
+    }
+    if (!(await canChangeOrder(request, failedCapability.actionTokenHash))) {
+      return Response.json(
+        {
+          error:
+            "Откройте заказ из того же окна, где вы его создали, или войдите в панель администратора.",
+        },
+        { status: 403, headers: noStoreHeaders },
+      );
+    }
     const [failedOrder] = await db
       .select()
       .from(orders)
@@ -725,22 +987,30 @@ export async function POST(request: Request) {
     if (!failedOrder) {
       return Response.json(
         { error: "Заказ не найден. Создайте новый заказ." },
-        { status: 404 },
+        { status: 404, headers: noStoreHeaders },
       );
     }
-    if (!(await canChangeOrder(request, failedOrder.actionTokenHash))) {
-      return Response.json(
-        {
-          error:
-            "Откройте заказ из того же окна, где вы его создали, или войдите в панель администратора.",
-        },
-        { status: 403 },
-      );
+    if (failedOrder.status === "queued") {
+      return Response.json({
+        ok: true,
+        id: failedOrder.id,
+        status: "queued",
+        roundNo: failedOrder.roundNo,
+      });
     }
 
     const transitionGuard = and(
       eq(orders.id, retryId),
-      eq(orders.status, "error"),
+      or(
+        eq(orders.status, "error"),
+        and(
+          eq(orders.status, "processing"),
+          or(
+            isNull(orders.leaseUntil),
+            lte(orders.leaseUntil, sql`CURRENT_TIMESTAMP`),
+          ),
+        ),
+      ),
       sql`coalesce(${orders.resultJson}, '') = ${
         failedOrder.resultJson ?? ""
       }`,
@@ -750,6 +1020,16 @@ export async function POST(request: Request) {
       sql`${orders.roundNo} = ${failedOrder.roundNo}`,
       sql`${orders.sentAt} is null`,
     )!;
+    const closeActiveEventsQuery = db
+      .update(orderEvents)
+      .set({ state: "error" })
+      .where(
+        and(
+          eq(orderEvents.orderId, retryId),
+          eq(orderEvents.state, "active"),
+          sql`exists (select 1 from ${orders} where ${transitionGuard})`,
+        ),
+      );
     const retryEventQuery = insertOrderEventWhen(
       db,
       {
@@ -758,6 +1038,7 @@ export async function POST(request: Request) {
         title: "Заказ снова поставлен в очередь",
         detail:
           "Номер заказа, переписка, прежние решения и остаток на момент расчёта сохранены.",
+        ...eventMetadata(failedOrder),
       },
       transitionGuard,
     );
@@ -765,6 +1046,9 @@ export async function POST(request: Request) {
       .update(orders)
       .set({
         status: "queued",
+        claimId: null,
+        claimedBy: null,
+        leaseUntil: null,
         updatedAt: sql`CURRENT_TIMESTAMP`,
       })
       .where(transitionGuard)
@@ -773,7 +1057,8 @@ export async function POST(request: Request) {
         status: orders.status,
         roundNo: orders.roundNo,
       });
-    const [, retriedOrders] = await db.batch([
+    const [, , retriedOrders] = await db.batch([
+      closeActiveEventsQuery,
       retryEventQuery,
       retryOrderQuery,
     ]);
@@ -796,19 +1081,71 @@ export async function POST(request: Request) {
     });
   }
 
-  if (subject.length < 5 || body.length < 20) {
+  if (!subject || body.length < 3) {
     return Response.json(
       { error: "Добавьте тему и опишите задачу клиента." },
       { status: 400 },
     );
   }
 
-  const id = `ord_${crypto.randomUUID().replaceAll("-", "")}`;
-  const actionKey = createOrderActionKey();
-  const isLive = await bridgeOnline();
-  const mode = isLive ? "opencode-live" : "autonomous-demo";
+  const clientIdentity = clientCreateIdentity(payload);
+  if ("error" in clientIdentity) {
+    return Response.json(
+      { error: "Параметры повторной отправки имеют неверный формат." },
+      { status: 400 },
+    );
+  }
+  const fingerprint = {
+    subject,
+    body,
+    company,
+    website,
+    requestedModel: selectedModel,
+    mode: recordedMode ? "recorded-demo" : "opencode-live",
+    attachmentJson: attachment ? JSON.stringify(attachment) : null,
+  };
+  const id =
+    clientIdentity.clientOrderId ??
+    `ord_${crypto.randomUUID().replaceAll("-", "")}`;
+  const actionKey = clientIdentity.clientActionKey ?? createOrderActionKey();
+  const mode = fingerprint.mode;
   const db = getDb();
-  if (isLive) {
+  const actionTokenHash = await orderActionKeyHash(actionKey);
+  const [existingOrder] = clientIdentity.clientOrderId
+    ? await db
+        .select()
+        .from(orders)
+        .where(eq(orders.id, id))
+        .limit(1)
+    : [];
+  if (existingOrder) {
+    const replay = resolveCreateReplay(
+      existingOrder,
+      actionTokenHash,
+      fingerprint,
+    );
+    if (replay.kind === "conflict") {
+      return Response.json(
+        {
+          error:
+            "Этот clientOrderId уже связан с другой заявкой или capability.",
+          code: "idempotency_conflict",
+        },
+        { status: 409 },
+      );
+    }
+    return createdOrderResponse({
+      id: existingOrder.id,
+      actionKey,
+      mode: existingOrder.mode,
+      bridgeOnline: await bridgeOnline(),
+      recorded: existingOrder.mode === "recorded-demo",
+      status: 200,
+      idempotent: true,
+    });
+  }
+  const isLive = await bridgeOnline();
+  if (!recordedMode) {
     const [queue] = await db
       .select({ total: sql<number>`count(*)` })
       .from(orders)
@@ -825,67 +1162,137 @@ export async function POST(request: Request) {
   }
   const liveData = await getDemoDataWithInventory();
   const inventorySnapshot = snapshotFromDemoData(liveData);
-
-  await db.insert(orders).values({
+  const commonOrder = {
     id,
     subject,
     body,
     company,
     website,
-    status: isLive ? "queued" : "processing",
     mode,
     requestedModel: selectedModel,
-    actionTokenHash: await orderActionKeyHash(actionKey),
+    actionTokenHash,
     attachmentJson: attachment ? JSON.stringify(attachment) : null,
     conversationJson: "[]",
     inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-  });
+  };
 
-  if (isLive) {
-    await db.insert(orderEvents).values({
-      orderId: id,
-      stage: "received",
-      title: "Заказ принят",
-      detail: `Заказ передан выбранной модели: ${modelLabel(selectedModel)}.`,
-    });
-  } else {
+  try {
+    if (!recordedMode) {
+    await db.batch([
+      db.insert(orders).values({
+        ...commonOrder,
+        status: "queued",
+      }),
+      db.insert(orderEvents).values({
+        orderId: id,
+        stage: "received",
+        title: "Заказ принят",
+        detail: isLive
+          ? `Заказ передан выбранной модели: ${modelLabel(selectedModel)}.`
+          : `Заказ сохранён для ${modelLabel(selectedModel)}. Агент продолжит после восстановления соединения.`,
+        roundNo: 1,
+        claimId: null,
+        attemptNo: 0,
+      }),
+    ]);
+    } else {
     const result = buildDemoResult(
       { subject, body, company, website, attachment },
       liveData,
     );
+    if (!isCompleteAgentResult(result)) {
+      return Response.json(
+        {
+          error:
+            "Записанный сценарий не прошёл проверку контракта. Запустите живого агента.",
+        },
+        { status: 500 },
+      );
+    }
     const status = statusForResult(result);
-    await db
-      .update(orders)
-      .set({
+    const initialGuard = eq(orders.id, id);
+    const historyQuery = insertResultHistoryWhen(
+      db,
+      {
+        orderId: id,
+        roundNo: 1,
+        result,
+        status,
+        reason: "Первое решение",
+        sourceKey: "initial:1",
+        inventorySnapshot,
+        agentModel: "Записанный демонстрационный прогон",
+        reviewerModel: "Проверка программы",
+      },
+      initialGuard,
+    );
+    await db.batch([
+      db.insert(orders).values({
+        ...commonOrder,
         status,
         zone: result.zone,
         resultJson: JSON.stringify(result),
-        agentModel: "Расчёт по готовой инструкции",
+        agentModel: "Записанный демонстрационный прогон",
         reviewerModel: "Проверка программы",
-        updatedAt: sql`CURRENT_TIMESTAMP`,
-      })
-      .where(eq(orders.id, id));
-    await appendResultHistory({
-      orderId: id,
-      roundNo: 1,
-      result,
-      status,
-      reason: "Первое решение",
-      sourceKey: "initial:1",
-      inventorySnapshot,
-      agentModel: "Расчёт по готовой инструкции",
-      reviewerModel: "Проверка программы",
-    });
-    await db.insert(orderEvents).values(stagedEvents(id, result));
+      }),
+      historyQuery,
+      db.insert(orderEvents).values(stagedEvents(id, result)),
+    ]);
+    }
+  } catch (error) {
+    if (clientIdentity.clientOrderId) {
+      const [racedOrder] = await db
+        .select()
+        .from(orders)
+        .where(eq(orders.id, id))
+        .limit(1);
+      if (racedOrder) {
+        const replay = resolveCreateReplay(
+          racedOrder,
+          actionTokenHash,
+          fingerprint,
+        );
+        if (replay.kind === "replay") {
+          return createdOrderResponse({
+            id: replay.id,
+            actionKey,
+            mode: replay.mode,
+            bridgeOnline: await bridgeOnline(),
+            recorded: racedOrder.mode === "recorded-demo",
+            status: 200,
+            idempotent: true,
+          });
+        }
+        return Response.json(
+          {
+            error:
+              "Этот clientOrderId уже связан с другой заявкой или capability.",
+            code: "idempotency_conflict",
+          },
+          { status: 409 },
+        );
+      }
+    }
+    throw error;
   }
 
-  return Response.json(
-    { id, actionKey, mode, bridgeOnline: isLive },
-    { status: 201 },
-  );
+  return createdOrderResponse({
+    id,
+    actionKey,
+    mode,
+    bridgeOnline: isLive,
+    recorded: recordedMode,
+  });
 }
 
 export async function PATCH(request: Request) {
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 16_384) {
+    return Response.json(
+      { error: "Сократите данные действия и повторите его." },
+      { status: 413 },
+    );
+  }
   const limit = await checkRequestLimits(request, [
     {
       name: "order-actions-minute",
@@ -934,20 +1341,35 @@ export async function PATCH(request: Request) {
   }
 
   const db = getDb();
-  const [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
-  if (!order) {
+  const [capability] = await db
+    .select({ actionTokenHash: orders.actionTokenHash })
+    .from(orders)
+    .where(eq(orders.id, id))
+    .limit(1);
+  if (!capability) {
     return Response.json(
       { error: "Заказ не найден. Создайте новый заказ." },
-      { status: 404 },
+      { status: 404, headers: noStoreHeaders },
     );
   }
-  if (!(await canChangeOrder(request, order.actionTokenHash))) {
+  if (!(await canChangeOrder(request, capability.actionTokenHash))) {
     return Response.json(
       {
         error:
           "Откройте заказ из того же окна, где вы его создали, или войдите в панель администратора.",
       },
-      { status: 403 },
+      { status: 403, headers: noStoreHeaders },
+    );
+  }
+  const [order] = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.id, id))
+    .limit(1);
+  if (!order) {
+    return Response.json(
+      { error: "Заказ не найден. Создайте новый заказ." },
+      { status: 404, headers: noStoreHeaders },
     );
   }
 
@@ -960,6 +1382,9 @@ export async function PATCH(request: Request) {
       eq(orders.id, id),
       eq(orders.status, order.status),
       sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
+      sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
+        order.inventorySnapshotJson ?? ""
+      }`,
       sql`coalesce(${orders.sentAt}, '') = ${order.sentAt ?? ""}`,
     )!;
     await insertOrderEventWhen(
@@ -972,6 +1397,7 @@ export async function PATCH(request: Request) {
           plan,
           market,
         )} Агент подготовит новый выполнимый вариант.`,
+        ...eventMetadata(order),
       },
       guard,
     );
@@ -984,7 +1410,7 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
-    const result = storedJson<AgentResult | null>(order.resultJson, null);
+    const result = storedAgentResult(order.resultJson);
     if (!result || routeOf(result) !== "needs_info") {
       return Response.json(
         { error: "Заказ уже перешёл к следующему шагу." },
@@ -1016,9 +1442,10 @@ export async function PATCH(request: Request) {
         orderId: id,
         stage: "clarification-sent",
         title: "Вопросы записаны в журнал демонстрации",
-        detail: `${result.missing.join(" · ")}. Письмо и время сохранены в общем журнале.`,
-        createdAt: now,
-      },
+          detail: `${result.missing.join(" · ")}. Письмо и время сохранены в общем журнале.`,
+          createdAt: now,
+          ...eventMetadata(order),
+        },
       transitionGuard,
     );
     const updateOrderQuery = db
@@ -1073,10 +1500,35 @@ export async function PATCH(request: Request) {
     ];
     const liveData = await getDemoDataWithInventory();
     const inventorySnapshot = snapshotFromDemoData(liveData);
-    const live = await bridgeOnline();
+    const recordedMode = order.mode === "recorded-demo";
 
-    if (live) {
-      const [queued] = await db
+    if (!recordedMode) {
+      const transitionGuard = and(
+        eq(orders.id, id),
+        eq(orders.status, "awaiting_customer"),
+        sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
+        sql`coalesce(${orders.conversationJson}, '') = ${
+          order.conversationJson ?? ""
+        }`,
+        sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
+          order.inventorySnapshotJson ?? ""
+        }`,
+        sql`${orders.roundNo} = ${order.roundNo}`,
+        sql`${orders.sentAt} is null`,
+      )!;
+      const replyEventQuery = insertOrderEventWhen(
+        db,
+        {
+          orderId: id,
+          stage: "customer-reply",
+          title: "Клиент прислал детали",
+          detail: answer,
+          createdAt: customerRepliedAt,
+          ...eventMetadata(order),
+        },
+        transitionGuard,
+      );
+      const queueOrderQuery = db
         .update(orders)
         .set({
           status: "queued",
@@ -1087,24 +1539,22 @@ export async function PATCH(request: Request) {
           managerDecision: null,
           managerOptionId: null,
           managerDecidedAt: null,
-          updatedAt: sql`CURRENT_TIMESTAMP`,
+          mode: "opencode-live",
+          updatedAt: customerRepliedAt,
         })
-        .where(
-          and(eq(orders.id, id), eq(orders.status, "awaiting_customer")),
-        )
+        .where(transitionGuard)
         .returning({ id: orders.id });
+      const [, queuedOrders] = await db.batch([
+        replyEventQuery,
+        queueOrderQuery,
+      ]);
+      const [queued] = queuedOrders;
       if (!queued) {
         return Response.json(
           { error: "Заказ уже обновился. Показываем свежие данные." },
           { status: 409 },
         );
       }
-      await db.insert(orderEvents).values({
-        orderId: id,
-        stage: "customer-reply",
-        title: "Клиент прислал детали",
-        detail: answer,
-      });
       return Response.json({ ok: true, status: "queued" });
     }
 
@@ -1135,7 +1585,7 @@ export async function PATCH(request: Request) {
         reason: "Ответ клиента учтён",
         sourceKey: `customer:${order.roundNo + 1}`,
         inventorySnapshot,
-        agentModel: "Расчёт по готовой инструкции",
+        agentModel: "Записанный демонстрационный прогон",
         reviewerModel: "Проверка программы",
       },
       transitionGuard,
@@ -1147,16 +1597,24 @@ export async function PATCH(request: Request) {
         title: "Клиент прислал детали",
         detail: answer,
       },
-      ...stagedEvents(id, result).filter(
+      ...stagedEvents(id, result, {
+        roundNo: order.roundNo + 1,
+        claimId: order.claimId,
+        attemptNo: order.attemptNo,
+      }).filter(
         (event) => !["received", "understanding"].includes(event.stage),
       ),
     ];
     const eventQueries = transitionEvents.map((event) =>
-      insertOrderEventWhen(
-        db,
-        { ...event, createdAt: customerRepliedAt },
-        transitionGuard,
-      ),
+        insertOrderEventWhen(
+          db,
+          {
+            ...event,
+            createdAt: customerRepliedAt,
+            ...eventMetadata({ ...order, roundNo: order.roundNo + 1 }),
+          },
+          transitionGuard,
+        ),
     );
     const updateOrderQuery = db
       .update(orders)
@@ -1167,7 +1625,7 @@ export async function PATCH(request: Request) {
         conversationJson: JSON.stringify(nextConversation),
         roundNo: order.roundNo + 1,
         inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-        agentModel: "Расчёт по готовой инструкции",
+        agentModel: "Записанный демонстрационный прогон",
         reviewerModel: "Проверка программы",
         managerDecision: null,
         managerOptionId: null,
@@ -1205,10 +1663,7 @@ export async function PATCH(request: Request) {
       order.conversationJson,
       [],
     );
-    const previousResult = storedJson<AgentResult | null>(
-      order.resultJson,
-      null,
-    );
+    const previousResult = storedAgentResult(order.resultJson);
     const liveData = await getDemoDataWithInventory();
     const inventoryOutdated = await savedResultUsesOldInventory(order);
     const supplierOutdated = Boolean(
@@ -1256,9 +1711,10 @@ export async function PATCH(request: Request) {
     }
     const stockChange =
       dataChanges.join(" ") || "Склад перечитан по свежим данным.";
-    const live = await bridgeOnline();
+    const bridgeIsOnline = await bridgeOnline();
+    const recordedMode = order.mode === "recorded-demo";
 
-    if (live) {
+    if (!recordedMode) {
       const liveMode = supplierOutdated
         ? inventoryOutdated
           ? "opencode-inventory-supplier-recalculate"
@@ -1286,6 +1742,7 @@ export async function PATCH(request: Request) {
                 : "Новый остаток передан агенту",
           detail: `${stockChange} Модель для заказов заново готовит решение, письмо и варианты для руководителя.`,
           state: "active",
+          ...eventMetadata({ ...order, roundNo: order.roundNo + 1 }),
         },
         transitionGuard,
       );
@@ -1321,7 +1778,7 @@ export async function PATCH(request: Request) {
         ok: true,
         status: "queued",
         inventoryVersion: inventorySnapshot.version,
-        bridgeOnline: true,
+        bridgeOnline: bridgeIsOnline,
       });
     }
 
@@ -1363,7 +1820,7 @@ export async function PATCH(request: Request) {
           : "Склад перечитан",
         sourceKey: `recalculate:${order.roundNo + 1}:${result.product?.sku ?? "none"}:${currentItem?.revision ?? inventorySnapshot.version}`,
         inventorySnapshot,
-        agentModel: "Готовая инструкция",
+        agentModel: "Записанный демонстрационный прогон",
         reviewerModel: "Проверка программы",
       },
       transitionGuard,
@@ -1378,7 +1835,11 @@ export async function PATCH(request: Request) {
             : "Агент снова проверил склад",
         detail: `${stockChange} ${decisionChange} ${result.zoneReason}`,
       },
-      ...stagedEvents(id, result).filter((event) =>
+      ...stagedEvents(id, result, {
+        roundNo: order.roundNo + 1,
+        claimId: order.claimId,
+        attemptNo: order.attemptNo,
+      }).filter((event) =>
         [
           "inventory",
           "market",
@@ -1389,7 +1850,14 @@ export async function PATCH(request: Request) {
       ),
     ];
     const eventQueries = transitionEvents.map((event) =>
-      insertOrderEventWhen(db, event, transitionGuard),
+      insertOrderEventWhen(
+        db,
+        {
+          ...event,
+          ...eventMetadata({ ...order, roundNo: order.roundNo + 1 }),
+        },
+        transitionGuard,
+      ),
     );
     const updateOrderQuery = db
       .update(orders)
@@ -1398,8 +1866,8 @@ export async function PATCH(request: Request) {
         zone: result.zone,
         resultJson: JSON.stringify(result),
         inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-        mode: "autonomous-demo",
-        agentModel: "Готовая инструкция",
+        mode: "recorded-demo",
+        agentModel: "Записанный демонстрационный прогон",
         reviewerModel: "Проверка программы",
         managerDecision: null,
         managerOptionId: null,
@@ -1450,17 +1918,36 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
-    const result = storedJson<AgentResult | null>(order.resultJson, null);
+    const result = storedAgentResult(order.resultJson);
     if (!result?.product) {
       return Response.json(
         { error: "Дождитесь готового подбора краски и объёма." },
         { status: 409 },
       );
     }
+    if (result.commitment !== "commercial_offer") {
+      return Response.json(
+        {
+          error:
+            "Предварительную оценку можно отправить клиенту, но резерв откроется после подтверждения точных данных.",
+        },
+        { status: 409 },
+      );
+    }
     let confirmedSupplierPlan: SupplierPlan | null = null;
     if (result.supplierPlan) {
+      if (!result.supplierPlan.confirmedAt) {
+        return Response.json(
+          {
+            error:
+              "План поставщика ещё не подтверждён руководителем. Выберите актуальный вариант решения.",
+          },
+          { status: 409 },
+        );
+      }
       const liveData = await getDemoDataWithInventory();
-      confirmedSupplierPlan = confirmSupplierPlan(
+      confirmedSupplierPlan = confirmedSupplierPlanForSnapshot(
+        order,
         result.supplierPlan,
         liveData.market,
       );
@@ -1502,6 +1989,7 @@ export async function PATCH(request: Request) {
           confirmedSupplierPlan,
         ),
         createdAt: now,
+        ...eventMetadata(order),
       },
       transitionGuard,
     );
@@ -1529,7 +2017,14 @@ export async function PATCH(request: Request) {
   }
 
   if (action === "send") {
-    if (order.status !== "reserved" || order.sentAt) {
+    const result = storedAgentResult(order.resultJson);
+    const sendsEstimate =
+      order.status === "ready_to_send" &&
+      result?.commitment === "estimate";
+    const sendsCommercialOffer =
+      order.status === "reserved" &&
+      result?.commitment === "commercial_offer";
+    if ((!sendsEstimate && !sendsCommercialOffer) || order.sentAt) {
       return Response.json(
         {
           error:
@@ -1540,7 +2035,7 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
-    if (await savedResultUsesOldInventory(order)) {
+    if (sendsCommercialOffer && (await savedResultUsesOldInventory(order))) {
       return Response.json(
         {
           error:
@@ -1550,11 +2045,20 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const result = storedJson<AgentResult | null>(order.resultJson, null);
     let confirmedSupplierPlan: SupplierPlan | null = null;
-    if (result?.supplierPlan) {
+    if (sendsCommercialOffer && result?.supplierPlan) {
+      if (!result.supplierPlan.confirmedAt) {
+        return Response.json(
+          {
+            error:
+              "План поставщика ещё не подтверждён руководителем. Отправка остановлена до сверки условий.",
+          },
+          { status: 409 },
+        );
+      }
       const liveData = await getDemoDataWithInventory();
-      confirmedSupplierPlan = confirmSupplierPlan(
+      confirmedSupplierPlan = confirmedSupplierPlanForSnapshot(
+        order,
         result.supplierPlan,
         liveData.market,
       );
@@ -1578,7 +2082,10 @@ export async function PATCH(request: Request) {
     const now = new Date().toISOString();
     const transitionGuard = and(
       eq(orders.id, id),
-      eq(orders.status, "reserved"),
+      eq(
+        orders.status,
+        sendsEstimate ? "ready_to_send" : "reserved",
+      ),
       sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
       sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
         order.inventorySnapshotJson ?? ""
@@ -1591,12 +2098,15 @@ export async function PATCH(request: Request) {
         orderId: id,
         stage: "sent",
         title: "Отправка ответа записана",
-        detail: confirmedSupplierPlan
+        detail: sendsEstimate
+          ? "Диапазонная оценка отправлена без резерва товара. Письмо и время сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом."
+          : confirmedSupplierPlan
           ? `Перед записью отправки повторно проверены цена, объём, срок и дата поставщика. ${supplierPlanEventDetail(
               confirmedSupplierPlan,
             )} Письмо и время сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.`
           : "Письмо и время отправки сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом.",
         createdAt: now,
+        ...eventMetadata(order),
       },
       transitionGuard,
     );
@@ -1647,7 +2157,7 @@ export async function PATCH(request: Request) {
     );
   }
 
-  const result = storedJson<AgentResult | null>(order.resultJson, null);
+  const result = storedAgentResult(order.resultJson);
   if (!result) {
     return Response.json(
       { error: "Решение готовится. Обновите заказ через несколько секунд." },
@@ -1666,14 +2176,27 @@ export async function PATCH(request: Request) {
   const liveData = await getDemoDataWithInventory();
   const now = new Date().toISOString();
   let confirmedSupplierPlan: SupplierPlan | null = null;
-  if (option.id === "помочь-с-недостающим-объёмом") {
-    confirmedSupplierPlan = result.supplierPlan
-      ? confirmSupplierPlan(result.supplierPlan, liveData.market)
-      : null;
+  const confirmsSupplierPlan = option.id === "confirm-supplier-plan";
+  if (confirmsSupplierPlan) {
+    if (!result.supplierPlan) {
+      return Response.json(
+        {
+          error:
+            "Вариант поставщика больше не содержит внутреннего снимка. Пересчитайте заказ для сверки условий.",
+          recalculate: true,
+        },
+        { status: 409 },
+      );
+    }
+    confirmedSupplierPlan = confirmedSupplierPlanForSnapshot(
+      order,
+      result.supplierPlan,
+      liveData.market,
+    );
     if (!confirmedSupplierPlan) {
       await recordSupplierRefreshNeeded(
         "решением руководителя",
-        result.supplierPlan!,
+        result.supplierPlan,
         liveData.market,
       );
       return Response.json(
@@ -1685,12 +2208,6 @@ export async function PATCH(request: Request) {
         { status: 409 },
       );
     }
-    result.supplierPlan = {
-      ...confirmedSupplierPlan,
-      confirmedAt: now,
-    };
-  } else {
-    delete result.supplierPlan;
   }
   const currentInput = inputWithConversation(
     order,
@@ -1851,6 +2368,16 @@ export async function PATCH(request: Request) {
     }
   }
 
+  const supplierPlan = supplierPlanAfterApproval(
+    result.supplierPlan,
+    option.id,
+    confirmedSupplierPlan,
+    now,
+    approvedAlternative,
+  );
+  if (supplierPlan) result.supplierPlan = supplierPlan;
+  else delete result.supplierPlan;
+
   result.reply = {
     subject:
       approvedAlternative && result.product
@@ -1858,12 +2385,18 @@ export async function PATCH(request: Request) {
         : result.reply.subject,
     body: option.reply,
   };
-  const needsCustomerReply = optionNeedsCustomerReply(option);
+  const needsCustomerReply =
+    result.resolvedIntent.target.state === "ambiguous" &&
+    optionNeedsCustomerReply(option);
   if (needsCustomerReply) {
+    const blockerQuestion =
+      result.resolvedIntent.blocker?.question ??
+      "Что именно нужно покрасить?";
     result.zone = "yellow";
     result.decision = "clarify";
     result.route = "needs_info";
-    result.missing = ["ответ клиента по выбранному варианту"];
+    result.commitment = "none";
+    result.missing = [blockerQuestion];
     result.zoneReason =
       "Руководитель выбрал следующий ход. Агент подготовил короткий вопрос клиенту.";
     result.managerNote =
@@ -1877,9 +2410,16 @@ export async function PATCH(request: Request) {
       ],
     };
   }
-  const nextStatus = needsCustomerReply
-    ? "clarification_ready"
-    : "ready_to_send";
+  const nextStatus = approvalStatus(needsCustomerReply, result.commitment);
+  if (!isCompleteAgentResult(result)) {
+    return Response.json(
+      {
+        error: "После выбора варианта результат не прошёл проверку. Пересчитайте заказ.",
+        recalculate: true,
+      },
+      { status: 409 },
+    );
+  }
 
   const transitionGuard = and(
     eq(orders.id, id),
@@ -1911,13 +2451,14 @@ export async function PATCH(request: Request) {
       orderId: id,
       stage: "approval",
       title: "Руководитель выбрал следующий ход",
-      detail: confirmedSupplierPlan
+        detail: confirmedSupplierPlan
         ? `${option.title}. Перед решением повторно проверены цена, объём, срок и дата. ${supplierPlanEventDetail(
             confirmedSupplierPlan,
           )}`
-        : option.title,
-      createdAt: now,
-    },
+          : option.title,
+        createdAt: now,
+        ...eventMetadata(order),
+      },
     transitionGuard,
   );
   const updateOrderQuery = db

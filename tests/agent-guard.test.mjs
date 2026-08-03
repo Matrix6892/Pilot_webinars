@@ -1,16 +1,408 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import {
   applyReviewerResult,
+  ambiguityReply,
   isCompleteAgentResult,
   normalizeAgentResult,
+  normalizeV2AgentResult,
+  reviewerAllowedPathPrefixes,
+  validateReviewerDecisionV2,
 } from "../lib/agent-guard.mjs";
 
 const demoData = JSON.parse(
   await readFile(new URL("../data/paint-demo.json", import.meta.url), "utf8"),
 );
+const researchedDemoData = {
+  ...demoData,
+  companyProfiles: [
+    {
+      name: "Исследованный склад",
+      website: "research.example.com",
+      summary:
+        "Открытые источники подтверждают фармацевтическую и медицинскую деятельность компании.",
+      sources: [
+        {
+          title: "Отраслевой профиль компании",
+          url: "https://research.example.com/industry",
+          checkedAt: "30.07.2026",
+          fact: "Компания работает в фармацевтической и медицинской отраслях.",
+        },
+        {
+          title: "Описание складского комплекса",
+          url: "https://research.example.com/warehouse",
+          checkedAt: "30.07.2026",
+          fact: "Компания использует складской комплекс с разными зонами хранения.",
+        },
+      ],
+    },
+  ],
+};
+
+test("canonical pure ambiguity has an empty reviewer issue map for every alias", () => {
+  const shortagePacket = {
+    order: { body: "Нужна партия покрытия." },
+    result: {
+      options: [
+        { id: "supplier", reply: "Проверить поставщика." },
+        { id: "split", reply: "Разделить поставку." },
+        { id: "wait", reply: "Подождать подтверждение." },
+      ],
+      reply: { body: "Руководитель подтвердит совместную поставку." },
+      managerNote: "Выберите следующий шаг.",
+      product: { sku: "КР-001" },
+    },
+  };
+  const map = reviewerAllowedPathPrefixes(shortagePacket);
+
+  assert.deepEqual(map.material_utility, [
+    "/result/options/0/reply",
+    "/result/options/1/reply",
+    "/result/options/2/reply",
+  ]);
+  assert.equal(map.material_utility.includes("/result/reply"), false);
+  assert.equal(map.material_utility.includes("/result/managerNote"), false);
+  assert.deepEqual(map.unsupported_claim, [
+    "/order",
+    "/result/product",
+    "/result/reply",
+    "/result/options",
+  ]);
+
+  const question = "Что красим: стена, рамка или человек?";
+  const choices = ["Стена", "Прямоугольная рамка", "Задняя часть головы с тёмными волосами"];
+  const ambiguousPacket = {
+    order: {
+      subject: "Фото объекта",
+      body: "Ну давай, умный агент, покрась это красиво. Фото приложил.",
+      roundNo: 1,
+    },
+    result: {
+      schemaVersion: 2,
+      zone: "yellow",
+      route: "needs_info",
+      commitment: "none",
+      resolvedIntent: {
+        goal: "Покрасить объект на фото",
+        target: {
+          state: "ambiguous",
+          candidates: [
+            { label: choices[0] },
+            { label: choices[1] },
+            { label: choices[2] },
+          ],
+        },
+        evidence: [
+          {
+            id: "message-1",
+            claim: "Клиент не назвал объект действия",
+          },
+          {
+            id: "vision-1",
+            claim: "На фото видны стена, рамка и человек сзади",
+          },
+        ],
+        blocker: { kind: "target_ambiguity", question, choices },
+      },
+      visionObservation: {
+        targetCandidates: [
+          { label: choices[0], evidence: "Основная светлая поверхность" },
+          { label: choices[1], evidence: "Серый прямоугольный объект" },
+          { label: choices[2], evidence: "Нейтральный видимый признак человека" },
+        ],
+        visibleFacts: ["На фото видны три возможных объекта."],
+      },
+      understood: ["Выбор цели ещё не сделан."],
+      missing: [question],
+      product: null,
+      estimates: [],
+      supplierLeads: [],
+      options: [],
+      reply: {
+        body: ambiguityReply(question, choices).body,
+      },
+    },
+  };
+  const ambiguousMap = reviewerAllowedPathPrefixes(ambiguousPacket);
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(ambiguousMap).map((rule) => [rule, []])),
+    ambiguousMap,
+  );
+
+  const aliases = [
+    ["/order/body", ambiguousPacket.order.body],
+    [
+      "/result/visionObservation/targetCandidates/2/label",
+      choices[2],
+    ],
+    [
+      "/result/resolvedIntent/evidence/1/claim",
+      ambiguousPacket.result.resolvedIntent.evidence[1].claim,
+    ],
+    ["/result/resolvedIntent/target/candidates/2/label", choices[2]],
+    ["/result/missing/0", question],
+    ["/result/understood/0", ambiguousPacket.result.understood[0]],
+    ["/result/reply/body", ambiguousPacket.result.reply.body],
+  ];
+  for (const rule of Object.keys(ambiguousMap)) {
+    for (const [path, quote] of aliases) {
+      assert.equal(
+        validateReviewerDecisionV2(
+          {
+            schemaVersion: 2,
+            approved: false,
+            verdict: "reject",
+            notes: [],
+            blockingIssues: [{
+              rule,
+              path,
+              quote,
+              detail: "Нейтральный кандидат якобы является рекомендацией материала.",
+            }],
+          },
+          ambiguousPacket,
+        ),
+        null,
+        `${rule}:${path}`,
+      );
+    }
+  }
+  assert.deepEqual(
+    validateReviewerDecisionV2(
+      {
+        schemaVersion: 2,
+        approved: true,
+        verdict: "Проверка завершена",
+        notes: [],
+        blockingIssues: [],
+      },
+      ambiguousPacket,
+    ),
+    {
+      schemaVersion: 2,
+      approved: true,
+      verdict: "Проверка завершена",
+      notes: [],
+      blockingIssues: [],
+    },
+  );
+
+  const nonCanonicalReplyPacket = {
+    ...ambiguousPacket,
+    result: {
+      ...ambiguousPacket.result,
+      reply: { body: "Черновик содержит неподтверждённый факт?" },
+    },
+  };
+  assert.equal(
+    validateReviewerDecisionV2(
+      {
+        schemaVersion: 2,
+        approved: false,
+        verdict: "reject",
+        notes: [],
+        blockingIssues: [{
+          rule: "unsupported_claim",
+          path: "/result/reply/body",
+          quote: nonCanonicalReplyPacket.result.reply.body,
+          detail: "В reply есть неподтверждённое утверждение.",
+        }],
+      },
+      nonCanonicalReplyPacket,
+    )?.blockingIssues.length,
+    1,
+  );
+  assert.equal(
+    validateReviewerDecisionV2(
+      {
+        schemaVersion: 2,
+        approved: false,
+        verdict: "reject",
+        notes: [],
+        blockingIssues: [{
+          rule: "privacy",
+          path: "/result/visionObservation/targetCandidates/2/label",
+          quote: choices[2],
+          detail: "Grounded privacy inference подтверждён наблюдением.",
+        }],
+      },
+      nonCanonicalReplyPacket,
+    )?.blockingIssues.length,
+    1,
+  );
+  assert.equal(
+    validateReviewerDecisionV2(
+      {
+        schemaVersion: 2,
+        approved: false,
+        verdict: "reject",
+        notes: [],
+        blockingIssues: [{
+          rule: "evidence_integrity",
+          path: "/result/resolvedIntent/evidence/1/claim",
+          quote: ambiguousPacket.result.resolvedIntent.evidence[1].claim,
+          detail: "Grounded source evidence is inconsistent.",
+        }],
+      },
+      nonCanonicalReplyPacket,
+    )?.blockingIssues.length,
+    1,
+  );
+  const resolvedHuman = structuredClone(nonCanonicalReplyPacket);
+  resolvedHuman.result.zone = "red";
+  resolvedHuman.result.route = "manager";
+  resolvedHuman.result.resolvedIntent.target = {
+    state: "resolved",
+    label: choices[2],
+  };
+  resolvedHuman.result.resolvedIntent.blocker = null;
+  resolvedHuman.result.reply = {
+    body: "Строительное покрытие нельзя рекомендовать человеку.",
+  };
+  const resolvedSafetyCases = [
+    {
+      label: "resolved human",
+      packet: resolvedHuman,
+      issue: {
+        rule: "human_safety",
+        path: "/result/reply/body",
+        quote: resolvedHuman.result.reply.body,
+        detail: "Строительное покрытие нельзя рекомендовать человеку.",
+      },
+    },
+    {
+      label: "product",
+      packet: {
+        ...structuredClone(resolvedHuman),
+        result: {
+          ...structuredClone(resolvedHuman.result),
+          commitment: "commercial_offer",
+          product: { sku: "КР-001" },
+        },
+      },
+      issue: {
+        rule: "human_safety",
+        path: "/result/product",
+        quote: JSON.stringify({ sku: "КР-001" }),
+        detail: "Товар применён к human target.",
+      },
+    },
+    {
+      label: "estimate",
+      packet: {
+        ...structuredClone(resolvedHuman),
+        result: {
+          ...structuredClone(resolvedHuman.result),
+          zone: "yellow",
+          route: "ready",
+          commitment: "estimate",
+          reply: { body: "Диапазон требует safety проверки." },
+          estimates: [{ metric: "paint_quantity", range: { min: 1, max: 2 } }],
+        },
+      },
+      issue: {
+        rule: "human_safety",
+        path: "/result/estimates/0",
+        quote: JSON.stringify({ metric: "paint_quantity", range: { min: 1, max: 2 } }),
+        detail: "Оценка относится к human target.",
+      },
+    },
+    {
+      label: "commitment",
+      packet: {
+        ...structuredClone(resolvedHuman),
+        result: { ...structuredClone(resolvedHuman.result), commitment: "commercial_offer" },
+      },
+      issue: {
+        rule: "authority",
+        path: "/result/commitment",
+        quote: "commercial_offer",
+        detail: "Обязательство требует полномочий.",
+      },
+    },
+  ];
+  for (const { label, packet, issue } of resolvedSafetyCases) {
+    assert.equal(
+      validateReviewerDecisionV2(
+        {
+          schemaVersion: 2,
+          approved: false,
+          verdict: "Нужна проверка",
+          notes: [],
+          blockingIssues: [issue],
+        },
+        packet,
+      )?.blockingIssues.length,
+      1,
+      label,
+    );
+  }
+  assert.deepEqual(reviewerAllowedPathPrefixes({ order: {}, result: {} }).material_utility, ["/order"]);
+});
+
+test("reviewer path guidance omits undefined packet fields", () => {
+  const packet = {
+    order: { body: "Нужна партия покрытия." },
+    result: {
+      supplierPlan: undefined,
+      reply: { body: "План ещё не подтверждён." },
+    },
+  };
+
+  assert.equal(
+    reviewerAllowedPathPrefixes(packet).unsupported_claim.includes(
+      "/result/supplierPlan",
+    ),
+    false,
+  );
+});
+
+test("reviewer cannot claim material utility is absent when guarded options are complete", () => {
+  const packet = {
+    order: { body: "Нужна партия покрытия." },
+    result: {
+      options: [
+        { id: "supplier", reply: "Подтвердить поставщика." },
+        { id: "split", reply: "Разделить поставку." },
+        { id: "wait", reply: "Дождаться производства." },
+      ],
+      reply: { body: "Руководитель выберет один из трёх вариантов." },
+    },
+  };
+
+  assert.equal(
+    validateReviewerDecisionV2(
+      {
+        schemaVersion: 2,
+        approved: false,
+        verdict: "Вариантов нет",
+        notes: [],
+        blockingIssues: [
+          {
+            rule: "material_utility",
+            path: "/result/options",
+            quote: JSON.stringify(packet.result.options),
+            detail: "В результате якобы нет вариантов следующего шага.",
+          },
+        ],
+      },
+      packet,
+    ),
+    null,
+  );
+});
+
+function openedWeb(url, excerpt, openedAt = "2026-08-02T10:00:00Z") {
+  return {
+    url,
+    openedAt,
+    excerpt,
+    sha256: createHash("sha256").update(excerpt).digest("hex"),
+  };
+}
 
 function catalogProduct(sku) {
   const product = demoData.products.find((item) => item.sku === sku);
@@ -69,6 +461,61 @@ function agentDraft({
     checks: [],
     sources: [],
     review: { model: "", verdict: "", notes: [] },
+  };
+}
+
+function v2ResolvedDraft(
+  job,
+  {
+    targetLabel = "нестандартная поверхность",
+    commitment = "none",
+    estimates = [],
+    supplierLeads = [],
+    research = { checked: false, summary: "", sources: [] },
+    options = [],
+    reply = {
+      subject: "Спокойный разбор",
+      body: "Задача понятна, берём проверку на себя.",
+    },
+  } = {},
+) {
+  return {
+    schemaVersion: 2,
+    zone: commitment === "estimate" ? "yellow" : "red",
+    decision: commitment === "estimate" ? "clarify" : "escalate",
+    route: commitment === "estimate" ? "ready" : "manager",
+    confidence: 0.88,
+    resolvedIntent: {
+      goal: "Подготовить безопасное решение по свободной заявке",
+      target: {
+        state: "resolved",
+        label: targetLabel,
+        evidenceIds: ["request"],
+      },
+      evidence: [
+        {
+          id: "request",
+          claim: "Клиент описал объект и требуемую работу",
+          confidence: 1,
+          source: { kind: "message", roundNo: 1, quote: job.body },
+        },
+      ],
+      assumptions: [],
+      blocker: null,
+    },
+    visionObservation: null,
+    commitment,
+    estimates,
+    supplierLeads,
+    product: null,
+    options,
+    reply,
+    research,
+    review: {
+      model: "opencode-go/deepseek-v4-pro",
+      verdict: "Черновик подготовлен",
+      notes: [],
+    },
   };
 }
 
@@ -246,7 +693,7 @@ test("uses the same plain market explanation in the live model route", () => {
 
   assert.equal(
     result.market.position,
-    "Наша цена 349 ₽/кг, на 2 ₽ выше средней цены других поставщиков. Цена близка к рынку. Весь объём подтверждён складом.",
+    "Наша цена 349 ₽/кг, на 3 ₽ ниже средней цены других поставщиков. Цена выглядит привлекательно. Весь объём подтверждён складом.",
   );
 });
 
@@ -443,6 +890,12 @@ test("keeps a public source with a Latin date label", () => {
     company: "Завод",
     website: "zavod.example.ru",
     openedSourceUrls: ["https://example.com/company"],
+    openedSources: [
+      openedWeb(
+        "https://example.com/company",
+        "Компания выпускает промышленное оборудование.",
+      ),
+    ],
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
@@ -470,6 +923,12 @@ test("allows a cautious company-name match and labels it explicitly", () => {
   const result = normalizeAgentResult(draft, demoData, {
     company: "Учебная компания",
     openedSourceUrls: ["https://example.com/company"],
+    openedSources: [
+      openedWeb(
+        "https://example.com/company",
+        "Факт относится к другой организации.",
+      ),
+    ],
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
@@ -516,10 +975,7 @@ test("keeps an unopened model link out of conclusions", () => {
   });
 
   assert.equal(result.research.checked, false);
-  assert.match(
-    result.research.sources[0].fact,
-    /решение опирается на письмо, каталог и склад/iu,
-  );
+  assert.deepEqual(result.research.sources, []);
   assert.doesNotMatch(
     `${result.businessContext} ${result.zoneReason} ${result.reply.body}`,
     /50 млрд|тысяч[ау] станков|крупн.*клиент|особые условия/iu,
@@ -584,6 +1040,12 @@ test("clips a long research summary at a word boundary", () => {
     company: "Завод",
     website: "zavod.example.ru",
     openedSourceUrls: ["https://example.com/company"],
+    openedSources: [
+      openedWeb(
+        "https://example.com/company",
+        "Компания выпускает оборудование.",
+      ),
+    ],
     subject: "Стандартный заказ КР-001",
     body: "Нужно 200 кг КР-001 для наружных работ, цвет RAL 7024.",
   });
@@ -997,23 +1459,23 @@ test("grounds a researched floor recommendation and removes invented sanitary cl
     summary: "Компания работает в фармацевтической отрасли.",
     sources: [
       {
-        title: "О группе компаний «ПРОТЕК»",
-        url: "https://protek-group.ru/about/",
+        title: "Отраслевой профиль компании",
+        url: "https://research.example.com/industry",
         checkedAt: "2026-07-30",
         fact: "Группа работает в фармацевтической и медицинской отраслях.",
       },
       {
-        title: "Направления бизнеса ГК «ПРОТЕК»",
-        url: "https://protek-group.ru/business/",
+        title: "Описание складского комплекса",
+        url: "https://research.example.com/warehouse",
         checkedAt: "2026-07-30",
         fact: "Группа использует логистический парк со складами для мультитемпературного хранения.",
       },
     ],
   };
 
-  const result = normalizeAgentResult(draft, demoData, {
-    company: "ГК «ПРОТЕК»",
-    website: "protek-group.ru",
+  const result = normalizeAgentResult(draft, researchedDemoData, {
+    company: "Исследованный склад",
+    website: "research.example.com",
     subject: "Помогите выбрать краску для пола",
     body: "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
   });
@@ -1053,21 +1515,21 @@ test("grounds a researched floor recommendation and removes invented sanitary cl
   );
   assert.match(
     result.decisionBasis.map((basis) => basis.source).join(" "),
-    /Описание краски в каталоге.*О группе компаний.*Направления бизнеса/iu,
+    /Описание краски в каталоге.*Отраслевой профиль компании.*Описание складского комплекса/iu,
   );
 });
 
 test("continues a researched floor order from questions to both stock routes", () => {
   const job = {
-    company: "ГК «ПРОТЕК»",
-    website: "protek-group.ru",
+    company: "Исследованный склад",
+    website: "research.example.com",
     subject: "Помогите выбрать краску для пола",
     body: [
       "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
       "Ответ клиента 1: Пол бетонный. Храним лекарства. Моем нейтральным средством. По полу ездят погрузчики.",
     ].join("\n\n"),
   };
-  const replenished = structuredClone(demoData);
+  const replenished = structuredClone(researchedDemoData);
   replenished.products = replenished.products.map((product) =>
     product.sku === "КР-003"
       ? {
@@ -1109,7 +1571,7 @@ test("continues a researched floor order from questions to both stock routes", (
       zone: "red",
       options: staleManagerOptions,
     }),
-    demoData,
+    researchedDemoData,
     job,
   );
   const afterRestock = normalizeAgentResult(
@@ -1142,7 +1604,16 @@ test("continues a researched floor order from questions to both stock routes", (
   );
   assert.ok(supplierHelp);
   assert.ok(
-    beforeRestock.options.some((option) => option.id === "model-schedule"),
+    beforeRestock.options.length >= 2 && beforeRestock.options.length <= 3,
+  );
+  assert.ok(
+    beforeRestock.options.every((option) =>
+      ["supplier", "internal"].includes(option.followUpActor),
+    ),
+  );
+  assert.doesNotMatch(
+    beforeRestock.options.map((option) => option.reply).join(" "),
+    /\?/u,
   );
   assert.equal(beforeRestock.supplierPlan?.ourKg, 420);
   assert.equal(beforeRestock.supplierPlan?.supplierKg, 200);
@@ -1340,7 +1811,7 @@ test("routes special terms found only in client copy to the red zone", () => {
   assert.doesNotMatch(result.reply.body, /отсрочк/i);
 });
 
-test("keeps two unique safe manager options for a red order", () => {
+test("keeps safe manager options and adds a way to cover the deficit", () => {
   const options = [
     {
       id: "two-part-delivery",
@@ -1371,9 +1842,20 @@ test("keeps two unique safe manager options for a red order", () => {
   );
 
   assert.equal(result.zone, "red");
-  assert.deepEqual(
-    result.options.map((option) => option.id),
-    ["two-part-delivery", "ask-schedule"],
+  assert.ok(result.options.length >= 2 && result.options.length <= 3);
+  assert.ok(
+    result.options.every((option) =>
+      ["supplier", "internal"].includes(option.followUpActor),
+    ),
+  );
+  assert.ok(
+    result.options.some(
+      (option) => option.id === "помочь-с-недостающим-объёмом",
+    ),
+  );
+  assert.doesNotMatch(
+    result.options.map((option) => option.reply).join(" "),
+    /\?/u,
   );
 });
 
@@ -1766,6 +2248,13 @@ test("removes unsupported business conclusions after a negative review", () => {
     website: "volgamash.ru",
     subject: "Заказ КР-001",
     body: "Нужно 800 кг КР-001 для металла снаружи, цвет RAL 7024.",
+    openedSourceUrls: ["https://example.com/company"],
+    openedSources: [
+      openedWeb(
+        "https://example.com/company",
+        "Компания обрабатывает металлические изделия.",
+      ),
+    ],
   };
   const draft = agentDraft({ sku: "КР-001", requestedKg: 800 });
   draft.understood = [
@@ -1974,7 +2463,10 @@ test("logs final context after review without blocking result persistence", asyn
   );
   const reviewIndex = source.lastIndexOf("result = applyReviewerResult(");
   const contextIndex = source.indexOf('"research-result"');
-  const resultIndex = source.indexOf('action: "result"');
+  const resultIndex = source.indexOf(
+    "await agentRequest(\n      resultPayload(",
+    contextIndex,
+  );
 
   assert.ok(reviewIndex >= 0 && reviewIndex < contextIndex);
   assert.ok(contextIndex < resultIndex);
@@ -2084,6 +2576,44 @@ test("rejects reviewer approval when blocking issues are not empty", () => {
     reviewed.review.notes.join(" "),
     /неподтвержд[её]нн[^.]*обещан/iu,
   );
+});
+
+test("applies a grounded ReviewerDecisionV2 reject through the legacy adapter", () => {
+  const job = {
+    company: "ГородПроект",
+    subject: "Белая краска для офиса",
+    body: "Нужно 200 кг продукта КР-004 для внутренних стен офиса, цвет белый.",
+  };
+  const normalized = normalizeAgentResult(
+    v2ResolvedDraft(job),
+    demoData,
+    job,
+  );
+  const reviewed = applyReviewerResult(
+    normalized,
+    {
+      schemaVersion: 2,
+      approved: false,
+      verdict: "Нужна ручная проверка",
+      notes: [],
+      blockingIssues: [
+        {
+          rule: "authority",
+          path: "/result/reply/body",
+          quote: normalized.reply.body,
+          detail: "Срок в ответе требует подтверждения полномочий.",
+        },
+      ],
+    },
+    "opencode-go/deepseek-v4-pro",
+    demoData,
+    job,
+  );
+
+  assert.equal(reviewed.zone, "red");
+  assert.equal(reviewed.decision, "escalate");
+  assert.equal(reviewed.route, "manager");
+  assert.match(reviewed.review.notes.join(" "), /подтверждения полномочий/iu);
 });
 
 test("requires reviewer approval to be the boolean true", () => {
@@ -2323,4 +2853,3265 @@ test("rejects a contradictory or partial live result", () => {
 
   assert.equal(isCompleteAgentResult(contradictory), false);
   assert.equal(isCompleteAgentResult(partial), false);
+});
+
+test("keeps a bare opened URL audit-only instead of using it as external evidence", () => {
+  const job = {
+    subject: "Косвенный цветовой ориентир",
+    body: "Нужна предварительная оценка поверхности по описанию.",
+    openedSources: [
+      {
+        url: "https://example.com/reference",
+        openedAt: "2026-07-31T10:00:00Z",
+      },
+    ],
+  };
+  const draft = v2ResolvedDraft(job, {
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 6, max: 10, unit: "м²" },
+        method: "Диапазон по описанию клиента",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.7,
+      },
+    ],
+  });
+
+  const result = normalizeAgentResult(draft, demoData, job);
+  const auditEvidence = result.resolvedIntent.evidence.find(
+    (item) => item.source.kind === "web",
+  );
+
+  assert.ok(auditEvidence);
+  assert.equal(auditEvidence.confidence, 0);
+  assert.match(auditEvidence.claim, /аудит.+не подтвержд/iu);
+  assert.equal(
+    result.decisionBasis.some(
+      (item) => item.source === auditEvidence.source.title,
+    ),
+    false,
+  );
+  assert.equal(result.sources.includes(auditEvidence.source.title), false);
+  assert.doesNotMatch(result.understood.join(" "), /публичная страница/iu);
+
+  const attemptedReuse = structuredClone(draft);
+  attemptedReuse.resolvedIntent.assumptions = [
+    {
+      id: "external-style",
+      claim: "Открытая страница подтверждает внешний ориентир",
+      basedOnEvidenceIds: ["opened-web-audit-1"],
+      confidence: 0.8,
+      confirmBefore: "never",
+    },
+  ];
+  attemptedReuse.estimates[0].evidenceIds = ["opened-web-audit-1"];
+  attemptedReuse.estimates[0].assumptionIds = ["external-style"];
+  const rejectedReuse = normalizeAgentResult(attemptedReuse, demoData, job);
+  assert.deepEqual(rejectedReuse.resolvedIntent.assumptions, []);
+  assert.deepEqual(rejectedReuse.estimates, []);
+  assert.equal(rejectedReuse.commitment, "none");
+});
+
+test("does not launder an unopened discovery result through message evidence or reply", () => {
+  const job = {
+    subject: "Косвенный цветовой ориентир",
+    body: "Стену хочу как в той сцене с тёмными шторами и шахматным полом; название забыл.",
+    openedSourceUrls: [],
+    openedSources: [],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "стена",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 8, max: 12, unit: "м²" },
+        method: "Широкая оценка по описанию клиента",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.6,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 2.4, max: 3.6, unit: "кг" },
+        method: "Диапазон по типовой укрывистости",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+    ],
+    reply: {
+      subject: "Стена в стиле «Северного Архива»",
+      body: "По поисковой выдаче это «Северный Архив» режиссёра Артёма Лучина. Сохраним тёмную атмосферу пробным выкрасом.",
+    },
+  });
+  draft.resolvedIntent.goal =
+    "Покрасить стену в стиле «Северного Архива» Артёма Лучина";
+  draft.resolvedIntent.evidence[0].claim =
+    "Клиент описал сцену; discovery-выдача опознала её как «Северный Архив» Артёма Лучина";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.resolvedIntent.evidence[0].claim, job.body);
+  assert.doesNotMatch(serialized, /Северн.+Архив|Арт[её]м.+Лучин/iu);
+  assert.match(result.reply.body, /8–12 м²/u);
+  assert.equal(result.route, "ready");
+
+  const singleToken = structuredClone(draft);
+  singleToken.resolvedIntent.goal = "Покрасить стену в стиле Люмен";
+  singleToken.resolvedIntent.evidence[0].claim =
+    "По выдаче референс опознан как Люмен";
+  singleToken.reply = {
+    subject: "Ориентир Люмен",
+    body: "Ориентир: Люмен. Сохраним атмосферу пробным выкрасом.",
+  };
+  const singleTokenResult = normalizeV2AgentResult(singleToken, demoData, job);
+
+  assert.equal(singleTokenResult.resolvedIntent.evidence[0].claim, job.body);
+  assert.doesNotMatch(JSON.stringify(singleTokenResult), /Люмен/iu);
+  assert.match(singleTokenResult.reply.body, /8–12 м²/u);
+});
+
+test("materializes exact neutral evidence for a surviving supplier lead page", () => {
+  const firstUrl = "https://supplier.example/overview";
+  const secondUrl = "https://supplier.example/catalog";
+  const job = {
+    subject: "Нестандартное покрытие",
+    body: "Нужно подобрать покрытие для объекта: корпус лабораторной центрифуги.",
+    openedSourceUrls: [firstUrl, secondUrl],
+    openedSources: [
+      openedWeb(
+        firstUrl,
+        "Первая страница содержит общую информацию о покрытиях.",
+      ),
+      openedWeb(
+        secondUrl,
+        "Страница описывает область применения специальных покрытий для промышленных объектов.",
+      ),
+    ],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "корпус лабораторной центрифуги",
+    supplierLeads: [
+      {
+        supplier: "Поставщик общих покрытий",
+        url: firstUrl,
+        openedAt: "2026-08-02T10:00:00Z",
+        observedClaims: ["Страница описывает общую информацию о покрытиях"],
+        confirmationNeeded: ["Подтвердить совместимость, наличие, цену и срок"],
+      },
+      {
+        supplier: "Поставщик специальных покрытий",
+        url: secondUrl,
+        openedAt: "2026-08-02T10:00:00Z",
+        observedClaims: ["Страница описывает область применения специальных покрытий"],
+        confirmationNeeded: ["Подтвердить совместимость, наличие, цену и срок"],
+      },
+    ],
+  });
+  draft.resolvedIntent.evidence.push({
+    id: "ungrounded-web-claim",
+    claim: "Поставщик обещает индивидуальную скидку без ограничений",
+    confidence: 0.8,
+    source: {
+      kind: "web",
+      url: secondUrl,
+      title: "Каталог поставщика",
+      openedAt: "2026-08-02T10:00:00Z",
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(
+    result.resolvedIntent.evidence.some(
+      (item) => item.id === "ungrounded-web-claim",
+    ),
+    false,
+  );
+  assert.equal(isCompleteAgentResult(result), true);
+  assert.equal(result.supplierLeads.length, 2);
+  const webEvidence = result.resolvedIntent.evidence.filter(
+    (item) => item.source.kind === "web",
+  );
+  assert.equal(webEvidence.length, 2);
+  assert.equal(new Set(webEvidence.map((item) => item.id)).size, 2);
+  assert.equal(new Set(webEvidence.map((item) => item.source.url)).size, 2);
+  for (const item of webEvidence) {
+    assert.equal(item.confidence, 0);
+    assert.equal(
+      item.claim,
+      "Технический аудит: публичная страница успешно открыта; содержимое и связь с задачей не подтверждены",
+    );
+    assert.ok(item.source.excerpt.length <= 12_000);
+    assert.match(item.source.sha256, /^[a-f0-9]{64}$/u);
+  }
+  const secondEvidence = webEvidence.find(
+    (item) => item.source.url === secondUrl,
+  );
+  assert.equal(secondEvidence.source.excerpt, job.openedSources[1].excerpt);
+  assert.equal(secondEvidence.source.sha256, job.openedSources[1].sha256);
+});
+
+test("does not duplicate neutral evidence when an exact authored web claim survives", () => {
+  const firstUrl = "https://supplier.example/overview";
+  const secondUrl = "https://supplier.example/catalog";
+  const firstPage = openedWeb(
+    firstUrl,
+    "Первая страница содержит общую информацию о покрытиях.",
+  );
+  const secondPage = openedWeb(
+    secondUrl,
+    "Страница описывает область применения специальных покрытий для промышленных объектов.",
+  );
+  const job = {
+    subject: "Нестандартное покрытие",
+    body: "Нужно подобрать покрытие для объекта: корпус лабораторной центрифуги.",
+    openedSourceUrls: [firstUrl, secondUrl],
+    openedSources: [firstPage, secondPage],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "корпус лабораторной центрифуги",
+    supplierLeads: [
+      {
+        supplier: "Поставщик общих покрытий",
+        url: firstUrl,
+        openedAt: firstPage.openedAt,
+        observedClaims: ["Страница описывает общую информацию о покрытиях"],
+        confirmationNeeded: ["Подтвердить совместимость, наличие, цену и срок"],
+      },
+      {
+        supplier: "Поставщик специальных покрытий",
+        url: secondUrl,
+        openedAt: secondPage.openedAt,
+        observedClaims: ["Страница описывает область применения специальных покрытий"],
+        confirmationNeeded: ["Подтвердить совместимость, наличие, цену и срок"],
+      },
+    ],
+  });
+  draft.resolvedIntent.evidence.push({
+    id: "exact-authored-web",
+    claim: secondPage.excerpt,
+    confidence: 0.8,
+    source: {
+      kind: "web",
+      url: secondUrl,
+      title: "Страница специальных покрытий",
+      openedAt: secondPage.openedAt,
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const secondEvidence = result.resolvedIntent.evidence.filter(
+    (item) => item.source.kind === "web" && item.source.url === secondUrl,
+  );
+
+  assert.equal(result.supplierLeads.length, 2);
+  assert.equal(secondEvidence.length, 1);
+  assert.equal(secondEvidence[0].id, "exact-authored-web");
+  assert.equal(secondEvidence[0].confidence, 0.8);
+  assert.equal(isCompleteAgentResult(result), true);
+});
+
+test("drops supplier leads and evidence for invalid, unopened, or snippet-only pages", () => {
+  const firstUrl = "https://supplier.example/overview";
+  const secondUrl = "https://supplier.example/catalog";
+  const firstPage = openedWeb(
+    firstUrl,
+    "Первая страница содержит общую информацию о покрытиях.",
+  );
+  const validSecondPage = openedWeb(
+    secondUrl,
+    "Страница описывает область применения специальных покрытий для промышленных объектов.",
+  );
+  const draftJob = {
+    subject: "Нестандартное покрытие",
+    body: "Нужно подобрать покрытие для объекта: корпус лабораторной центрифуги.",
+  };
+  const draft = v2ResolvedDraft(draftJob, {
+    targetLabel: "корпус лабораторной центрифуги",
+    supplierLeads: [
+      {
+        supplier: "Поставщик специальных покрытий",
+        url: secondUrl,
+        openedAt: validSecondPage.openedAt,
+        observedClaims: ["Страница описывает область применения специальных покрытий"],
+        confirmationNeeded: ["Подтвердить совместимость, наличие, цену и срок"],
+      },
+    ],
+  });
+
+  const cases = [
+    [
+      "wrong SHA",
+      [firstPage, { ...validSecondPage, sha256: "0".repeat(64) }],
+    ],
+    ["unopened", [firstPage]],
+    [
+      "snippet-only",
+      [
+        firstPage,
+        {
+          url: secondUrl,
+          openedAt: validSecondPage.openedAt,
+          excerpt: "Короткий фрагмент без проверенного хеша",
+        },
+      ],
+    ],
+  ];
+
+  for (const [label, openedSources] of cases) {
+    const job = {
+      ...draftJob,
+      openedSourceUrls: [firstUrl, secondUrl],
+      openedSources,
+    };
+    const result = normalizeV2AgentResult(structuredClone(draft), demoData, job);
+
+    assert.equal(result.supplierLeads.length, 0, label);
+    assert.equal(
+      result.resolvedIntent.evidence.some(
+        (item) => item.source.kind === "web" && item.source.url === secondUrl,
+      ),
+      false,
+      label,
+    );
+  }
+});
+
+test("turns surviving research into supplier and internal boundary actions", () => {
+  for (const targetLabel of [
+    "корпус лабораторной центрифуги",
+    "декоративная панель для зимнего сада",
+  ]) {
+    const url = "https://supplier.example/special-coatings";
+    const job = {
+      subject: "Нестандартное покрытие",
+      body: `Нужно подобрать покрытие для объекта: ${targetLabel}.`,
+      openedSourceUrls: [url],
+      openedSources: [
+        openedWeb(
+          url,
+          "Страница описывает область применения специальных покрытий и направление поставок.",
+        ),
+      ],
+    };
+    const result = normalizeAgentResult(
+      v2ResolvedDraft(job, {
+        targetLabel,
+        supplierLeads: [
+          {
+            supplier: "Поставщик специальных покрытий",
+            url,
+            openedAt: "2026-07-31T10:05:00Z",
+            observedClaims: ["На странице описаны специальные покрытия"],
+            confirmationNeeded: [
+              "Подтвердить совместимость, наличие, цену и срок",
+            ],
+          },
+        ],
+        research: {
+          checked: true,
+          summary: "Найдено направление для проверки совместимости.",
+          sources: [
+            {
+              title: "Специальные покрытия",
+              url,
+              checkedAt: "2026-07-31T10:05:00Z",
+              fact: "Страница описывает область применения покрытий.",
+            },
+          ],
+        },
+      }),
+      demoData,
+      job,
+    );
+    const optionCopy = result.options
+      .flatMap((option) => [
+        option.title,
+        option.rationale,
+        option.tradeoff,
+        option.reply,
+      ])
+      .join(" ");
+    const clientCopy = `${result.reply.subject} ${result.reply.body}`;
+
+    assert.equal(result.route, "manager", targetLabel);
+    assert.equal(result.commitment, "none", targetLabel);
+    assert.deepEqual(
+      new Set(result.options.map((option) => option.followUpActor)),
+      new Set(["supplier", "internal"]),
+      targetLabel,
+    );
+    assert.match(optionCopy, /материал.+основан/iu, targetLabel);
+    assert.match(optionCopy, /услови.+эксплуатац/iu, targetLabel);
+    assert.match(optionCopy, /каталог/iu, targetLabel);
+    assert.match(clientCopy, /параллельно.+каталог/iu, targetLabel);
+    assert.doesNotMatch(`${optionCopy} ${clientCopy}`, /\?/u, targetLabel);
+    assert.equal(isCompleteAgentResult(result), true, targetLabel);
+  }
+});
+
+test("keeps the guarded primary reply visible on reviewer reject and timeout", () => {
+  const job = {
+    subject: "Нестандартное покрытие",
+    body: "Нужно подобрать покрытие для необычной поверхности.",
+  };
+  const primary = normalizeAgentResult(
+    v2ResolvedDraft(job, {
+      reply: {
+        subject: "Спокойный разбор задачи",
+        body: "Задача понятна, проверку совместимости берём на себя.",
+      },
+    }),
+    demoData,
+    job,
+  );
+
+  for (const review of [
+    {
+      approved: false,
+      verdict: "Нужна ручная проверка",
+      notes: [],
+      blockingIssues: ["Нужно повторно сверить область применения"],
+    },
+    null,
+    {
+      approved: false,
+      unavailable: true,
+      verdict: "Reviewer временно недоступен",
+      notes: [],
+      blockingIssues: ["Transport timeout"],
+    },
+  ]) {
+    const reviewed = applyReviewerResult(
+      structuredClone(primary),
+      review,
+      "opencode-go/deepseek-v4-pro",
+      demoData,
+      job,
+    );
+
+    assert.equal(reviewed.route, "manager");
+    assert.equal(reviewed.zone, "red");
+    assert.equal(reviewed.commitment, "none");
+    assert.match(reviewed.reply.body, /Задача понятна/iu);
+    assert.match(reviewed.reply.body, /ручн.+проверк/iu);
+    assert.match(reviewed.reply.body, /не является коммерческим предложением/iu);
+    assert.equal(isCompleteAgentResult(reviewed), true);
+  }
+});
+
+test("keeps only complete standalone authored sentences", () => {
+  const job = {
+    subject: "Горячая зона",
+    body: "Нужно проверить покрытие для нестандартной поверхности.",
+  };
+  const result = normalizeAgentResult(
+    v2ResolvedDraft(job, {
+      reply: {
+        subject: "Спокойный разбор",
+        body: [
+          "С задачей разберёмся.",
+          "подберём её по рабочей температуре.",
+          "Полезный хвост без точки",
+        ].join(" "),
+      },
+    }),
+    demoData,
+    job,
+  );
+
+  assert.match(result.reply.body, /^С задачей разберёмся\./u);
+  assert.doesNotMatch(result.reply.body, /подберём её/iu);
+  assert.doesNotMatch(result.reply.body, /хвост без точки/iu);
+  assert.equal(isCompleteAgentResult(result), true);
+
+  const linkedSentence = normalizeAgentResult(
+    v2ResolvedDraft(job, {
+      reply: {
+        subject: "Проверка условий применения",
+        body:
+          "Наружную часть можно защитить подтверждённой термостойкой системой; подберём её по рабочей температуре.",
+      },
+    }),
+    demoData,
+    job,
+  );
+  assert.match(linkedSentence.reply.body, /^Понял:/u);
+  assert.match(
+    linkedSentence.reply.body,
+    /Наружную часть.+; подберём её по рабочей температуре\./iu,
+  );
+  assert.equal(isCompleteAgentResult(linkedSentence), true);
+});
+
+test("uses catalog-fit boundary actions for unfamiliar targets without claiming research", () => {
+  for (const targetLabel of [
+    "кожух спектрометра",
+    "подставка для акустического резонатора",
+  ]) {
+    const job = {
+      subject: "Нестандартная задача",
+      body: `Нужно обработать объект: ${targetLabel}.`,
+    };
+    const result = normalizeAgentResult(
+      v2ResolvedDraft(job, {
+        targetLabel,
+        options: [
+          {
+            id: "authored-safe-path",
+            title: "Проверить щадящий путь",
+            rationale:
+              "Сверить материал основания и условия эксплуатации.",
+            tradeoff: "Выбор займёт внутреннюю проверку.",
+            reply:
+              "Параллельно подготовим обратимый тест на отдельном образце.",
+            followUpActor: "internal",
+          },
+        ],
+      }),
+      demoData,
+      job,
+    );
+    const optionCopy = result.options
+      .flatMap((option) => [option.title, option.rationale, option.reply])
+      .join(" ");
+    const copy = `${optionCopy} ${result.reply.body}`;
+
+    assert.equal(result.route, "manager", targetLabel);
+    assert.equal(result.commitment, "none", targetLabel);
+    assert.ok(
+      result.options.some((option) => option.id === "authored-safe-path"),
+      targetLabel,
+    );
+    assert.ok(
+      result.options.every((option) => option.followUpActor === "internal"),
+      targetLabel,
+    );
+    assert.match(copy, /материал.+основан/iu, targetLabel);
+    assert.match(copy, /услови.+эксплуатац/iu, targetLabel);
+    assert.match(copy, /каталог/iu, targetLabel);
+    assert.doesNotMatch(copy, /открыт.+источник|найденн.+поставщик/iu, targetLabel);
+    assert.equal(isCompleteAgentResult(result), true, targetLabel);
+  }
+});
+
+test("keeps fail-closed target ambiguity only when reviewer is unavailable", () => {
+  const job = {
+    subject: "Фото необычного объекта",
+    body: "Покрасить это на фото.",
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent = {
+    goal: "Определить объект действия",
+    target: {
+      state: "ambiguous",
+      candidates: [
+        { label: "панель", confidence: 0.52, evidenceIds: ["request"] },
+        { label: "ремешок", confidence: 0.51, evidenceIds: ["request"] },
+      ],
+    },
+    evidence: draft.resolvedIntent.evidence,
+    assumptions: [],
+    blocker: {
+      kind: "target_ambiguity",
+      question: "Что красим: панель или ремешок?",
+      choices: ["панель", "ремешок"],
+    },
+  };
+  const primary = normalizeAgentResult(draft, demoData, job);
+  const unavailable = applyReviewerResult(
+    structuredClone(primary),
+    {
+      approved: false,
+      unavailable: true,
+      verdict: "Модель проверки временно недоступна",
+      notes: [],
+      blockingIssues: ["Transport timeout"],
+    },
+    "opencode-go/deepseek-v4-pro",
+    demoData,
+    job,
+  );
+
+  assert.equal(unavailable.zone, "yellow");
+  assert.equal(unavailable.route, "needs_info");
+  assert.equal(unavailable.commitment, "none");
+  assert.deepEqual(unavailable.reply, primary.reply);
+  assert.deepEqual(unavailable.missing, primary.missing);
+  assert.equal((unavailable.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.equal(unavailable.options.length, 0);
+  assert.match(unavailable.review.notes.join(" "), /недоступн/iu);
+  assert.equal(isCompleteAgentResult(unavailable), true);
+
+  const rejected = applyReviewerResult(
+    structuredClone(primary),
+    {
+      approved: false,
+      verdict: "Смысловой blocker требует ручной проверки",
+      notes: [],
+      blockingIssues: ["Кандидаты объекта сформулированы неточно"],
+    },
+    "opencode-go/deepseek-v4-pro",
+    demoData,
+    job,
+  );
+  assert.equal(rejected.zone, "red");
+  assert.equal(rejected.route, "manager");
+  assert.equal(rejected.commitment, "none");
+  assert.match(rejected.review.verdict, /ручн.+проверк/iu);
+  assert.equal(isCompleteAgentResult(rejected), true);
+});
+
+test("uses a generic ambiguity lead for a maximum-length single-token choice", () => {
+  const choice = "д".repeat(160);
+  const job = {
+    subject: "Фото необычного объекта",
+    body: "Покрасить это на фото.",
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent = {
+    ...draft.resolvedIntent,
+    target: {
+      state: "ambiguous",
+      candidates: [
+        { label: choice, confidence: 0.52, evidenceIds: ["request"] },
+        { label: "панель", confidence: 0.51, evidenceIds: ["request"] },
+      ],
+    },
+    blocker: {
+      kind: "target_ambiguity",
+      question: `Что красим: ${choice} или панель?`,
+      choices: [choice, "панель"],
+    },
+  };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const firstLine = result.reply.body.split("\n\n", 1)[0];
+
+  assert.ok(firstLine.length <= 180);
+  assert.equal(
+    firstLine,
+    "Вижу несколько одинаково правдоподобных целей; я уточню только объект и продолжу без повторных вопросов.",
+  );
+  assert.equal(result.resolvedIntent.target.candidates[0].label, choice);
+  assert.equal(result.resolvedIntent.blocker.choices[0], choice);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.match(result.reply.body, new RegExp(`${choice} или панель\\?`, "u"));
+});
+
+test("uses a generic ambiguity lead for a maximum-length spaced choice", () => {
+  const choice = "редкая конструкция для уточнения дополнительная деталь "
+    .repeat(3)
+    .trim()
+    .slice(0, 158)
+    .trim();
+  const job = {
+    subject: "Фото необычного объекта",
+    body: "Покрасить это на фото.",
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent = {
+    ...draft.resolvedIntent,
+    target: {
+      state: "ambiguous",
+      candidates: [
+        { label: choice, confidence: 0.52, evidenceIds: ["request"] },
+        { label: "панель", confidence: 0.51, evidenceIds: ["request"] },
+      ],
+    },
+    blocker: {
+      kind: "target_ambiguity",
+      question: `Что красим: ${choice} или панель?`,
+      choices: [choice, "панель"],
+    },
+  };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const firstLine = result.reply.body.split("\n\n", 1)[0];
+
+  assert.ok(firstLine.length <= 180);
+  assert.equal(
+    firstLine,
+    "Вижу несколько одинаково правдоподобных целей; я уточню только объект и продолжу без повторных вопросов.",
+  );
+  assert.equal(result.resolvedIntent.target.candidates[0].label, choice);
+  assert.equal(result.resolvedIntent.blocker.choices[0], choice);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.match(result.reply.body, new RegExp(`${choice} или панель\\?`, "u"));
+});
+
+test("latest explicit target outranks a conflicting vision target and does not publish a bogus question", () => {
+  const job = {
+    subject: "Покраска прибора",
+    body: "Покрасьте 1 кг краски на корпусе прибора, а не на припаркованной рядом машине.",
+    roundNo: 2,
+    conversation: [
+      {
+        role: "customer",
+        body: "Покрасьте 1 кг краски на корпусе прибора, а не на припаркованной рядом машине.",
+      },
+    ],
+    visionObservation: {
+      attachmentRef: "synthetic://appliance-car",
+      relevance: "relevant",
+      summary: "На фото видны прибор и машина рядом.",
+      visibleFacts: ["Два возможных объекта"],
+      targetCandidates: [],
+      uncertainties: [],
+    },
+  };
+  const draft = v2ResolvedDraft(job, { targetLabel: "припаркованная машина" });
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: [
+      { label: "корпус прибора", confidence: 0.51, evidenceIds: ["request"] },
+      { label: "припаркованная машина", confidence: 0.51, evidenceIds: ["request"] },
+    ],
+  };
+  draft.resolvedIntent.evidence.push({
+    id: "vision",
+    claim: "На фото видны прибор и машина рядом",
+    confidence: 0.8,
+    source: {
+      kind: "vision",
+      attachmentRef: "synthetic://appliance-car",
+      observation: "На фото видны прибор и машина рядом",
+    },
+  });
+  const result = normalizeAgentResult(draft, demoData, job);
+
+  assert.equal(result.route, "manager");
+  assert.notEqual(result.resolvedIntent.target.state, "ambiguous");
+  assert.doesNotMatch(result.reply.body, /что красим/iu);
+});
+
+test("preserves stored vision labels when the draft loses their distinguishing roots", () => {
+  const job = {
+    subject: "Покраска объекта на фото",
+    body: "Покрасьте это на фото.",
+  };
+  const storedCandidates = [
+    "модуль на плоской панели с меткой",
+    "модуль на круглой панели с насечкой",
+  ];
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: [
+      { label: "модуль на панели", confidence: 0.51, evidenceIds: ["request"] },
+      { label: "модуль на панели", confidence: 0.5, evidenceIds: ["request"] },
+    ],
+  };
+  draft.resolvedIntent.evidence.push({
+    id: "vision",
+    claim: "На фото видны два возможных модуля",
+    confidence: 0.8,
+    source: {
+      kind: "vision",
+      attachmentRef: "synthetic://neutral-objects",
+      observation: "На фото видны два возможных модуля",
+    },
+  });
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: "Что красим: модуль на панели или модуль на панели?",
+    choices: ["модуль на панели", "модуль на панели"],
+  };
+  job.visionObservation = {
+    attachmentRef: "synthetic://neutral-objects",
+    relevance: "relevant",
+    summary: "На фото видны два возможных модуля.",
+    targetCandidates: storedCandidates.map((label, index) => ({
+      label,
+      confidence: 0.7 - index / 10,
+      evidence: "Нейтральный видимый признак объекта.",
+    })),
+    visibleFacts: ["На фото видны два возможных модуля."],
+    uncertainties: [],
+  };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map((candidate) => candidate.label),
+    storedCandidates,
+  );
+  assert.deepEqual(result.resolvedIntent.blocker.choices, storedCandidates);
+  assert.equal(
+    result.resolvedIntent.blocker.question,
+    `Что красим: ${storedCandidates.join(" или ")}?`,
+  );
+});
+
+test("vague photo resolves the inanimate branch when the other draft branch is human", () => {
+  const job = {
+    subject: "Покраска объекта на фото",
+    body: "Покрасьте это на фото.",
+  };
+  const storedCandidates = ["Стена", "Поверхность стены", "Человек (задняя часть головы)"];
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: [
+      { label: "стена", confidence: 0.51, evidenceIds: ["request"] },
+      { label: "задняя часть головы", confidence: 0.5, evidenceIds: ["request"] },
+    ],
+  };
+  draft.resolvedIntent.evidence.push({
+    id: "vision",
+    claim: "На фото видны стена и задняя часть головы",
+    confidence: 0.8,
+    source: {
+      kind: "vision",
+      attachmentRef: "synthetic://wall-head",
+      observation: "На фото видны стена и задняя часть головы",
+    },
+  });
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: "Что красим: стена или задняя часть головы?",
+    choices: ["стена", "задняя часть головы"],
+  };
+  job.visionObservation = {
+    attachmentRef: "synthetic://wall-head",
+    relevance: "relevant",
+    summary: "На фото видны стена и задняя часть головы.",
+    visibleFacts: ["На фото видны стена и задняя часть головы."],
+    targetCandidates: storedCandidates.map((label, index) => ({
+      label,
+      confidence: 0.7 - index / 10,
+      evidence: "Нейтральный видимый признак объекта.",
+    })),
+    uncertainties: [],
+  };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.deepEqual(
+    result.visionObservation.targetCandidates.map((candidate) => candidate.label),
+    storedCandidates,
+  );
+  assert.deepEqual(result.visionObservation.visibleFacts, job.visionObservation.visibleFacts);
+});
+
+test("keeps stored vision candidate order when draft candidates are reordered", () => {
+  const job = {
+    subject: "Покраска объекта на фото",
+    body: "Покрасьте это на фото.",
+  };
+  const storedCandidates = [
+    "деталь с квадратной рамкой",
+    "деталь с круглым кольцом",
+  ];
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: [
+      { label: "деталь с кольцом", confidence: 0.51, evidenceIds: ["request"] },
+      { label: "деталь с рамкой", confidence: 0.5, evidenceIds: ["request"] },
+    ],
+  };
+  draft.resolvedIntent.evidence.push({
+    id: "vision",
+    claim: "На фото видны две детали",
+    confidence: 0.8,
+    source: {
+      kind: "vision",
+      attachmentRef: "synthetic://neutral-details",
+      observation: "На фото видны две детали",
+    },
+  });
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: "Что красим: деталь с кольцом или деталь с рамкой?",
+    choices: ["деталь с кольцом", "деталь с рамкой"],
+  };
+  job.visionObservation = {
+    attachmentRef: "synthetic://neutral-details",
+    relevance: "uncertain",
+    summary: "На фото видны две детали.",
+    targetCandidates: storedCandidates.map((label, index) => ({
+      label,
+      confidence: 0.75 - index / 10,
+      evidence: "Нейтральный видимый признак объекта.",
+    })),
+    visibleFacts: ["На фото видны две детали."],
+    uncertainties: ["Точная цель не подтверждена."],
+  };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map((candidate) => candidate.label),
+    storedCandidates,
+  );
+  assert.deepEqual(result.resolvedIntent.blocker.choices, storedCandidates);
+});
+
+test("trusted substrate evidence blocks construction paint on human surfaces", () => {
+  for (const target of ["ладонь", "ресницы", "губы", "кисть руки"]) {
+    const job = {
+      subject: "Нестандартная поверхность",
+      body: `Нужно покрасить 1 кг краски на ${target}.`,
+    };
+    const draft = v2ResolvedDraft(job, {
+      targetLabel: target,
+      commitment: "commercial_offer",
+    });
+    draft.product = { sku: "КР-004", requestedKg: 1 };
+    draft.resolvedIntent.evidence.push({
+      id: "fabricated-substrate",
+      claim: "Основание — штукатурка",
+      confidence: 1,
+      source: { kind: "message", roundNo: 1, quote: job.body },
+    });
+    const result = normalizeAgentResult(draft, demoData, job);
+    assert.equal(result.product, null, target);
+    assert.notEqual(result.commitment, "commercial_offer", target);
+    assert.doesNotMatch(JSON.stringify(result), /КР-004|строительн.*краск/iu, target);
+  }
+});
+
+test("target fit survives a trusted substrate only when the target itself matches catalog", () => {
+  const target = "штукатурная стена";
+  const job = {
+    subject: "Штукатурная стена",
+    body: `Нужно покрасить ${target}; substrate plaster.`,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: target,
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "paint_quantity",
+        range: { min: 1, max: 2, unit: "кг" },
+        method: "Оценка по заявке",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.6,
+        candidateSku: "КР-004",
+      },
+    ],
+  });
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  assert.equal(result.estimates[0].candidateSku, "КР-004");
+});
+
+test("does not turn a substrate claim into an exact offer for unknown application targets", () => {
+  const cases = [
+    "металлическая ладонь",
+    "металлические ресницы",
+  ];
+
+  for (const targetLabel of cases) {
+    const job = {
+      subject: `Заказ КР-001 для ${targetLabel}`,
+      body: `Нужно 20 кг КР-001 для ${targetLabel}. Материал — металл.`,
+    };
+    const result = normalizeV2AgentResult(
+      v2ResolvedDraft(job, { targetLabel, commitment: "commercial_offer" }),
+      demoData,
+      job,
+    );
+
+    assert.equal(result.product, null, targetLabel);
+    assert.notEqual(result.commitment, "commercial_offer", targetLabel);
+    assert.notEqual(result.route, "ready", targetLabel);
+  }
+});
+
+test("keeps bare SKU procurement and catalog application compatibility", () => {
+  const shortageJob = {
+    subject: "Заказ КР-001",
+    body: "Нужно 2000 кг КР-001.",
+  };
+  const shortage = normalizeV2AgentResult(
+    v2ResolvedDraft(shortageJob, {
+      targetLabel: "КР-001",
+      commitment: "commercial_offer",
+    }),
+    demoData,
+    shortageJob,
+  );
+  assert.equal(shortage.product?.sku, "КР-001");
+  assert.equal(shortage.commitment, "commercial_offer");
+  assert.equal(shortage.product?.stockKg, 300);
+
+  const applicationJob = {
+    subject: "Покраска металлической поверхности",
+    body: "Нужно покрытие для металлической поверхности.",
+  };
+  const application = normalizeV2AgentResult(
+    v2ResolvedDraft(applicationJob, {
+      targetLabel: "металлическая поверхность",
+      commitment: "estimate",
+      estimates: [
+        {
+          metric: "paint_quantity",
+          range: { min: 2, max: 4, unit: "кг" },
+          method: "Диапазон по описанию задачи",
+          evidenceIds: ["request"],
+          assumptionIds: [],
+          confidence: 0.7,
+          candidateSku: "КР-001",
+        },
+      ],
+    }),
+    demoData,
+    applicationJob,
+  );
+  assert.equal(application.estimates[0].candidateSku, "КР-001");
+  assert.equal(application.product, null);
+});
+
+test("arbitrary target labels cannot inherit a construction SKU from substrate copy", () => {
+  for (const target of ["ладонь", "ресницы", "губы", "кисть руки", "arm", "synthetic unknown"]) {
+    const job = {
+      subject: "Нестандартная поверхность",
+      body: `Нужно покрасить ${target}; substrate plaster.`,
+    };
+    const draft = v2ResolvedDraft(job, {
+      targetLabel: target,
+      commitment: "commercial_offer",
+    });
+    draft.product = { sku: "КР-004", requestedKg: 1 };
+    const result = normalizeV2AgentResult(draft, demoData, job);
+    assert.equal(result.product, null, target);
+    assert.notEqual(result.commitment, "commercial_offer", target);
+  }
+});
+
+test("never treats an SKU embedded in a human target as compatibility proof", () => {
+  const targets = ["ладони", "ресниц", "губ", "руки", "arm"];
+
+  for (const target of targets) {
+    const job = {
+      subject: `Заказ КР-001 для ${target}`,
+      body: `Нужно 20 кг КР-001 для ${target}. Материал — металл.`,
+    };
+    const draft = v2ResolvedDraft(job, {
+      targetLabel: `КР-001 для ${target}`,
+      assumptions: [
+        {
+          id: "fabricated-substrate",
+          claim: "Основание объекта — металл",
+          basedOnEvidenceIds: ["request"],
+          confidence: 1,
+          confirmBefore: "never",
+        },
+      ],
+      commitment: "commercial_offer",
+      estimates: [],
+      product: { sku: "КР-001", requestedKg: 20 },
+      zone: "green",
+      decision: "quote",
+      route: "ready",
+    });
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.equal(result.route, "manager", target);
+    assert.equal(result.commitment, "none", target);
+    assert.equal(result.product, null, target);
+    assert.equal(result.estimates.length, 0, target);
+    assert.doesNotMatch(
+      `${result.commitment} ${result.reply.body}`,
+      /commercial_offer|подтверждаем.*20\s*кг|349\s*₽/iu,
+      target,
+    );
+    assert.equal(isCompleteAgentResult(result), true, target);
+  }
+});
+
+test("keeps a clean SKU procurement order on the canonical shortage path", () => {
+  const job = {
+    subject: "Заказ КР-001",
+    body: "Нужно 2000 кг КР-001.",
+  };
+  const result = normalizeV2AgentResult(
+    v2ResolvedDraft(job, {
+      targetLabel: "КР-001",
+      commitment: "commercial_offer",
+      estimates: [],
+      product: { sku: "КР-001", requestedKg: 999 },
+      zone: "red",
+      decision: "escalate",
+      route: "manager",
+    }),
+    demoData,
+    job,
+  );
+
+  assert.equal(result.product.sku, "КР-001");
+  assert.equal(result.product.requestedKg, 2000);
+  assert.equal(result.product.stockKg, 300);
+  assert.equal(result.product.requestedKg - result.product.stockKg, 1700);
+  assert.equal(result.commitment, "commercial_offer");
+  assert.equal(result.route, "manager");
+  assert.equal(isCompleteAgentResult(result), true);
+});
+
+test("allows a candidate SKU only when the resolved target matches a catalog substrate", () => {
+  const job = {
+    subject: "Покраска металла",
+    body: "Нужно 20 кг покрытия для металлической поверхности.",
+  };
+  const result = normalizeV2AgentResult(
+    v2ResolvedDraft(job, {
+      targetLabel: "металлическая поверхность",
+      assumptions: [],
+      commitment: "estimate",
+      estimates: [
+        {
+          metric: "surface_area",
+          range: { min: 8, max: 12, unit: "м²" },
+          method: "Диапазон площади по заявке",
+          evidenceIds: ["request"],
+          assumptionIds: [],
+          confidence: 0.8,
+        },
+        {
+          metric: "paint_quantity",
+          range: { min: 2, max: 4, unit: "кг" },
+          method: "Диапазон расхода по каталогу",
+          evidenceIds: ["request"],
+          assumptionIds: [],
+          confidence: 0.7,
+          candidateSku: "КР-001",
+        },
+      ],
+      product: null,
+    }),
+    demoData,
+    job,
+  );
+
+  assert.equal(result.commitment, "estimate");
+  assert.equal(result.estimates[1].candidateSku, "КР-001");
+  assert.equal(result.product, null);
+  assert.equal(isCompleteAgentResult(result), true);
+});
+
+function visionAmbiguousCase({ storedCandidates, primaryCandidates }) {
+  const job = {
+    visionObservation: {
+      attachmentRef: "synthetic://vision-only",
+      relevance: "relevant",
+      summary: "На фото видны несколько возможных целей.",
+      visibleFacts: ["На фото видны несколько возможных целей."],
+      targetCandidates: storedCandidates,
+      uncertainties: [],
+    },
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: primaryCandidates,
+  };
+  draft.resolvedIntent.evidence = [
+    {
+      id: "vision",
+      claim: "На фото видны несколько возможных целей",
+      confidence: 0.9,
+      source: {
+        kind: "vision",
+        attachmentRef: "synthetic://vision-only",
+        observation: "На фото видны несколько возможных целей",
+      },
+    },
+  ];
+  draft.resolvedIntent.target.candidates.forEach(
+    (candidate) => (candidate.evidenceIds = ["vision"]),
+  );
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: `Что красим: ${primaryCandidates.map(({ label }) => label).join(" или ")}?`,
+    choices: primaryCandidates.map(({ label }) => label),
+  };
+  return { job, draft };
+}
+
+test("does not expand a model-declared ambiguous pair with vision distractors", () => {
+  for (const seed of [17, 29]) {
+    const labels = [`узел ${seed} слева`, `узел ${seed} справа`];
+    const { job, draft } = visionAmbiguousCase({
+      primaryCandidates: labels.map((label, index) => ({
+        label,
+        confidence: 0.8 - index / 10,
+      })),
+      storedCandidates: [
+        ...labels.map((label, index) => ({
+          label,
+          confidence: 0.8 - index / 10,
+          evidence: `Видимый признак ${label}`,
+        })),
+        ...Array.from({ length: 3 }, (_, index) => ({
+          label: `посторонний объект ${seed}-${index}`,
+          confidence: 0.5 - index / 10,
+          evidence: `Отдельный видимый объект ${index}`,
+        })),
+      ],
+    });
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.deepEqual(
+      result.resolvedIntent.target.candidates.map(({ label }) => label),
+      labels,
+    );
+    assert.ok(
+      result.resolvedIntent.target.candidates.every(({ evidenceIds }) =>
+        evidenceIds.includes("vision"),
+      ),
+    );
+    assert.deepEqual(result.resolvedIntent.blocker.choices, labels);
+    assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity");
+    assert.equal(result.missing.length, 1);
+    assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+    assert.equal(isCompleteAgentResult(result), true);
+  }
+});
+
+test("refines one grounded human surface without admitting vision distractors", () => {
+  for (const [seed, surface] of [[41, "волосы"], [53, "ладонь"]]) {
+    const object = `узел ${seed}`;
+    const storedCandidates = [
+      { label: object, confidence: 0.8, evidence: `Виден ${object}` },
+      { label: "человек", confidence: 0.6, evidence: "Виден человек" },
+      { label: surface, confidence: 0.4, evidence: `Видна ${surface} человека` },
+      { label: `посторонняя деталь ${seed}`, confidence: 0.2, evidence: "Видна отдельно" },
+    ];
+    const { job, draft } = visionAmbiguousCase({
+      storedCandidates,
+      primaryCandidates: [
+        { label: object, confidence: 0.8 },
+        { label: "человек", confidence: 0.6 },
+      ],
+    });
+    job.visionObservation.visibleFacts = [
+      `В кадре виден ${object}.`,
+      `${surface} человека видна отдельно.`,
+      `Посторонняя деталь ${seed} находится сбоку.`,
+    ];
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.deepEqual(result.resolvedIntent.blocker.choices, [
+      object,
+      `${surface} человека`,
+    ]);
+    assert.ok(
+      testVisionRoots(result.resolvedIntent.blocker.choices[1]).length >= 2,
+    );
+    assert.equal(result.missing.length, 1);
+    assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+    assert.equal(isCompleteAgentResult(result), true);
+  }
+
+  for (const specificSurfaces of [[], ["волосы", "ладонь"]]) {
+    const object = `нейтральный узел ${specificSurfaces.length}`;
+    const storedCandidates = [
+      { label: object, confidence: 0.8, evidence: `Виден ${object}` },
+      { label: "человек", confidence: 0.6, evidence: "Виден человек" },
+      ...specificSurfaces.map((label, index) => ({
+        label,
+        confidence: 0.4 - index / 10,
+        evidence: `Видна ${label} человека`,
+      })),
+    ];
+    const { job, draft } = visionAmbiguousCase({
+      storedCandidates,
+      primaryCandidates: [
+        { label: object, confidence: 0.8 },
+        { label: "человек", confidence: 0.6 },
+      ],
+    });
+    job.visionObservation.visibleFacts = [
+      `Виден ${object}.`,
+      "Виден человек.",
+      ...specificSurfaces.map((label) => `Видна ${label} человека.`),
+    ];
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.deepEqual(result.resolvedIntent.blocker.choices, [object, "человек"]);
+    assert.equal(isCompleteAgentResult(result), true);
+  }
+});
+
+test("keeps an unknown SKU only as an unconfirmed customer fact", () => {
+  for (const sku of ["ZX-41", "QY-52"]) {
+    const job = {
+      subject: `Повторный заказ ${sku}`,
+      body: `Нужно 12 банок ${sku} для металлической панели.`,
+      openedSourceUrls: ["https://example.com/audit"],
+      openedSources: [
+        openedWeb(
+          "https://example.com/audit",
+          "Открытая страница содержит общую справочную информацию.",
+        ),
+      ],
+    };
+    const draft = v2ResolvedDraft(job, {
+      targetLabel: `${sku} для металлической панели`,
+      commitment: "estimate",
+      estimates: [
+        {
+          metric: "paint_quantity",
+          range: { min: 120, max: 168, unit: "кг" },
+          method: "Расчёт по заявленной фасовке неизвестного кода",
+          evidenceIds: ["request"],
+          assumptionIds: ["pack", "properties", "compatibility", "fit"],
+          confidence: 0.8,
+          candidateSku: sku,
+        },
+      ],
+    });
+    draft.product = { sku, requestedKg: 168 };
+    draft.resolvedIntent.assumptions = [
+      ["pack", `${sku} поставляется в банках по 14 кг`],
+      ["properties", `${sku} обладает промышленными защитными свойствами`],
+      ["compatibility", `${sku} совместим с металлической панелью`],
+      ["fit", `${sku} пригоден для заявленной эксплуатации`],
+    ].map(([id, claim]) => ({
+      id,
+      claim,
+      basedOnEvidenceIds: ["request"],
+      confidence: 0.8,
+      confirmBefore: "commercial_offer",
+    }));
+    delete draft.review;
+
+    const primary = normalizeV2AgentResult(draft, demoData, job);
+    assert.equal(isCompleteAgentResult(primary), false);
+    const result = applyReviewerResult(
+      primary,
+      {
+        schemaVersion: 2,
+        approved: true,
+        verdict: "Граница неизвестного артикула проверена",
+        notes: [],
+        blockingIssues: [],
+      },
+      "test-reviewer",
+      demoData,
+      job,
+    );
+
+    assert.equal(result.product, null);
+    assert.deepEqual(result.estimates, []);
+    assert.deepEqual(result.resolvedIntent.assumptions, []);
+    assert.equal(result.resolvedIntent.target.label, "металлической панели");
+    assert.match(result.resolvedIntent.evidence[0].claim, /металлическ.+панел/iu);
+    assert.ok(
+      result.resolvedIntent.evidence.some(
+        ({ source }) => source.kind === "message" && source.quote.includes(sku),
+      ),
+    );
+    assert.ok(
+      result.resolvedIntent.evidence.some(({ source }) => source.kind === "web"),
+    );
+    const clientCopy = [
+      result.reply.subject,
+      result.reply.body,
+      ...result.options.flatMap((option) => [option.title, option.reply]),
+    ].join(" ");
+    assert.equal(clientCopy.includes(sku), false);
+    assert.equal(isCompleteAgentResult(result), true);
+  }
+
+  const job = { subject: "Повторный заказ ZZ-63", body: "Повторить ZZ-63." };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "ZZ-63 для волшебной капсулы",
+  });
+  draft.resolvedIntent.assumptions = [{
+    id: "invented-fit",
+    claim: "ZZ-63 подходит для волшебной капсулы",
+    basedOnEvidenceIds: ["request"],
+    confidence: 0.8,
+    confirmBefore: "commercial_offer",
+  }];
+
+  const negative = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(
+    negative.resolvedIntent.target.label,
+    "неподтверждённый артикул из запроса клиента",
+  );
+  assert.deepEqual(negative.resolvedIntent.assumptions, []);
+  assert.doesNotMatch(
+    `${negative.reply.body} ${negative.resolvedIntent.evidence[0].claim}`,
+    /ZZ-63|волшебн.+капсул/iu,
+  );
+
+  const englishJob = {
+    subject: "Repeat order KLR-X9",
+    body: "Need 12 tins KLR-X9 Midnight Satin for concrete office walls.",
+    openedSourceUrls: ["https://example.com/catalog"],
+    openedSources: [
+      openedWeb(
+        "https://example.com/catalog",
+        "Поставщик публикует общий каталог покрытий для бетонных стен.",
+      ),
+    ],
+  };
+  const englishDraft = v2ResolvedDraft(englishJob, {
+    targetLabel: "concrete office walls",
+  });
+  englishDraft.supplierLeads = [
+    {
+      supplier: "Публичный поставщик",
+      url: "https://example.com/catalog",
+      openedAt: "2026-08-03T00:00:00.000Z",
+      observedClaims: [
+        "Поставщик публикует общий каталог покрытий для бетонных стен.",
+      ],
+      confirmationNeeded: [
+        "Наличие KLR-X9 Midnight Satin или совместимой краски для бетонных стен в объёме 12 банок",
+      ],
+    },
+  ];
+
+  const englishResult = normalizeV2AgentResult(
+    englishDraft,
+    demoData,
+    englishJob,
+  );
+
+  assert.doesNotMatch(englishResult.reply.body, /«\s*»/u);
+  assert.match(englishResult.reply.body, /понял.+указанн.+артикул/iu);
+  assert.doesNotMatch(englishResult.reply.body, /KLR-X9|Midnight Satin/iu);
+  assert.deepEqual(englishResult.supplierLeads, []);
+});
+
+function testVisionRoots(value) {
+  return [
+    ...new Set(
+      (
+        String(value ?? "")
+          .normalize("NFKC")
+          .toLocaleLowerCase("ru-RU")
+          .replace(/ё/gu, "е")
+          .match(/[\p{L}\p{N}]{3,}/gu) ?? []
+      ).map((word) => word.slice(0, Math.min(4, word.length))),
+    ),
+  ];
+}
+
+function testVisionRootsOverlap(left, right) {
+  return left === right || left.startsWith(right) || right.startsWith(left);
+}
+
+function uniqueAlignedVisibleFact(visibleFacts, primaryLabel, genericLabel) {
+  const genericRoots = testVisionRoots(genericLabel);
+  const concretePrimaryRoots = testVisionRoots(primaryLabel).filter(
+    (root) => !genericRoots.some((genericRoot) => testVisionRootsOverlap(root, genericRoot)),
+  );
+  const scored = visibleFacts.map((fact) => ({
+    fact,
+    score: concretePrimaryRoots.filter((root) =>
+      testVisionRoots(fact).some((factRoot) => testVisionRootsOverlap(root, factRoot)),
+    ).length,
+  }));
+  const highestScore = Math.max(0, ...scored.map(({ score }) => score));
+  const highest = scored.filter(({ score }) => score === highestScore);
+  return highestScore > 0 && highest.length === 1 ? highest[0].fact : null;
+}
+
+test("allows a supported primary label to specialize exactly one stored candidate", () => {
+  const storedCandidates = [
+    { label: "Человек (вид сзади)", confidence: 0.71, evidence: "Задняя часть головы с тёмными волосами" },
+    { label: "красная стена", confidence: 0.62, evidence: "Плоская красная поверхность" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Задняя часть головы с тёмными волосами", confidence: 0.99, evidenceIds: ["vision"] },
+      { label: "красная стена", confidence: 0.98, evidenceIds: ["vision"] },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map((candidate) => ({
+      label: candidate.label,
+      confidence: candidate.confidence,
+      evidenceIds: candidate.evidenceIds,
+    })),
+    [
+      { label: "Задняя часть головы с тёмными волосами", confidence: 0.71, evidenceIds: ["vision"] },
+      { label: "красная стена", confidence: 0.62, evidenceIds: ["vision"] },
+    ],
+  );
+  assert.deepEqual(result.resolvedIntent.blocker.choices, [
+    "Задняя часть головы с тёмными волосами",
+    "красная стена",
+  ]);
+  assert.deepEqual(
+    result.visionObservation.targetCandidates,
+    job.visionObservation.targetCandidates,
+  );
+  assert.deepEqual(result.visionObservation.visibleFacts, job.visionObservation.visibleFacts);
+});
+
+test("keeps structured human detail as context for a vague photo target", () => {
+  const humanStoredCandidate = {
+    label: "Человек",
+    confidence: 0.15,
+    evidence: "Видимая часть человека — голова и плечи, viewed from behind",
+  };
+  const humanPrimaryCandidate = {
+    label: "Голова и плечи человека (вид со спины)",
+    confidence: 0.15,
+    evidenceIds: ["vision"],
+  };
+  const storedCandidates = [
+    { label: "Стена", confidence: 0.85, evidence: "Основная видимая поверхность, типичный объект окраски" },
+    { label: "Рамка на стене", confidence: 0.5, evidence: "Прямоугольный объект на стене, видимая часть интерьера" },
+    humanStoredCandidate,
+    { label: "Пол", confidence: 0.1, evidence: "Нижняя часть изображения, видимая поверхность" },
+  ];
+  const primaryCandidates = [
+    { label: "Стена (светлая, с рамкой)", confidence: 0.85, evidenceIds: ["vision"] },
+    { label: "Рамка на стене", confidence: 0.5, evidenceIds: ["vision"] },
+    { label: "Пол", confidence: 0.1, evidenceIds: ["vision"] },
+    humanPrimaryCandidate,
+  ];
+  const { job, draft } = visionAmbiguousCase({ storedCandidates, primaryCandidates });
+  job.visionObservation = {
+    attachmentRef: "synthetic://equal-targets",
+    relevance: "relevant",
+    summary: "На изображении видна светлая стена с прямоугольной рамкой и человек, смотрящий на стену спиной.",
+    visibleFacts: [
+      "Светлая стена занимает большую часть изображения",
+      "Прямоугольная рамка без содержимого на стене",
+      "Человек с тёмными волосами спиной к камере",
+      "Человек в серой одежде",
+    ],
+    targetCandidates: storedCandidates,
+    uncertainties: [],
+  };
+  job.subject = "Проверка по фотографии";
+  job.body = "покрасить это";
+  job.roundNo = 1;
+  draft.resolvedIntent.evidence[0].source.attachmentRef =
+    job.visionObservation.attachmentRef;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const labels = result.resolvedIntent.target.candidates.map(({ label }) => label);
+
+  assert.ok(labels.length >= 2);
+  assert.ok(labels.every((label) => !/человек|голов|волос/iu.test(label)));
+  assert.deepEqual(result.resolvedIntent.blocker.choices, labels);
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+});
+
+test("specializes a generic human candidate from its grounded vision support", () => {
+  const storedCandidates = [
+    {
+      label: "Стена",
+      confidence: 0.85,
+      evidence: "Основной объект на фото, ровная матовая поверхность",
+    },
+    {
+      label: "Человек",
+      confidence: 0.3,
+      evidence: "Видна задняя часть головы с тёмными волосами и плечи",
+    },
+    {
+      label: "Плинтус",
+      confidence: 0.4,
+      evidence: "Белая горизонтальная планка внизу стены",
+    },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Стена", confidence: 0.85, evidenceIds: ["vision"] },
+      { label: "Человек", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary =
+    "На фото видна стена и вид сзади на голову человека с тёмными волосами.";
+  job.visionObservation.visibleFacts = [
+    "Стена светлого бежевого цвета",
+    "В правой части кадра видна задняя часть головы человека с тёмными волосами",
+    "Внизу стены белый плинтус",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const choices = result.resolvedIntent.blocker.choices;
+
+  assert.equal(choices.length, 2);
+  assert.equal(choices[0], "Стена");
+  assert.match(choices[1], /волос/iu);
+  assert.doesNotMatch(choices[1], /^человек$/iu);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+});
+
+test("specializes from one unique neutral visible feature instead of broad primary anatomy", () => {
+  const humanStoredCandidate = {
+    label: "Человек",
+    confidence: 0.6,
+    evidence: "Видимая часть человека в кадре",
+  };
+  const humanPrimaryCandidate = {
+    label: "Человек (вид справа)",
+    confidence: 0.6,
+    evidenceIds: ["vision"],
+  };
+  const storedCandidates = [
+    { label: "Секция", confidence: 0.4, evidence: "Плоская часть объекта" },
+    humanStoredCandidate,
+  ];
+  const primaryCandidates = [
+    { label: "Секция", confidence: 0.4, evidenceIds: ["vision"] },
+    humanPrimaryCandidate,
+  ];
+  const { job, draft } = visionAmbiguousCase({ storedCandidates, primaryCandidates });
+  job.visionObservation.summary = "На фото видны секция и человек с нейтральными признаками.";
+  job.visionObservation.visibleFacts = [
+    "Секция с бирюзовой отметкой",
+    "Человек с янтарной меткой справа",
+    "Человек в синем плаще",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const alignedFact = uniqueAlignedVisibleFact(
+    job.visionObservation.visibleFacts,
+    humanPrimaryCandidate.label,
+    humanStoredCandidate.label,
+  );
+  const labels = result.resolvedIntent.target.candidates.map(({ label }) => label);
+
+  assert.ok(alignedFact);
+  assert.ok(labels.includes(alignedFact));
+  assert.equal(labels.includes(humanPrimaryCandidate.label), false);
+  assert.deepEqual(result.resolvedIntent.blocker.choices, labels);
+});
+
+test("keeps a generic human label when the best visible-feature score ties", () => {
+  const storedCandidates = [
+    { label: "Секция", confidence: 0.4, evidence: "Плоская часть объекта" },
+    { label: "Человек", confidence: 0.6, evidence: "Видимая часть человека в кадре" },
+  ];
+  const primaryCandidates = [
+    { label: "Секция", confidence: 0.4, evidenceIds: ["vision"] },
+    { label: "Человек (вид справа)", confidence: 0.6, evidenceIds: ["vision"] },
+  ];
+  const { job, draft } = visionAmbiguousCase({ storedCandidates, primaryCandidates });
+  job.visionObservation.visibleFacts = [
+    "Человек с янтарной меткой справа",
+    "Человек с бирюзовой меткой справа",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const labels = result.resolvedIntent.target.candidates.map(({ label }) => label);
+
+  assert.ok(labels.includes("Человек"));
+  assert.equal(labels.includes("Человек (вид справа)"), false);
+  assert.equal(labels.some((label) => label.includes("меткой")), false);
+});
+
+test("does not specialize a generic human candidate without one concrete supported sense", () => {
+  const storedCandidates = [
+    { label: "Человек", confidence: 0.7, evidence: "Видимая часть человека в кадре" },
+    { label: "Стена", confidence: 0.3, evidence: "Плоская поверхность" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Человек", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Стена", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["Человек", "Стена"]);
+});
+
+test("does not guess between conflicting concrete human senses", () => {
+  const storedCandidates = [
+    { label: "Человек", confidence: 0.7, evidence: "Видимая часть человека — голова и плечи" },
+    { label: "Стена", confidence: 0.3, evidence: "Плоская поверхность" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Голова и плечи человека", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Руки и пальцы человека", confidence: 0.6, evidenceIds: ["vision"] },
+      { label: "Стена", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.visibleFacts = [
+    "Человек виден в кадре",
+    "Видимая часть человека — голова и плечи",
+    "Руки и пальцы человека видны в кадре",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["Человек", "Стена"]);
+});
+
+test("keeps neutral inanimate labels unchanged while specializing only the human branch", () => {
+  const storedCandidates = [
+    { label: "Секция", confidence: 0.7, evidence: "Основная видимая часть объекта" },
+    { label: "Человек", confidence: 0.6, evidence: "Видимая часть человека — голова и плечи" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Секция", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Голова и плечи человека", confidence: 0.6, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary = "На фото видны секция и человек, видны голова и плечи.";
+  job.visionObservation.visibleFacts = [
+    "Секция",
+    "Человек, видны голова и плечи",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, [
+    "Секция",
+    job.visionObservation.visibleFacts[1],
+  ]);
+});
+
+test("does not promote personal or demographic facts into a human target label", () => {
+  const storedCandidates = [
+    { label: "Человек", confidence: 0.7, evidence: "Видимая часть человека в кадре" },
+    { label: "Секция", confidence: 0.2, evidence: "Видимая часть объекта" },
+    { label: "Панель", confidence: 0.1, evidence: "Плоская видимая поверхность" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "Человек", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Женщина", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Секция", confidence: 0.2, evidenceIds: ["vision"] },
+      { label: "Панель", confidence: 0.1, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.visibleFacts = [
+    "Женщина в кадре",
+    "Секция и панель видны рядом",
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.equal(result.product, null);
+  assert.doesNotMatch(JSON.stringify(result), /женщин|мужчин|лет/iu);
+});
+
+test("keeps a defect-form stored target grounded by bounded own evidence without duplicating a primary paraphrase", () => {
+  const storedCandidates = [
+    { label: "элемент", confidence: 0.71, evidence: "Узкая синяя полоска и ровный край" },
+    { label: "плоская основа", confidence: 0.62, evidence: "Ровная светлая поверхность" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "элемент", confidence: 0.51, evidenceIds: ["vision"] },
+      { label: "элемент с обратной стороны справа", confidence: 0.5, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.visibleFacts = ["Элемент с обратной стороны справа виден в кадре."];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const choices = result.resolvedIntent.blocker.choices;
+
+  assert.equal(choices.length, 2);
+  assert.match(choices[0], /^элемент \(Узкая синяя полоска и ровный край\)$/u);
+  assert.match(choices[0], /полоск/u);
+  assert.equal(choices[1], "плоская основа");
+  assert.equal(new Set(choices).size, choices.length);
+});
+
+test("keeps an exact compact one-word stored target exact without own-evidence expansion", () => {
+  const storedCandidates = [
+    { label: "стена", confidence: 0.71, evidence: "Стена занимает заметную часть фона" },
+    { label: "человек", confidence: 0.62, evidence: "Волосы человека видны в кадре" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: [
+      { label: "стена", confidence: 0.51, evidenceIds: ["vision"] },
+      { label: "человек", confidence: 0.5, evidenceIds: ["vision"] },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["стена", "человек"]);
+});
+
+test("does not replace a stored label with unsupported primary anatomy", () => {
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates: [
+      { label: "Человек (вид сзади)", confidence: 0.71, evidence: "Задняя часть головы с тёмными волосами" },
+      { label: "красная стена", confidence: 0.62, evidence: "Плоская красная поверхность" },
+    ],
+    primaryCandidates: [
+      { label: "Затылок", confidence: 0.99, evidenceIds: ["vision"] },
+      { label: "красная стена", confidence: 0.98, evidenceIds: ["vision"] },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map(({ label }) => label),
+    ["Человек (вид сзади)", "красная стена"],
+  );
+});
+
+test("does not specialize when a primary label matches two stored candidates", () => {
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates: [
+      { label: "левая деталь", confidence: 0.71, evidence: "красная металлическая ручка" },
+      { label: "правая деталь", confidence: 0.62, evidence: "красная металлическая ручка" },
+    ],
+    primaryCandidates: [
+      { label: "красная металлическая ручка", confidence: 0.99, evidenceIds: ["vision"] },
+      { label: "общая зона", confidence: 0.98, evidenceIds: ["vision"] },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map(({ label }) => label),
+    ["левая деталь", "правая деталь"],
+  );
+});
+
+function visionPrimaryAppendCase({ storedCandidates, visibleFacts, primaryCandidates }) {
+  const job = {
+    subject: "Покрасить фрагменты",
+    body: "Покрасить это на фото.",
+    visionObservation: {
+      attachmentRef: "synthetic://bounded-primary-append",
+      relevance: "relevant",
+      summary: "На фото видны четыре сохранённых фрагмента и тёмный фрагмент с серой полосой.",
+      visibleFacts,
+      targetCandidates: storedCandidates,
+      uncertainties: [],
+    },
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = { state: "ambiguous", candidates: primaryCandidates };
+  draft.resolvedIntent.evidence = [{
+    id: "vision",
+    claim: "На фото видны несколько возможных целей.",
+    confidence: 0.9,
+    source: {
+      kind: "vision",
+      attachmentRef: "synthetic://bounded-primary-append",
+      observation: "На фото видны несколько возможных целей.",
+    },
+  }];
+  draft.resolvedIntent.target.candidates.forEach(
+    (candidate) => (candidate.evidenceIds = ["vision"]),
+  );
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: `Что красим: ${primaryCandidates.map(({ label }) => label).join(" или ")}?`,
+    choices: primaryCandidates.map(({ label }) => label),
+  };
+  return { job, draft };
+}
+
+test("appends one fully supported unmatched primary candidate without changing stored vision", () => {
+  const storedCandidates = [
+    { label: "светлый фрагмент", confidence: 0.9, evidence: "ровная структура" },
+    { label: "квадратный фрагмент", confidence: 0.8, evidence: "угловая форма" },
+    { label: "нижний фрагмент", confidence: 0.7, evidence: "нижняя граница" },
+    { label: "плоский фрагмент", confidence: 0.6, evidence: "плоская поверхность" },
+  ];
+  const visibleFacts = [
+    "Светлый фрагмент с ровной структурой",
+    "Квадратный фрагмент с угловой формой",
+    "Нижний фрагмент с нижней границей",
+    "Плоский фрагмент с плоской поверхностью",
+    "Тёмный фрагмент с серой полосой",
+  ];
+  const primaryCandidates = [
+    ...storedCandidates.map(({ label }, index) => ({
+      label,
+      confidence: 0.9 - index / 10,
+      evidenceIds: ["vision"],
+    })),
+    { label: "тёмный фрагмент с серой полосой", confidence: 0.3, evidenceIds: ["vision"] },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({ storedCandidates, visibleFacts, primaryCandidates });
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, [
+    ...storedCandidates.map(({ label }) => label),
+    "тёмный фрагмент с серой полосой",
+  ]);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.deepEqual(result.visionObservation.targetCandidates, storedCandidates);
+});
+
+test("does not append a primary candidate whose roots are split across visible facts", () => {
+  const storedCandidates = [
+    { label: "светлый фрагмент", confidence: 0.9, evidence: "ровная структура" },
+    { label: "квадратный фрагмент", confidence: 0.8, evidence: "угловая форма" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["Тёмный фрагмент", "Серая полоса"],
+    primaryCandidates: [
+      ...storedCandidates.map(({ label }, index) => ({
+        label,
+        confidence: 0.9 - index / 10,
+        evidenceIds: ["vision"],
+      })),
+      { label: "тёмный фрагмент с серой полосой", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary = "На фото видны сохранённые фрагменты.";
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["светлый фрагмент", "квадратный фрагмент"]);
+});
+
+test("does not build a composite own-evidence label from roots split across vision items", () => {
+  const storedCandidates = [
+    { label: "деталь", confidence: 0.9, evidence: "Нейтральный видимый признак" },
+    { label: "второй объект", confidence: 0.8, evidence: "Другой нейтральный признак" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["На фото видна деталь с синим кольцом"],
+    primaryCandidates: [
+      { label: "деталь с янтарной рамкой и синим кольцом", confidence: 0.9, evidenceIds: ["vision"] },
+      { label: "второй объект", confidence: 0.8, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary = "На фото видна деталь с янтарной рамкой.";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["деталь", "второй объект"]);
+  assert.deepEqual(
+    result.resolvedIntent.target.candidates.map(({ label }) => label),
+    ["деталь", "второй объект"],
+  );
+  assert.deepEqual(
+    result.visionObservation.targetCandidates.map(({ label }) => label),
+    ["деталь", "второй объект"],
+  );
+});
+
+test("does not append an unsupported primary candidate", () => {
+  const storedCandidates = [
+    { label: "светлый фрагмент", confidence: 0.9, evidence: "ровная структура" },
+    { label: "квадратный фрагмент", confidence: 0.8, evidence: "угловая форма" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["Светлый фрагмент", "Квадратный фрагмент"],
+    primaryCandidates: [
+      ...storedCandidates.map(({ label }, index) => ({
+        label,
+        confidence: 0.9 - index / 10,
+        evidenceIds: ["vision"],
+      })),
+      { label: "неподдержанный фрагмент", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["светлый фрагмент", "квадратный фрагмент"]);
+});
+
+test("does not append an invented human candidate without immutable human support", () => {
+  const storedCandidates = [
+    { label: "Стена", confidence: 0.7, evidence: "Плоская светлая поверхность" },
+    { label: "Панель", confidence: 0.6, evidence: "Прямоугольный элемент на стене" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["Светлая стена", "Прямоугольная панель на стене"],
+    primaryCandidates: [
+      ...storedCandidates.map(({ label }, index) => ({
+        label,
+        confidence: 0.8 - index / 10,
+        evidenceIds: ["vision"],
+      })),
+      { label: "Человек с крыльями", confidence: 0.4, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary = "На фото видны только стена и панель.";
+  job.visionObservation.scaleEvidence = ["Размер панели служит ориентиром."];
+  job.visionObservation.uncertainties = ["Точная площадь стены неизвестна."];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const labels = result.resolvedIntent.target.candidates.map(({ label }) => label);
+
+  assert.deepEqual(labels, storedCandidates.map(({ label }) => label));
+  assert.doesNotMatch(labels.join(" "), /человек/iu);
+});
+
+test("keeps a supported concrete human feature as context for a vague target", () => {
+  const storedCandidates = [
+    { label: "Стена", confidence: 0.7, evidence: "Плоская светлая поверхность" },
+    { label: "Панель", confidence: 0.6, evidence: "Прямоугольный элемент на стене" },
+  ];
+  const humanLabel = "Голова человека с тёмными волосами";
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: [
+      "Светлая стена",
+      "Голова человека с тёмными волосами видна со спины",
+    ],
+    primaryCandidates: [
+      { label: "Стена", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: humanLabel, confidence: 0.4, evidenceIds: ["vision"] },
+    ],
+  });
+  job.visionObservation.summary = "На фото видны стена и человек со спины.";
+  job.visionObservation.scaleEvidence = ["Размер головы человека служит ориентиром."];
+  job.visionObservation.uncertainties = ["Точная граница волос частично скрыта."];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const labels = result.resolvedIntent.target.candidates.map(({ label }) => label);
+
+  assert.deepEqual(labels, storedCandidates.map(({ label }) => label));
+  assert.equal(labels.includes(humanLabel), false);
+  assert.doesNotMatch(JSON.stringify(result), /женщин|мужчин|лет|отношен|личност|идентич/iu);
+});
+
+test("fresh explicit wall target suppresses the human alternative", () => {
+  const storedCandidates = [
+    { label: "Стена", confidence: 0.7, evidence: "Плоская светлая поверхность" },
+    { label: "Панель", confidence: 0.6, evidence: "Прямоугольный элемент на стене" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["Светлая стена", "Голова человека видна справа"],
+    primaryCandidates: [
+      { label: "Стена", confidence: 0.7, evidenceIds: ["vision"] },
+      { label: "Человек", confidence: 0.4, evidenceIds: ["vision"] },
+    ],
+  });
+  job.subject = "Выбор объекта";
+  job.body = "Покрасьте стену.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Стена",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("does not append when one primary candidate is supported by two stored candidates", () => {
+  const storedCandidates = [
+    { label: "левый фрагмент", confidence: 0.9, evidence: "тёмная полоса" },
+    { label: "правый фрагмент", confidence: 0.8, evidence: "тёмная полоса" },
+  ];
+  const { job, draft } = visionPrimaryAppendCase({
+    storedCandidates,
+    visibleFacts: ["Тёмная полоса на левом и правом фрагменте"],
+    primaryCandidates: [
+      ...storedCandidates.map(({ label }, index) => ({
+        label,
+        confidence: 0.9 - index / 10,
+        evidenceIds: ["vision"],
+      })),
+      { label: "тёмная полоса", confidence: 0.3, evidenceIds: ["vision"] },
+    ],
+  });
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["левый фрагмент", "правый фрагмент"]);
+});
+
+test("caps seven target candidates at six through the normalized vision observation", () => {
+  const candidates = Array.from({ length: 7 }, (_, index) => ({
+    label: `фрагмент ${index + 1}`,
+    confidence: 0.9,
+    evidence: `признак ${index + 1}`,
+  }));
+  const job = {
+    subject: "Покрасить фрагменты",
+    body: "Покрасить это на фото.",
+    visionObservation: {
+      attachmentRef: "synthetic://cap-seven",
+      relevance: "relevant",
+      summary: "Семь фрагментов.",
+      visibleFacts: ["Семь фрагментов."],
+      targetCandidates: candidates,
+      uncertainties: [],
+    },
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent.target = {
+    state: "ambiguous",
+    candidates: candidates.map(({ label }, index) => ({
+      label,
+      confidence: 0.9 - index / 100,
+      evidenceIds: ["vision"],
+    })),
+  };
+  draft.resolvedIntent.evidence = [{
+    id: "vision",
+    claim: "Семь фрагментов.",
+    confidence: 0.9,
+    source: { kind: "vision", attachmentRef: "synthetic://cap-seven", observation: "Семь фрагментов." },
+  }];
+  draft.resolvedIntent.blocker = {
+    kind: "target_ambiguity",
+    question: "Что красим?",
+    choices: candidates.map(({ label }) => label),
+  };
+  draft.visionObservation = job.visionObservation;
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.visionObservation.targetCandidates.length, 6);
+  assert.equal(result.resolvedIntent.target.candidates.length, 6);
+  assert.equal(result.resolvedIntent.blocker.choices.length, 6);
+});
+
+test("keeps wall/frame and flat/round stored candidates distinct during projection", () => {
+  for (const [storedCandidates, primaryCandidates] of [
+    [
+      [
+        { label: "стена с плоской рамкой", confidence: 0.71, evidence: "Плоская рамка на стене" },
+        { label: "стена с круглой рамкой", confidence: 0.62, evidence: "Круглая рамка на стене" },
+      ],
+      [
+        { label: "плоская рамка на стене", confidence: 0.99, evidenceIds: ["vision"] },
+        { label: "круглая рамка на стене", confidence: 0.98, evidenceIds: ["vision"] },
+      ],
+    ],
+    [
+      [
+        { label: "деталь на плоской поверхности", confidence: 0.71, evidence: "Плоская поверхность" },
+        { label: "деталь на круглой поверхности", confidence: 0.62, evidence: "Круглая поверхность" },
+      ],
+      [
+        { label: "деталь плоская", confidence: 0.99, evidenceIds: ["vision"] },
+        { label: "деталь круглая", confidence: 0.98, evidenceIds: ["vision"] },
+      ],
+    ],
+  ]) {
+    const { job, draft } = visionAmbiguousCase({ storedCandidates, primaryCandidates });
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.deepEqual(
+      result.resolvedIntent.target.candidates.map(({ label }) => label),
+      storedCandidates.map(({ label }) => label),
+    );
+  }
+});
+
+function boundedVisionMergeCase() {
+  const visionObservation = {
+    summary:
+      "На фото видна стена светлого оттенка с прямоугольным вставным элементом, плинтусом у пола и человек спиной в правой части кадра.",
+    relevance: "relevant",
+    targetCandidates: [
+      {
+        label: "Стена",
+        confidence: 0.85,
+        evidence:
+          "Основная видимая поверхность светлого оттенка, занимает большую часть кадра",
+      },
+      {
+        label: "Прямоугольная панель на стене",
+        confidence: 0.6,
+        evidence:
+          "Отдельный прямоугольный элемент с рамкой, отличающийся по тону от основной стены",
+      },
+      {
+        label: "Плинтус",
+        confidence: 0.4,
+        evidence: "Горизонтальный молдинг внизу стены у стыка с полом",
+      },
+    ],
+    visibleFacts: [
+      "Стена светлого (бежевого/кремового) оттенка",
+      "На стене прямоугольный вставной элемент с рамкой",
+      "Внизу стены виден плинтус/молдинг",
+      "Слева видна часть напольного покрытия серого оттенка",
+    ],
+    scaleEvidence: [
+      "Соотношение размера головы человека (~20 см) к стене позволяет оценить пропорции",
+      "Высота плинтуса (~10–15 см) как ориентир",
+    ],
+    areaEstimate: {
+      min: 3,
+      max: 7,
+      unit: "м²",
+      method:
+        "Оценка по соотношению видимой части стены к размеру головы человека; видна примерно 2/3 стены, остальная часть закрыта человеком",
+      confidence: 0.4,
+    },
+    uncertainties: [
+      "Человек в правой части кадра закрывает часть стены, полная ширина неизвестна",
+      "Неизвестна высота потолка и полная высота стены",
+      "Материал стены определить невозможно, виден только цвет",
+    ],
+    attachmentRef: "synthetic://bounded-vision-merge",
+  };
+  const job = {
+    subject: "Проверка по фотографии",
+    body: "Ну давай, умный агент, покрась это красиво. Фото приложил.",
+    roundNo: 1,
+    visionObservation,
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.resolvedIntent = {
+    goal:
+      "Покрасить объект на фото; текст «покрась это» не называет конкретную цель, на кадре есть и стена, и человек",
+    target: {
+      state: "ambiguous",
+      candidates: [
+        {
+          label: "Стена (светлая, с вставной панелью и плинтусом)",
+          confidence: 0.85,
+          evidenceIds: ["ev-vision-1", "ev-message-1"],
+        },
+        {
+          label: "Человек (виден со спины в правой части кадра)",
+          confidence: 0.4,
+          evidenceIds: ["ev-vision-1"],
+        },
+      ],
+    },
+    evidence: [
+      {
+        id: "ev-message-1",
+        claim: "Клиент просит покрасить «это» по фото, конкретная цель не названа",
+        confidence: 0.9,
+        source: {
+          kind: "message",
+          roundNo: 1,
+          quote: job.body,
+        },
+      },
+      {
+        id: "ev-vision-1",
+        claim:
+          "На фото светлая стена с прямоугольным вставным элементом и плинтусом, в правой части кадра человек со спины; видимая часть стены оценивается в 3–7 м²",
+        confidence: 0.8,
+        source: {
+          kind: "vision",
+          attachmentRef: visionObservation.attachmentRef,
+          observation:
+            "Стена светлого оттенка с прямоугольной вставной панелью и плинтусом, человек спиной в правой части кадра, слева часть серого напольного покрытия",
+        },
+      },
+    ],
+    assumptions: [],
+    blocker: {
+      kind: "target_ambiguity",
+      question: "Что именно красим: стену или человека в кадре?",
+      choices: ["Стену", "Человека (виден со спины)"],
+    },
+  };
+  draft.visionObservation = visionObservation;
+  draft.commitment = "none";
+  draft.product = null;
+  draft.estimates = [];
+  return { job, draft };
+}
+
+test("vague photo prefers the inanimate Koler target over a human candidate or resolution", () => {
+  const storedCandidates = [
+    { label: "Стена", confidence: 0.9, evidence: "Большая плоская поверхность" },
+    { label: "Человек", confidence: 0.5, evidence: "Человек стоит перед стеной" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Фото стены";
+  job.body = "Покрасить это.";
+  job.visionObservation.summary = "На фото видны стена и человек перед ней.";
+  job.visionObservation.scaleEvidence = [
+    "Человек даёт грубый ориентир масштаба стены.",
+  ];
+
+  const resolvedHumanDraft = structuredClone(draft);
+  resolvedHumanDraft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Человек",
+    evidenceIds: ["vision"],
+  };
+  resolvedHumanDraft.resolvedIntent.blocker = null;
+
+  for (const result of [
+    normalizeV2AgentResult(draft, demoData, job),
+    normalizeV2AgentResult(resolvedHumanDraft, demoData, job),
+  ]) {
+    assert.equal(result.resolvedIntent.target.state, "resolved");
+    assert.equal(result.resolvedIntent.target.label, "Стена");
+    assert.equal(result.resolvedIntent.blocker, null);
+    assert.doesNotMatch(result.reply.body, /что\s+красим[^?]*человек/iu);
+  }
+});
+
+test("bounded vision merge resolves the inanimate side of a vague photo", () => {
+  const { job, draft } = boundedVisionMergeCase();
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+});
+
+function exactV25ReplayCase() {
+  const job = {
+    company: "Синтетический участник вебинара",
+    subject: "Проверка по фотографии",
+    body: "Ну давай, умный агент, покрась это красиво. Фото приложил.",
+    roundNo: 1,
+    attachment: {
+      name: "wall-hair-equal-v2.png",
+      src: "synthetic://wow-wall-hair-equal-v2",
+    },
+    visionObservation: {
+      summary:
+        "На фото видна стена с горизонтальными линиями панелей, прямоугольная рамка или картина на стене, вид сзади на голову человека с короткими чёрными волосами в серой одежде, а также плинтус внизу стены.",
+      relevance: "relevant",
+      targetCandidates: [
+        {
+          label: "Стена",
+          confidence: 0.9,
+          evidence:
+            "Основная видимая поверхность с горизонтальными линиями панелей, занимает большую часть кадра",
+        },
+        {
+          label: "Прямоугольная рамка/картина на стене",
+          confidence: 0.6,
+          evidence:
+            "Отдельный прямоугольный объект на стене, возможно рамка или декоративный элемент",
+        },
+        {
+          label: "Плинтус",
+          confidence: 0.5,
+          evidence:
+            "Горизонтальная полоса внизу стены, отделяющая стену от пола",
+        },
+        {
+          label: "Человек (вид сзади, голова и плечи)",
+          confidence: 0.4,
+          evidence:
+            "Видна задняя часть головы с короткими чёрными волосами и верхняя часть плеч в серой одежде",
+        },
+      ],
+      visibleFacts: [
+        "Стена светлого бежевого/серого цвета с горизонтальными линиями панелей",
+        "Прямоугольная рамка или картина светлого цвета на стене",
+        "Задняя часть головы человека с короткими чёрными волосами",
+        "Плинтус внизу стены",
+      ],
+      scaleEvidence: [
+        "Голова человека как ориентир (типичная ширина ~15-20 см)",
+        "Рамка/картина предположительно типичных размеров",
+      ],
+      areaEstimate: {
+        min: 4,
+        max: 12,
+        unit: "м²",
+        method:
+          "Оценка на основе типичных размеров интерьера и пропорций видимой части стены относительно головы человека; диапазон широкий из-за отсутствия точных ориентиров",
+        confidence: 0.3,
+      },
+      uncertainties: [
+        "Неизвестны точные размеры комнаты и расстояние до стены",
+        "Неизвестно, является ли рамка картиным полотном или декоративной панелью",
+        "Неизвестно, полностью ли стена видна в кадре или это её часть",
+      ],
+      attachmentRef: "synthetic://wow-wall-hair-equal-v2",
+      mode: "public-mimo-observation",
+      provenance: "live-mimo-observation",
+    },
+  };
+  const draft = v2ResolvedDraft(job);
+  draft.confidence = 0.4;
+  draft.resolvedIntent = {
+    goal: "Покрасить объект на приложенном фото, клиент конкретную цель не назвал",
+    target: {
+      state: "ambiguous",
+      candidates: [
+        {
+          label: "Стена: светлое бежево-серое покрытие с горизонтальными линиями панелей",
+          confidence: 0.9,
+          evidenceIds: ["ev-vision"],
+        },
+        {
+          label: "Прямоугольная рамка или картина светлого цвета на стене",
+          confidence: 0.6,
+          evidenceIds: ["ev-vision"],
+        },
+        {
+          label: "Плинтус внизу стены",
+          confidence: 0.5,
+          evidenceIds: ["ev-vision"],
+        },
+        {
+          label: "Задняя часть головы человека с короткими чёрными волосами (вид сзади)",
+          confidence: 0.4,
+          evidenceIds: ["ev-vision"],
+        },
+      ],
+    },
+    evidence: [
+      {
+        id: "ev-message",
+        claim:
+          "Клиент просит покрасить объект на приложенном фото («покрась это красиво»), но конкретную цель словами не называет",
+        confidence: 0.95,
+        source: {
+          kind: "message",
+          roundNo: 1,
+          quote: job.body,
+        },
+      },
+      {
+        id: "ev-vision",
+        claim:
+          "На фото несколько разных целей: стена с панельными линиями, рамка/картина, плинтус и задняя часть головы человека с короткими чёрными волосами",
+        confidence: 0.8,
+        source: {
+          kind: "vision",
+          attachmentRef: job.visionObservation.attachmentRef,
+          observation:
+            "Светлая бежево-серая стена с горизонтальными линиями панелей, прямоугольная рамка или картина на стене, плинтус внизу, вид сзади на голову человека с короткими чёрными волосами в серой одежде",
+        },
+      },
+    ],
+    assumptions: [],
+    blocker: {
+      kind: "target_ambiguity",
+      question: "Что именно покрасить?",
+      choices: [
+        "Стену (бежево-серые панели)",
+        "Рамку или картину на стене",
+        "Плинтус внизу",
+        "Заднюю часть головы (вид сзади, короткие чёрные волосы)",
+      ],
+    },
+  };
+  draft.commitment = "none";
+  draft.product = null;
+  draft.estimates = [];
+  return { job, draft };
+}
+
+test("replays the V25 equal-target shape as an unresolved target", () => {
+  const { job, draft } = exactV25ReplayCase();
+  const result = normalizeV2AgentResult(draft, demoData, job);
+  const target = result.resolvedIntent.target;
+
+  assert.equal(target.state, "ambiguous");
+  assert.ok(target.candidates.length >= 2);
+  assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity");
+  assert.ok(result.resolvedIntent.blocker.choices.length >= 2);
+  assert.equal(result.zone, "yellow");
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.commitment, "none");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.equal((result.resolvedIntent.blocker.question.match(/\?/gu) ?? []).length, 1);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+});
+
+function resolvedUnlistedHumanReplayCase() {
+  const { job, draft } = exactV25ReplayCase();
+  job.visionObservation.targetCandidates = [
+    job.visionObservation.targetCandidates[0],
+    job.visionObservation.targetCandidates[2],
+  ];
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Стена",
+    evidenceIds: ["ev-message", "ev-vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+  draft.commitment = "estimate";
+  draft.estimates = [{
+    metric: "paint_quantity",
+    range: { min: 1, max: 2, unit: "кг" },
+    method: "Предварительная оценка по фото",
+    evidenceIds: ["ev-vision"],
+    assumptionIds: [],
+    confidence: 0.4,
+    candidateSku: "КР-004",
+  }];
+  draft.product = { sku: "КР-004", requestedKg: 14 };
+  return { job, draft };
+}
+
+test("keeps a frozen inanimate target resolved beside an unlisted visible person", () => {
+  const { job, draft } = resolvedUnlistedHumanReplayCase();
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.equal(result.route, "ready");
+  assert.equal(result.commitment, "estimate");
+  assert.equal(result.product, null);
+  assert.equal(result.estimates.length, 1);
+});
+
+test("keeps an explicitly named target resolved beside an unlisted human surface", () => {
+  const { job, draft } = resolvedUnlistedHumanReplayCase();
+  job.body = "Покрасьте стену на фото.";
+  draft.resolvedIntent.evidence[0].source.quote = job.body;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("keeps a target resolved when a deictic photo has only an incidental person", () => {
+  const { job, draft } = resolvedUnlistedHumanReplayCase();
+  job.visionObservation.visibleFacts[2] =
+    "В правом нижнем углу виден человек со спины";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Стена");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("keeps construction payload closed for English and mixed human targets", () => {
+  for (const [targetLabel, body] of [
+    ["hair", "Paint this hair. Need 10 kg for the job."],
+    ["skin", "Paint this skin. Need 10 kg for the job."],
+    ["hand", "Paint this hand. Need 10 kg for the job."],
+    ["skin", "Покрась this skin. Need 10 kg for the job."],
+  ]) {
+    const job = {
+      subject: "Target selection",
+      body,
+      roundNo: 1,
+    };
+    const draft = v2ResolvedDraft(job, {
+      targetLabel,
+      commitment: "estimate",
+      estimates: [{
+        metric: "paint_quantity",
+        range: { min: 1, max: 2, unit: "kg" },
+        method: "Диапазон по заявке",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.7,
+      }],
+    });
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.equal(result.resolvedIntent.target.state, "resolved", targetLabel);
+    assert.equal(result.resolvedIntent.target.label, targetLabel, targetLabel);
+    assert.equal(result.zone, "red", targetLabel);
+    assert.equal(result.route, "manager", targetLabel);
+    assert.equal(result.commitment, "none", targetLabel);
+    assert.equal(result.product, null, targetLabel);
+    assert.deepEqual(result.estimates, [], targetLabel);
+  }
+});
+
+test("explicit hair target always uses the safe catalog boundary", () => {
+  const job = {
+    subject: "Фото человека",
+    body: "Покрасьте волосы человека строительной краской.",
+    roundNo: 1,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "волосы человека",
+    commitment: "none",
+    reply: {
+      subject: "Покраска волос",
+      body: "Используйте строительную краску на волосах.",
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.label, "волосы человека");
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "none");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.match(result.reply.body, /строительн\p{L}*.*нельзя\s+использовать/iu);
+  assert.doesNotMatch(result.reply.body, /используйте\s+строительн/iu);
+  assert.deepEqual(
+    result.options.map(({ id }) => id),
+    ["prepare-professional-reference", "keep-construction-catalog-boundary"],
+  );
+});
+
+test("explicit hair request overrides a mixed model target that starts inanimate", () => {
+  const job = {
+    subject: "Фото человека",
+    body: "Покрасьте волосы человека строительной краской.",
+    roundNo: 1,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "стена и волосы человека",
+    commitment: "estimate",
+    estimates: [{
+      metric: "paint_quantity",
+      range: { min: 1, max: 2, unit: "кг" },
+      method: "Диапазон по заявке",
+      evidenceIds: ["request"],
+      assumptionIds: [],
+      confidence: 0.7,
+    }],
+    reply: {
+      subject: "Покраска волос",
+      body: "Используйте строительную краску на волосах.",
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.label, draft.resolvedIntent.target.label);
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "none");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.match(result.reply.body, /строительн\p{L}*.*нельзя\s+использовать/iu);
+  assert.doesNotMatch(result.reply.body, /используйте\s+строительн/iu);
+});
+
+test("inanimate target keeps estimates when a person appears only as context", () => {
+  const job = {
+    subject: "Стена на фото",
+    body: "Покрасьте стену на фото.",
+    roundNo: 1,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "Стена на фото (бежевый фон за силуэтом человека)",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 6, max: 10, unit: "м²" },
+        method: "Широкая оценка стены по фото",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.6,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 1.8, max: 3, unit: "кг" },
+        method: "Диапазон по площади стены",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+    ],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.label, draft.resolvedIntent.target.label);
+  assert.equal(result.route, "ready");
+  assert.equal(result.commitment, "estimate");
+  assert.deepEqual(
+    result.estimates.map(({ metric }) => metric),
+    ["surface_area", "paint_quantity"],
+  );
+});
+
+test("preserves raw ambiguity for action and property lexical collisions", () => {
+  for (const { body, labels } of [
+    { body: "Покрась это.", labels: ["покрась", "стена"] },
+    { body: "Покрась это синим.", labels: ["синий", "стена"] },
+    { body: "Paint this blue.", labels: ["Blue", "Wall"] },
+    { body: "Покрась this blue.", labels: ["Blue", "Wall"] },
+  ]) {
+    const storedCandidates = labels.map((label, index) => ({
+      label,
+      confidence: 0.7 - index / 10,
+      evidence: `Видимый кандидат ${label}`,
+    }));
+    const { job, draft } = visionAmbiguousCase({
+      storedCandidates,
+      primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+        label,
+        confidence,
+        evidenceIds: ["vision"],
+      })),
+    });
+    job.subject = "Target selection";
+    job.body = body;
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.equal(result.resolvedIntent.target.state, "ambiguous", body);
+    assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity", body);
+    assert.equal((result.resolvedIntent.blocker.question.match(/\?/gu) ?? []).length, 1, body);
+    assert.equal(result.product, null, body);
+    assert.deepEqual(result.estimates, [], body);
+    assert.equal(result.commitment, "none", body);
+  }
+});
+
+test("preserves raw ambiguity for text-only action and property collisions", () => {
+  for (const { body, labels } of [
+    { body: "Покрасить синим.", labels: ["синий", "стена"] },
+    { body: "Paint blue.", labels: ["Blue", "Wall"] },
+    { body: "Покрасить.", labels: ["покрасить", "стена"] },
+  ]) {
+    const job = {
+      subject: "Target selection",
+      body,
+      roundNo: 1,
+    };
+    const draft = v2ResolvedDraft(job);
+    draft.resolvedIntent.target = {
+      state: "ambiguous",
+      candidates: labels.map((label, index) => ({
+        label,
+        confidence: 0.7 - index / 10,
+        evidenceIds: ["request"],
+      })),
+    };
+    draft.resolvedIntent.blocker = {
+      kind: "target_ambiguity",
+      question: `Что красим: ${labels.join(" или ")}?`,
+      choices: labels,
+    };
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.equal(result.resolvedIntent.target.state, "ambiguous", body);
+    assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity", body);
+    assert.equal((result.resolvedIntent.blocker.question.match(/\?/gu) ?? []).length, 1, body);
+    assert.equal(result.product, null, body);
+    assert.deepEqual(result.estimates, [], body);
+    assert.equal(result.commitment, "none", body);
+  }
+});
+
+test("invalidates a resolved target negated by the latest customer correction", () => {
+  for (const {
+    initialBody,
+    correction,
+    targetLabel,
+    storedCandidates,
+  } of [
+    {
+      initialBody: "Покрасьте стену. Нужно 10 кг.",
+      correction: "Нет, не стену.",
+      targetLabel: "стена",
+      storedCandidates: [
+        { label: "Стена", confidence: 0.7, evidence: "Плоская поверхность" },
+        { label: "Панель", confidence: 0.6, evidence: "Прямоугольный элемент" },
+      ],
+    },
+    {
+      initialBody: "Paint the wall. Need 10 kg.",
+      correction: "No, not the wall.",
+      targetLabel: "Wall",
+      storedCandidates: [
+        { label: "Wall", confidence: 0.7, evidence: "Flat surface" },
+        { label: "Panel", confidence: 0.6, evidence: "Rectangular element" },
+      ],
+    },
+  ]) {
+    const { job, draft } = visionAmbiguousCase({
+      storedCandidates,
+      primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+        label,
+        confidence,
+        evidenceIds: ["vision"],
+      })),
+    });
+    job.subject = "Target selection";
+    job.body = initialBody;
+    job.conversation = [{ role: "customer", body: correction }];
+    draft.resolvedIntent.target = {
+      state: "resolved",
+      label: targetLabel,
+      evidenceIds: ["vision"],
+    };
+    draft.resolvedIntent.blocker = null;
+    draft.commitment = "estimate";
+    draft.estimates = [{
+      metric: "paint_quantity",
+      range: { min: 1, max: 2, unit: "kg" },
+      method: "Диапазон по заявке",
+      evidenceIds: ["vision"],
+      assumptionIds: [],
+      confidence: 0.7,
+    }];
+
+    const result = normalizeV2AgentResult(draft, demoData, job);
+
+    assert.equal(result.resolvedIntent.target.state, "ambiguous", correction);
+    assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity", correction);
+    assert.equal(result.resolvedIntent.blocker.choices.length, 2, correction);
+    assert.equal(result.product, null, correction);
+    assert.deepEqual(result.estimates, [], correction);
+    assert.equal(result.commitment, "none", correction);
+  }
+});
+
+test("fails closed after a latest negation without grounded alternatives", () => {
+  const job = {
+    subject: "Target selection",
+    body: "Покрасьте стену. Нужно 10 кг.",
+    roundNo: 1,
+    conversation: [{ role: "customer", body: "Нет, не стену." }],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "стена",
+    commitment: "estimate",
+    estimates: [{
+      metric: "paint_quantity",
+      range: { min: 1, max: 2, unit: "kg" },
+      method: "Диапазон по заявке",
+      evidenceIds: ["request"],
+      assumptionIds: [],
+      confidence: 0.7,
+    }],
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.zone, "red");
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "none");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+});
+
+test("does not resolve a bare demonstrative from an action or property root", () => {
+  const storedCandidates = [
+    {
+      label: "Покрасочный слой",
+      confidence: 0.7,
+      evidence: "Видимый слой на поверхности",
+    },
+    {
+      label: "Нейтральная деталь",
+      confidence: 0.6,
+      evidence: "Отдельная видимая деталь",
+    },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Свободная задача по фото";
+  job.body = "Покрась это красиво.";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "ambiguous");
+  assert.ok(result.resolvedIntent.blocker.choices.length >= 2);
+  assert.equal(result.resolvedIntent.blocker.choices.includes("Покрасочный слой"), true);
+});
+
+test("preserves a raw resolved inanimate target under a demonstrative", () => {
+  const storedCandidates = [
+    { label: "Секция", confidence: 0.7, evidence: "Видимая секция" },
+    { label: "Рамка", confidence: 0.6, evidence: "Видимая рамка" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Выбор цели";
+  job.body = "Покрасьте эту секцию.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Секция",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Секция");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("preserves a raw resolved human-visible target without product or estimates", () => {
+  const storedCandidates = [
+    { label: "Человек", confidence: 0.7, evidence: "Видимый человек" },
+    { label: "Секция", confidence: 0.6, evidence: "Видимая секция" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Выбор цели";
+  job.body = "Покрасьте человека.";
+  draft.commitment = "estimate";
+  draft.estimates = [{
+    metric: "paint_quantity",
+    range: { min: 1, max: 2, unit: "кг" },
+    method: "Оценка по заявке",
+    evidenceIds: ["vision"],
+    assumptionIds: [],
+    confidence: 0.7,
+    candidateSku: "КР-001",
+  }];
+  draft.product = { sku: "КР-001", requestedKg: 1 };
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Человек",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Человек");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+});
+
+test("preserves a fresh positive raw resolved customer correction", () => {
+  const storedCandidates = [
+    { label: "Секция", confidence: 0.7, evidence: "Видимая секция" },
+    { label: "Рамка", confidence: 0.6, evidence: "Видимая рамка" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Старая цель";
+  job.body = "Покрасьте секцию.";
+  job.conversation = [{
+    role: "customer",
+    body: "Нет, покрасьте рамку.",
+  }];
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Рамка",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Рамка");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("ambiguous target output keeps one question and no commercial payload", () => {
+  const storedCandidates = [
+    { label: "Нейтральный модуль", confidence: 0.7, evidence: "Видимый модуль" },
+    { label: "Отдельная деталь", confidence: 0.6, evidence: "Видимая деталь" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Свободная задача";
+  job.body = "Покрасьте это.";
+  draft.commitment = "commercial_offer";
+  draft.estimates = [{
+    metric: "paint_quantity",
+    range: { min: 1, max: 2, unit: "кг" },
+    method: "Оценка по заявке",
+    evidenceIds: ["vision"],
+    assumptionIds: [],
+    confidence: 0.7,
+    candidateSku: "КР-001",
+  }];
+  draft.product = { sku: "КР-001", requestedKg: 1 };
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "ambiguous");
+  assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity");
+  assert.ok(result.resolvedIntent.target.candidates.length >= 2);
+  assert.equal((result.resolvedIntent.blocker.question.match(/\?/gu) ?? []).length, 1);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.equal(result.commitment, "none");
+});
+
+test("does not resolve the V25 property mutant from one descriptive root", () => {
+  const storedCandidates = [
+    { label: "Белый модуль", confidence: 0.7, evidence: "Белый модуль в кадре" },
+    { label: "Нейтральная рамка", confidence: 0.6, evidence: "Нейтральная рамка в кадре" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Выбор цвета";
+  job.body = "Покрась это белым.";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "ambiguous");
+  assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.equal(result.commitment, "none");
+});
+
+test("keeps the property-root guard fail-safe for a mixed-English request", () => {
+  const storedCandidates = [
+    { label: "Azure widget", confidence: 0.7, evidence: "Azure widget in frame" },
+    { label: "Neutral frame", confidence: 0.6, evidence: "Neutral frame in frame" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Metamorphic target check";
+  job.body = "Покрась this azure.";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "ambiguous");
+  assert.ok(result.resolvedIntent.target.candidates.length >= 2);
+});
+
+test("English property-only deictic request remains ambiguous", () => {
+  const storedCandidates = [
+    { label: "Azure widget", confidence: 0.7, evidence: "Azure widget in frame" },
+    { label: "Neutral frame", confidence: 0.6, evidence: "Neutral frame in frame" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Color selection";
+  job.body = "Paint this azure.";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "ambiguous");
+  assert.equal(result.resolvedIntent.blocker.kind, "target_ambiguity");
+  assert.deepEqual(result.resolvedIntent.blocker.choices, ["Azure widget", "Neutral frame"]);
+  assert.equal(result.zone, "yellow");
+  assert.equal(result.route, "needs_info");
+  assert.equal(result.product, null);
+  assert.deepEqual(result.estimates, []);
+  assert.equal(result.commitment, "none");
+});
+
+test("preserves a raw resolved multiword target under a demonstrative", () => {
+  const storedCandidates = [
+    { label: "Белый модуль", confidence: 0.7, evidence: "Белый модуль в кадре" },
+    { label: "Нейтральная рамка", confidence: 0.6, evidence: "Нейтральная рамка в кадре" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Выбор цели";
+  job.body = "Покрасьте этот белый модуль.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Белый модуль",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Белый модуль");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("preserves a raw resolved English single-token target under a demonstrative", () => {
+  const storedCandidates = [
+    { label: "Widget", confidence: 0.7, evidence: "Widget in frame" },
+    { label: "Frame", confidence: 0.6, evidence: "Frame in frame" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Target selection";
+  job.body = "Paint this widget.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Widget",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Widget");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("preserves a raw resolved English multiword target under a demonstrative", () => {
+  const storedCandidates = [
+    { label: "Azure widget", confidence: 0.7, evidence: "Azure widget in frame" },
+    { label: "Neutral frame", confidence: 0.6, evidence: "Neutral frame in frame" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Target selection";
+  job.body = "Paint this azure widget.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Azure widget",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Azure widget");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("does not override a raw resolved primary target with the deictic guard", () => {
+  const storedCandidates = [
+    { label: "Azure widget", confidence: 0.7, evidence: "Azure widget in frame" },
+    { label: "Neutral frame", confidence: 0.6, evidence: "Neutral frame in frame" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Target selection";
+  job.body = "Paint this azure.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Azure widget",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Azure widget");
+  assert.equal(result.resolvedIntent.blocker, null);
+});
+
+test("preserves a raw resolved single-token target under a demonstrative", () => {
+  const storedCandidates = [
+    { label: "Модуль", confidence: 0.7, evidence: "Видимый модуль" },
+    { label: "Рамка", confidence: 0.6, evidence: "Видимая рамка" },
+  ];
+  const { job, draft } = visionAmbiguousCase({
+    storedCandidates,
+    primaryCandidates: storedCandidates.map(({ label, confidence }) => ({
+      label,
+      confidence,
+      evidenceIds: ["vision"],
+    })),
+  });
+  job.subject = "Выбор цели";
+  job.body = "Покрасьте этот модуль.";
+  draft.resolvedIntent.target = {
+    state: "resolved",
+    label: "Модуль",
+    evidenceIds: ["vision"],
+  };
+  draft.resolvedIntent.blocker = null;
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.resolvedIntent.target.state, "resolved");
+  assert.equal(result.resolvedIntent.target.label, "Модуль");
+  assert.equal(result.resolvedIntent.blocker, null);
 });

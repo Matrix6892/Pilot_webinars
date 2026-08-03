@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import {
+  decodeStoredAgentResult,
+  isCompleteAgentResult,
+  managerFallbackAgentResult,
+} from "../lib/agent-guard.mjs";
+import { confirmSupplierPlan } from "../lib/supplier-plan.mjs";
+import { resolveVisionImageUrl } from "../lib/upload-guard.mjs";
+import { isSearchResultUrl } from "../lib/public-web-url.mjs";
 
 function exportedFunctionFromTypeScript(
   source,
@@ -67,6 +76,36 @@ test("applies every migration and keeps one history row per source step", async 
       .all()
       .map((column) => column.name);
     assert.ok(orderColumns.includes("action_token_hash"));
+    for (const column of [
+      "claim_id",
+      "claimed_by",
+      "attempt_no",
+      "lease_until",
+    ]) {
+      assert.ok(orderColumns.includes(column));
+    }
+    const eventColumns = database
+      .prepare("PRAGMA table_info(order_events)")
+      .all()
+      .map((column) => column.name);
+    for (const column of ["round_no", "claim_id", "attempt_no"]) {
+      assert.ok(eventColumns.includes(column));
+    }
+    database
+      .prepare(
+        "INSERT INTO order_events (order_id, stage, title, round_no, claim_id, attempt_no) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("event-order", "agent", "Событие", 3, "claim-3", 4);
+    assert.deepEqual(
+      {
+        ...database
+          .prepare(
+            "SELECT round_no, claim_id, attempt_no FROM order_events WHERE order_id = 'event-order'",
+          )
+          .get(),
+      },
+      { round_no: 3, claim_id: "claim-3", attempt_no: 4 },
+    );
 
     const insert = database.prepare(`
       INSERT INTO order_result_history (
@@ -83,9 +122,328 @@ test("applies every migration and keeps one history row per source step", async 
   }
 });
 
+test("fences stale workers after a renewable 90 second lease", async () => {
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    database
+      .prepare(
+        "INSERT INTO orders (id, subject, body, status, mode, round_no) VALUES (?, ?, ?, 'queued', 'opencode-live', 1)",
+      )
+      .run("lease-order", "Заказ", "Нужно 2000 кг");
+    const claim = database.prepare(`
+      UPDATE orders
+      SET status = 'processing',
+          claim_id = ?,
+          claimed_by = ?,
+          attempt_no = attempt_no + 1,
+          lease_until = datetime(?, '+90 seconds')
+      WHERE id = 'lease-order' AND status = 'queued'
+    `);
+    const guardedActiveEvent = database.prepare(`
+      INSERT INTO order_events (order_id, stage, title, detail, state)
+      SELECT id, 'agent', ?, '', 'done'
+      FROM orders
+      WHERE id = 'lease-order'
+        AND status = 'processing'
+        AND round_no = 1
+        AND claim_id = ?
+        AND lease_until > ?
+    `);
+    const terminal = database.prepare(`
+      UPDATE orders
+      SET status = 'ready_to_send',
+          zone = 'green',
+          result_json = ?
+      WHERE id = 'lease-order'
+        AND status = 'processing'
+        AND round_no = 1
+        AND claim_id = ?
+        AND lease_until > ?
+    `);
+    const guardedHistory = database.prepare(`
+      INSERT INTO order_result_history (
+        order_id, round_no, zone, route, status, reason, source_key
+      )
+      SELECT id, round_no, 'green', 'ready', 'ready_to_send',
+             'Решение рабочей модели', 'model:' || round_no
+      FROM orders
+      WHERE id = 'lease-order'
+        AND status = 'ready_to_send'
+        AND round_no = 1
+        AND claim_id = ?
+        AND result_json = ?
+    `);
+    const guardedDecisionEvent = database.prepare(`
+      INSERT INTO order_events (order_id, stage, title, detail, state)
+      SELECT id, 'decision', 'Решение готово', '', 'done'
+      FROM orders
+      WHERE id = 'lease-order'
+        AND status = 'ready_to_send'
+        AND round_no = 1
+        AND claim_id = ?
+        AND result_json = ?
+    `);
+    const clearClaim = database.prepare(`
+      UPDATE orders
+      SET claim_id = NULL,
+          claimed_by = NULL,
+          lease_until = NULL
+      WHERE id = 'lease-order'
+        AND status = 'ready_to_send'
+        AND round_no = 1
+        AND claim_id = ?
+        AND result_json = ?
+    `);
+    const startedAt = "2026-07-31 09:00:00";
+    const terminalResult = '{"schemaVersion":2}';
+
+    assert.equal(
+      claim.run("claim-a", "worker-a", startedAt).changes,
+      1,
+    );
+    assert.equal(
+      database
+        .prepare(`
+          UPDATE orders
+          SET lease_until = datetime(?, '+90 seconds')
+          WHERE id = 'lease-order'
+            AND status = 'processing'
+            AND round_no = 1
+            AND claim_id = 'claim-a'
+            AND lease_until > ?
+        `)
+        .run(
+          "2026-07-31 09:00:30",
+          "2026-07-31 09:00:30",
+        ).changes,
+      1,
+    );
+    assert.equal(
+      database
+        .prepare(`
+          UPDATE orders
+          SET status = 'queued',
+              claim_id = NULL,
+              claimed_by = NULL,
+              lease_until = NULL
+          WHERE status = 'processing'
+            AND mode LIKE 'opencode%'
+            AND lease_until <= ?
+        `)
+        .run("2026-07-31 09:02:01").changes,
+      1,
+    );
+    assert.equal(
+      claim.run(
+        "claim-b",
+        "worker-b",
+        "2026-07-31 09:02:01",
+      ).changes,
+      1,
+    );
+
+    assert.equal(
+      guardedActiveEvent.run(
+        "Устаревшее событие",
+        "claim-a",
+        "2026-07-31 09:02:02",
+      ).changes,
+      0,
+    );
+    assert.equal(
+      terminal.run(
+        terminalResult,
+        "claim-a",
+        "2026-07-31 09:02:02",
+      ).changes,
+      0,
+    );
+    assert.equal(
+      guardedActiveEvent.run(
+        "Событие новой попытки",
+        "claim-b",
+        "2026-07-31 09:02:02",
+      ).changes,
+      1,
+    );
+    assert.equal(
+      terminal.run(
+        terminalResult,
+        "claim-b",
+        "2026-07-31 09:02:02",
+      ).changes,
+      1,
+    );
+    assert.equal(
+      guardedHistory.run("claim-b", terminalResult).changes,
+      1,
+    );
+    assert.equal(
+      guardedDecisionEvent.run("claim-b", terminalResult).changes,
+      1,
+    );
+    assert.equal(
+      clearClaim.run("claim-b", terminalResult).changes,
+      1,
+    );
+    assert.equal(
+      terminal.run(
+        terminalResult,
+        "claim-b",
+        "2026-07-31 09:02:03",
+      ).changes,
+      0,
+    );
+
+    const order = database
+      .prepare(
+        "SELECT status, claim_id, claimed_by, attempt_no FROM orders WHERE id = 'lease-order'",
+      )
+      .get();
+    assert.deepEqual({ ...order }, {
+      status: "ready_to_send",
+      claim_id: null,
+      claimed_by: null,
+      attempt_no: 2,
+    });
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_events WHERE order_id = 'lease-order' AND stage = 'decision'",
+        )
+        .get().count,
+      1,
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_result_history WHERE order_id = 'lease-order'",
+        )
+        .get().count,
+      1,
+    );
+
+    const [agentRoute, bridge] = await Promise.all([
+      readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
+      readFile(new URL("../scripts/agent-bridge.mjs", import.meta.url), "utf8"),
+    ]);
+    assert.match(agentRoute, /JOB_LEASE_SECONDS = 90/);
+    assert.match(
+      agentRoute,
+      /eq\(orders\.status, "processing"\)[\s\S]*?orders\.mode\} like 'opencode%'/,
+    );
+    assert.match(
+      agentRoute,
+      /eq\(orders\.roundNo, roundNo\)[\s\S]*?eq\(orders\.claimId, claimId\)[\s\S]*?leaseUntil\} > CURRENT_TIMESTAMP/,
+    );
+    assert.match(
+      agentRoute,
+      /db\.batch\(\[claimQuery, initialEventQuery\]\)/,
+    );
+    assert.match(
+      agentRoute,
+      /if \(action === "renew"\)[\s\S]*?\.where\(claimGuard\)/,
+    );
+    assert.match(bridge, /const leaseRenewalMs = 30_000/);
+    assert.match(
+      bridge,
+      /action:\s*"renew",\s*\.\.\.claimPayload\(job\)/,
+    );
+    assert.match(
+      bridge,
+      /action:\s*"result",\s*\.\.\.claimPayload\(job\)/,
+    );
+    assert.match(
+      bridge,
+      /action:\s*"error",\s*\.\.\.claimPayload\(job\)/,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("requeue closes stale active events and records retry metadata atomically", async () => {
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    database
+      .prepare(
+        "INSERT INTO orders (id, subject, body, status, mode, round_no, claim_id, attempt_no, lease_until) VALUES ('stale-event-order', 'Заказ', 'Письмо', 'processing', 'opencode-live', 2, 'claim-old', 3, '2026-07-31 09:00:00')",
+      )
+      .run();
+    database
+      .prepare(
+        "INSERT INTO order_events (order_id, stage, title, state, round_no, claim_id, attempt_no) VALUES ('stale-event-order', 'understanding', 'Старый шаг', 'active', 2, 'claim-old', 3)",
+      )
+      .run();
+    const requeueAt = "2026-07-31T09:02:01.000Z";
+    database
+      .prepare(
+        "UPDATE orders SET status = 'queued', claim_id = NULL, claimed_by = NULL, lease_until = NULL, updated_at = ? WHERE status = 'processing' AND mode LIKE 'opencode%' AND lease_until <= '2026-07-31 09:02:01'",
+      )
+      .run(requeueAt);
+    database
+      .prepare(
+        "UPDATE order_events SET state = 'error' WHERE state = 'active' AND EXISTS (SELECT 1 FROM orders WHERE orders.id = order_events.order_id AND orders.status = 'queued' AND orders.updated_at = ?)",
+      )
+      .run(requeueAt);
+    database
+      .prepare(
+        "INSERT INTO order_events (order_id, stage, title, detail, state, round_no, claim_id, attempt_no, created_at) SELECT id, 'retry', 'Заказ вернулся в очередь', '', 'done', round_no, NULL, attempt_no, ? FROM orders WHERE status = 'queued' AND mode LIKE 'opencode%' AND claim_id IS NULL AND lease_until IS NULL AND updated_at = ?",
+      )
+      .run(requeueAt, requeueAt);
+
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_events WHERE order_id = 'stale-event-order' AND state = 'active'",
+        )
+        .get().count,
+      0,
+    );
+    assert.deepEqual(
+      {
+        ...database
+          .prepare(
+            "SELECT state, round_no, claim_id, attempt_no FROM order_events WHERE order_id = 'stale-event-order' ORDER BY id DESC LIMIT 1",
+          )
+          .get(),
+      },
+      { state: "done", round_no: 2, claim_id: null, attempt_no: 3 },
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT state FROM order_events WHERE order_id = 'stale-event-order' AND stage = 'understanding'",
+        )
+        .get().state,
+      "error",
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test("protects public order actions and bounds public intake", async () => {
-  const [ordersRoute, uploadsRoute, adminRoute, schema] = await Promise.all([
+  const [ordersRoute, agentRoute, uploadsRoute, adminRoute, schema] =
+    await Promise.all([
     readFile(new URL("../app/api/orders/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/uploads/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/admin/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
@@ -94,13 +452,505 @@ test("protects public order actions and bounds public intake", async () => {
   assert.match(schema, /actionTokenHash:\s*text\("action_token_hash"\)/);
   assert.match(ordersRoute, /createOrderActionKey\(\)/);
   assert.match(ordersRoute, /orderActionKeyHash\(actionKey\)/);
-  assert.match(ordersRoute, /canChangeOrder\(request, order\.actionTokenHash\)/);
-  assert.match(ordersRoute, /\{ id, actionKey, mode, bridgeOnline: isLive \}/);
+  assert.match(ordersRoute, /canReadOrder\(request, capability\.actionTokenHash, id\)/);
+  assert.match(
+    ordersRoute,
+    /createdOrderResponse\(\s*\{[\s\S]*?id,\s*actionKey,\s*mode,\s*bridgeOnline: isLive,\s*recorded: recordedMode/,
+  );
+  assert.match(ordersRoute, /Set-Cookie.*orderCapabilityCookie/);
+  const safeAttachment = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "safeAttachment",
+    {
+      clean: (value, max) =>
+        typeof value === "string" ? value.trim().slice(0, max) : "",
+      resolveVisionImageUrl,
+    },
+  );
+  assert.equal(
+    safeAttachment({
+      name: "photo.jpg",
+      src: "//attacker.example/photo.jpg",
+      alt: "Фото",
+    }),
+    null,
+  );
   assert.match(ordersRoute, /contentLength > 16_384/);
   assert.match(ordersRoute, /name:\s*"orders-minute"/);
   assert.match(ordersRoute, /Number\(queue\?\.total \?\? 0\) >= 100/);
   assert.match(uploadsRoute, /name:\s*"uploads-ten-minutes"/);
   assert.match(adminRoute, /name:\s*"admin-login-ten-minutes"/);
+  const claimQueryStart = agentRoute.indexOf("const claimQuery");
+  const returningStart = agentRoute.indexOf(".returning({", claimQueryStart);
+  const claimedJobResponse = agentRoute.slice(
+    returningStart,
+    agentRoute.indexOf("});", returningStart),
+  );
+  assert.match(claimedJobResponse, /attachmentJson:\s*orders\.attachmentJson/);
+  assert.match(
+    claimedJobResponse,
+    /inventorySnapshotJson:\s*orders\.inventorySnapshotJson/,
+  );
+  assert.doesNotMatch(
+    claimedJobResponse,
+    /actionTokenHash|claimedBy|attemptNo|leaseUntil/,
+  );
+});
+
+test("replays a client order id and capability without duplicate rows", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const clean = (value, max) =>
+    typeof value === "string" ? value.trim().slice(0, max) : "";
+  const clientOrderId = "018fa799-39e8-7903-ba25-0514d02e70b8";
+  const clientActionKey = "a".repeat(64);
+  const clientOrderIdentity = exportedFunctionFromTypeScript(
+    route,
+    "clientCreateIdentity",
+    {
+      clientOrderIdPattern:
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+      clientActionKeyPattern: /^[0-9a-f]{64}$/iu,
+    },
+  );
+  const createRequestFingerprint = exportedFunctionFromTypeScript(
+    route,
+    "createRequestFingerprint",
+    {
+      clean,
+      safeAttachment: () => null,
+      requestedModel: () => "opencode-go/deepseek-v4-pro",
+      recordedDemoKinds: new Set(["fence-photo"]),
+    },
+  );
+  const matchesCreateRequest = exportedFunctionFromTypeScript(
+    route,
+    "matchesCreateRequest",
+  );
+  const resolveCreateReplay = exportedFunctionFromTypeScript(
+    route,
+    "resolveCreateReplay",
+    { matchesCreateRequest },
+  );
+  const payload = {
+    clientOrderId,
+    clientActionKey,
+    subject: "Запрос покрытия",
+    body: "Нужно 100 кг краски.",
+    company: "ООО «Спектр»",
+    model: "opencode-go/deepseek-v4-pro",
+  };
+  const identity = clientOrderIdentity(payload);
+  assert.equal(identity.clientOrderId, clientOrderId);
+  assert.equal(identity.clientActionKey, clientActionKey);
+
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    const create = (keyHash, currentPayload = payload) => {
+      const currentIdentity = clientOrderIdentity(currentPayload);
+      const currentFingerprint = createRequestFingerprint(currentPayload);
+      const existing = database
+        .prepare(
+          "SELECT id, action_token_hash AS actionTokenHash, subject, body, company, website, requested_model AS requestedModel, mode, attachment_json AS attachmentJson FROM orders WHERE id = ?",
+        )
+        .get(currentIdentity.clientOrderId);
+      const decision = resolveCreateReplay(
+        existing,
+        keyHash,
+        currentFingerprint,
+      );
+      if (decision.kind === "conflict") return { status: 409 };
+      if (decision.kind === "replay") return { status: 200, id: decision.id };
+      database
+        .prepare(
+          "INSERT INTO orders (id, subject, body, company, mode, requested_model, action_token_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          currentIdentity.clientOrderId,
+          currentFingerprint.subject,
+          currentFingerprint.body,
+          currentFingerprint.company,
+          currentFingerprint.mode,
+          currentFingerprint.requestedModel,
+          keyHash,
+        );
+      database
+        .prepare(
+          "INSERT INTO order_events (order_id, stage, title, round_no, attempt_no) VALUES (?, 'received', 'Заказ принят', 1, 0)",
+        )
+        .run(currentIdentity.clientOrderId);
+      database
+        .prepare(
+          "INSERT INTO order_result_history (order_id, round_no, zone, route, status, reason, source_key) VALUES (?, 1, 'red', 'manager', 'awaiting_approval', 'Первое решение', 'initial:1')",
+        )
+        .run(currentIdentity.clientOrderId);
+      return { status: 201, id: currentIdentity.clientOrderId };
+    };
+
+    assert.deepEqual(create("hash-a"), { status: 201, id: clientOrderId });
+    assert.deepEqual(create("hash-a"), { status: 200, id: clientOrderId });
+    assert.equal(
+      database
+        .prepare("SELECT count(*) AS count FROM orders WHERE id = ?")
+        .get(clientOrderId).count,
+      1,
+    );
+    assert.equal(
+      database
+        .prepare("SELECT count(*) AS count FROM order_events WHERE order_id = ?")
+        .get(clientOrderId).count,
+      1,
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_result_history WHERE order_id = ?",
+        )
+        .get(clientOrderId).count,
+      1,
+    );
+    assert.deepEqual(create("hash-b"), { status: 409 });
+    assert.deepEqual(
+      create("hash-a", { ...payload, body: "Другой текст заявки." }),
+      { status: 409 },
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("gates order detail before sensitive reads and keeps public ledger synthetic", async () => {
+  const [ordersRoute, ledgerRoute] = await Promise.all([
+    readFile(new URL("../app/api/orders/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/ledger/route.ts", import.meta.url), "utf8"),
+  ]);
+  const canReadOrder = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "canReadOrder",
+    {
+      Headers,
+      Request,
+      orderCapabilityCookieName: (orderId) => `koler_order_capability_${orderId}`,
+      canChangeOrder: async (request) =>
+        request.headers.get("x-order-key") === "valid-capability",
+      cookieValue: () => "",
+    },
+  );
+  assert.equal(
+    await canReadOrder(
+      new Request("https://koler.test/api/orders?id=ord_1"),
+      "hash",
+      "ord_1",
+    ),
+    false,
+  );
+  assert.equal(
+    await canReadOrder(
+      new Request("https://koler.test/api/orders?id=ord_1", {
+        headers: { "x-order-key": "valid-capability" },
+      }),
+      "hash",
+      "ord_1",
+    ),
+    true,
+  );
+
+  class UrlOnlyRequest {
+    constructor(input, init = {}) {
+      assert.equal(typeof input, "string");
+      this.url = input;
+      this.headers = init.headers;
+    }
+  }
+  const cookieCapabilityReader = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "canReadOrder",
+    {
+      Headers,
+      Request: UrlOnlyRequest,
+      orderCapabilityCookieName: (orderId) => `koler_order_capability_${orderId}`,
+      canChangeOrder: async (request) =>
+        request.headers.get("x-order-key") === "a".repeat(64),
+      cookieValue: () => "a".repeat(64),
+    },
+  );
+  assert.equal(
+    await cookieCapabilityReader(
+      new Request("https://koler.test/api/orders?id=ord_cookie"),
+      "hash",
+      "ord_cookie",
+    ),
+    true,
+  );
+
+  const detailAuth = ordersRoute.indexOf(
+    "if (!(await canReadOrder(request, capability.actionTokenHash, id)))",
+  );
+  const detailRead = ordersRoute.indexOf(
+    "const [order] = await db\n    .select()",
+    detailAuth,
+  );
+  assert.ok(detailAuth >= 0 && detailRead > detailAuth);
+  assert.match(ordersRoute, /return Response\.json\([\s\S]*?headers: noStoreHeaders/);
+  assert.match(ledgerRoute, /const admin = await isAdminRequest\(request\)/);
+  assert.match(ledgerRoute, /resultHistoryQuery = admin/);
+  assert.match(ledgerRoute, /detail: sql<string>`''`/u);
+  assert.match(ledgerRoute, /resultHistory: admin[\s\S]*?: \[\]/);
+  assert.match(ledgerRoute, /syntheticData: true/);
+
+  const syntheticLedgerOrder = exportedFunctionFromTypeScript(
+    ledgerRoute,
+    "syntheticLedgerOrder",
+    {
+      clipped: (value, max) =>
+        typeof value === "string" ? value.slice(0, max) : value ?? "",
+    },
+  );
+  const summary = syntheticLedgerOrder({
+    id: "ord_1",
+    status: "awaiting_approval",
+    zone: "red",
+    mode: "opencode-live",
+    roundNo: 2,
+    sentAt: null,
+    createdAt: "2026-08-01T10:00:00.000Z",
+    updatedAt: "2026-08-01T10:01:00.000Z",
+  });
+  assert.equal(summary.subject, "");
+  assert.equal(summary.body, "");
+  assert.equal(summary.conversation.length, 0);
+  assert.equal(summary.result, null);
+  assert.equal(summary.attachment, null);
+  assert.equal(summary.inventorySnapshot, null);
+  assert.doesNotMatch(
+    JSON.stringify(summary),
+    /Исходное письмо|conversation-body|supplier-snapshot|photo-ref|attachment-ref/iu,
+  );
+});
+
+test("normalizes malformed stored results into a complete manager fallback", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const storedAgentResult = exportedFunctionFromTypeScript(
+    route,
+    "storedAgentResult",
+    { decodeStoredAgentResult, isCompleteAgentResult, managerFallbackAgentResult },
+  );
+  const result = storedAgentResult(
+    '{"reply":{"body":"partial private customer prose"}',
+  );
+
+  assert.equal(result.zone, "red");
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "none");
+  assert.equal(result.product, null);
+  assert.equal(isCompleteAgentResult(result), true);
+  assert.doesNotMatch(JSON.stringify(result), /partial private customer prose/iu);
+  assert.match(
+    route,
+    /const result = storedAgentResult\(item\.resultJson\)[\s\S]*?replyBody: result\?\.reply\.body \?\? ""/,
+  );
+});
+
+test("requires observed public HTTPS URLs for transported web evidence", async () => {
+  const route = await readFile(
+    new URL("../app/api/agent/route.ts", import.meta.url),
+    "utf8",
+  );
+  const publicHttpsUrl = exportedFunctionFromTypeScript(
+    route,
+    "publicHttpsUrl",
+    { URL },
+  );
+  const validateResultTransportEvidence = exportedFunctionFromTypeScript(
+    route,
+    "validateResultTransportEvidence",
+    { createHash, isSearchResultUrl, publicHttpsUrl },
+  );
+  const webResult = {
+    resolvedIntent: {
+      evidence: [
+        { source: { kind: "web", url: "https://public.example/source" } },
+      ],
+    },
+    research: { sources: [] },
+    supplierLeads: [],
+  };
+  assert.equal(
+    publicHttpsUrl("https://public.example/source"),
+    "https://public.example/source",
+  );
+
+  assert.equal(
+    validateResultTransportEvidence(webResult, [
+      "https://public.example/source",
+    ]).ok,
+    true,
+  );
+  assert.equal(
+    validateResultTransportEvidence(webResult, ["https://other.example/"]).ok,
+    false,
+  );
+  assert.equal(
+    validateResultTransportEvidence(
+      {
+        resolvedIntent: {
+          evidence: [
+            {
+              source: {
+                kind: "web",
+                url: "https://search.brave.com/search?q=paint",
+              },
+            },
+          ],
+        },
+      },
+      ["https://search.brave.com/search?q=paint"],
+    ).ok,
+    false,
+  );
+  assert.equal(
+    validateResultTransportEvidence(
+      {
+        resolvedIntent: {
+          evidence: [
+            { source: { kind: "web", url: "http://public.example/source" } },
+          ],
+        },
+      },
+      ["http://public.example/source"],
+    ).ok,
+    false,
+  );
+  assert.equal(
+    validateResultTransportEvidence(
+      {
+        resolvedIntent: {
+          evidence: [
+            { source: { kind: "web", url: "https://127.0.0.1/source" } },
+          ],
+        },
+      },
+      ["https://127.0.0.1/source"],
+    ).ok,
+    false,
+  );
+  assert.equal(
+    validateResultTransportEvidence(
+      {
+        resolvedIntent: {
+          evidence: [
+            {
+              source: {
+                kind: "web",
+                url: "https://user:password@public.example/source",
+              },
+            },
+          ],
+        },
+      },
+      ["https://user:password@public.example/source"],
+    ).ok,
+    false,
+  );
+  assert.equal(
+    validateResultTransportEvidence(
+      { resolvedIntent: { evidence: [] }, supplierLeads: [] },
+      undefined,
+    ).ok,
+    true,
+  );
+});
+
+test("accepts only bounded reviewer provenance for terminal persistence", async () => {
+  const route = await readFile(
+    new URL("../app/api/agent/route.ts", import.meta.url),
+    "utf8",
+  );
+  const reviewerEventFromPayload = exportedFunctionFromTypeScript(
+    route,
+    "reviewerEventFromPayload",
+  );
+
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        reviewerEventFromPayload({
+          stage: "review-result",
+          title: "Проверка завершена",
+          detail: "Факты подтверждены.",
+        }),
+      ),
+    ),
+    {
+      stage: "review-result",
+      title: "Проверка завершена",
+      detail: "Факты подтверждены.",
+      state: "done",
+    },
+  );
+  assert.equal(
+    reviewerEventFromPayload({
+      stage: "review-fallback",
+      title: "Решение передано руководителю",
+      detail: "Требуется ручная проверка.",
+    }).state,
+    "error",
+  );
+  assert.equal(
+    reviewerEventFromPayload({
+      stage: "decision",
+      title: "Подмена stage",
+      detail: "Не должна пройти.",
+    }),
+    null,
+  );
+  assert.equal(
+    reviewerEventFromPayload({
+      stage: "review-skipped",
+      title: "",
+      detail: "Нет title.",
+    }),
+    null,
+  );
+});
+
+test("marks order and agent JSON success and error responses no-store", async () => {
+  const [ordersRoute, agentRoute, ledgerRoute] = await Promise.all([
+    readFile(new URL("../app/api/orders/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/ledger/route.ts", import.meta.url), "utf8"),
+  ]);
+  for (const route of [ordersRoute, agentRoute]) {
+    const noStoreResponseInit = exportedFunctionFromTypeScript(
+      route,
+      "noStoreResponseInit",
+      {
+        Headers,
+        noStoreHeaders: {
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      },
+    );
+    const init = noStoreResponseInit({ headers: { "Retry-After": "3" } });
+    assert.equal(init.headers.get("Cache-Control"), "no-store");
+    assert.equal(init.headers.get("X-Content-Type-Options"), "nosniff");
+    assert.equal(init.headers.get("Retry-After"), "3");
+  }
+  assert.match(ledgerRoute, /const noStoreHeaders = \{/);
+  assert.match(ledgerRoute, /headers: noStoreHeaders/);
 });
 
 test("guards recalculation with fresh-stock and compare-and-set checks", async () => {
@@ -269,11 +1119,18 @@ test("retries an errored order in the same card with a compare-and-set transitio
   );
   const retry = route.slice(
     route.indexOf('if (action === "retry")'),
-    route.indexOf("if (subject.length < 5"),
+    route.indexOf("if (!subject || body.length < 3"),
   );
 
-  assert.match(retry, /canChangeOrder\(request, failedOrder\.actionTokenHash\)/);
+  assert.match(
+    retry,
+    /canChangeOrder\(request, failedCapability\.actionTokenHash\)/,
+  );
   assert.match(retry, /eq\(orders\.status, "error"\)/);
+  assert.match(
+    retry,
+    /eq\(orders\.status, "processing"\)[\s\S]*?lte\(orders\.leaseUntil, sql`CURRENT_TIMESTAMP`\)/,
+  );
   assert.match(retry, /coalesce\(\$\{orders\.resultJson\}/);
   assert.match(retry, /coalesce\(\$\{orders\.inventorySnapshotJson\}/);
   assert.match(retry, /orders\.roundNo/);
@@ -282,12 +1139,90 @@ test("retries an errored order in the same card with a compare-and-set transitio
   assert.match(retry, /status:\s*"queued"/);
   assert.match(
     retry,
-    /await db\.batch\(\[\s*retryEventQuery,\s*retryOrderQuery,\s*\]\)/,
+    /await db\.batch\(\[\s*closeActiveEventsQuery,\s*retryEventQuery,\s*retryOrderQuery,\s*\]\)/,
   );
   assert.doesNotMatch(
     retry,
     /roundNo:\s*failedOrder\.roundNo\s*\+\s*1|resultJson:\s*null|inventorySnapshotJson:\s*null/,
   );
+});
+
+test("accepts a short free-form target request for an attached photo", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(route, /if \(!subject \|\| body\.length < 3\)/);
+  assert.doesNotMatch(route, /body\.length < 20/);
+});
+
+test("retry accepts an expired processing claim but rejects an active lease", async () => {
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    const insert = database.prepare(`
+      INSERT INTO orders (
+        id, subject, body, status, mode, round_no, claim_id, lease_until
+      ) VALUES (?, 'Заказ', 'Свободное письмо клиента', 'processing',
+                'opencode-live', 1, ?, ?)
+    `);
+    insert.run(
+      "expired-order",
+      "claim-expired",
+      "2026-07-31 09:00:00",
+    );
+    insert.run(
+      "active-order",
+      "claim-active",
+      "2026-07-31 09:05:00",
+    );
+    const retry = database.prepare(`
+      UPDATE orders
+      SET status = 'queued',
+          claim_id = NULL,
+          claimed_by = NULL,
+          lease_until = NULL
+      WHERE id = ?
+        AND (
+          status = 'error'
+          OR (
+            status = 'processing'
+            AND (lease_until IS NULL OR lease_until <= ?)
+          )
+        )
+    `);
+
+    assert.equal(
+      retry.run("expired-order", "2026-07-31 09:02:00").changes,
+      1,
+    );
+    assert.equal(
+      retry.run("active-order", "2026-07-31 09:02:00").changes,
+      0,
+    );
+    assert.equal(
+      database
+        .prepare("SELECT status FROM orders WHERE id = 'expired-order'")
+        .get().status,
+      "queued",
+    );
+    assert.equal(
+      database
+        .prepare("SELECT status FROM orders WHERE id = 'active-order'")
+        .get().status,
+      "processing",
+    );
+  } finally {
+    database.close();
+  }
 });
 
 test("preserves confirmed company research while refreshing commercial facts", async () => {
@@ -445,6 +1380,27 @@ test("commits clarification and autonomous customer reply as complete transition
   assert.doesNotMatch(autonomousReply, /db\.insert\(orderEvents\)/);
 });
 
+test("commits each initial order with its first observable rows in one batch", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const initialWrite = route.slice(
+    route.indexOf("const commonOrder = {"),
+    route.indexOf("export async function PATCH"),
+  );
+
+  assert.match(
+    initialWrite,
+    /if \(!recordedMode\)[\s\S]*?await db\.batch\(\[[\s\S]*?db\.insert\(orders\)[\s\S]*?db\.insert\(orderEvents\)/,
+  );
+  assert.match(
+    initialWrite,
+    /isCompleteAgentResult\(result\)[\s\S]*?insertResultHistoryWhen\([\s\S]*?await db\.batch\(\[[\s\S]*?db\.insert\(orders\)[\s\S]*?historyQuery[\s\S]*?db\.insert\(orderEvents\)/,
+  );
+  assert.doesNotMatch(initialWrite, /appendResultHistory/);
+});
+
 test("commits critical order transitions together with their ledger rows", async () => {
   const [agentRoute, ordersRoute] = await Promise.all([
     readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
@@ -471,19 +1427,23 @@ test("commits critical order transitions together with their ledger rows", async
     ordersRoute.lastIndexOf("const now = new Date().toISOString()"),
   );
 
-  for (const branch of [
+  assert.match(
     liveResult,
-    recalculation,
-    reservation,
-    send,
-    approval,
-  ]) {
+    /!\("schemaVersion" in result\)[\s\S]*?result\.schemaVersion !== 2[\s\S]*?!isCompleteAgentResult\(result\)/,
+  );
+  assert.match(liveResult, /const completedClaimGuard = and\(/);
+  for (const branch of [recalculation, reservation, send, approval]) {
     assert.match(branch, /await db\.batch\(/);
     assert.match(branch, /const transitionGuard = and\(/);
   }
+  assert.match(liveResult, /await db\.batch\(/);
   assert.match(
     liveResult,
-    /insertResultHistoryWhen\([\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*historyQuery,\s*closeActiveEventsQuery,\s*supplierEventQuery,\s*decisionEventQuery,\s*updateOrderQuery,\s*\]\)/,
+    /const reviewerEvent = reviewerEventFromPayload\(\s*payload\.reviewerProvenance,\s*\)[\s\S]*?const reviewerEventQuery = insertOrderEventWhen\([\s\S]*?completedClaimGuard[\s\S]*?await db\.batch\(\[\s*updateOrderQuery,\s*historyQuery,\s*closeActiveEventsQuery,\s*reviewerEventQuery,\s*supplierEventQuery,\s*decisionEventQuery,\s*clearClaimQuery,\s*\]\)/,
+  );
+  assert.match(
+    liveResult,
+    /\.where\(claimGuard\)[\s\S]*?\.where\(completedClaimGuard\)/,
   );
   assert.match(
     recalculation,
@@ -495,7 +1455,7 @@ test("commits critical order transitions together with their ledger rows", async
   );
   assert.match(
     send,
-    /eq\(orders\.status, "reserved"\)[\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*sentEventQuery,\s*updateOrderQuery,\s*\]\)/,
+    /sendsEstimate[\s\S]*?result\?\.commitment === "estimate"[\s\S]*?sendsCommercialOffer[\s\S]*?result\?\.commitment === "commercial_offer"[\s\S]*?sendsEstimate \? "ready_to_send" : "reserved"[\s\S]*?insertOrderEventWhen\([\s\S]*?await db\.batch\(\[\s*sentEventQuery,\s*updateOrderQuery,\s*\]\)/,
   );
   assert.match(
     approval,
@@ -579,7 +1539,7 @@ test("rechecks the other supplier before approval, reserve and send", async () =
     ordersRoute.indexOf('if (action !== "approve"'),
   );
   for (const branch of [reservation, approval, send]) {
-    assert.match(branch, /confirmSupplierPlan\(/);
+    assert.match(branch, /confirmedSupplierPlanForSnapshot\(/);
     assert.match(
       branch,
       /Данные поставщика обновились\. Пересчитайте заказ/,
@@ -602,6 +1562,70 @@ test("rechecks the other supplier before approval, reserve and send", async () =
   assert.match(
     ordersRoute,
     /title:\s*"Нужен свежий расчёт совместной поставки"/,
+  );
+  assert.match(ordersRoute, /confirmSupplierPlan\(/);
+  assert.match(approval, /option\.id === "confirm-supplier-plan"/);
+  assert.match(approval, /supplierPlanAfterApproval\(/);
+  assert.doesNotMatch(approval, /option\.id === "помочь-с-недостающим-объёмом"/);
+});
+
+test("accepts a fresh internal supplier snapshot and rejects stale or mismatched data", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const confirmedSupplierPlanForSnapshot = exportedFunctionFromTypeScript(
+    route,
+    "confirmedSupplierPlanForSnapshot",
+    {
+      storedJson: (value, fallback) => {
+        try {
+          return value ? JSON.parse(value) : fallback;
+        } catch {
+          return fallback;
+        }
+      },
+      confirmSupplierPlan,
+    },
+  );
+  const plan = {
+    category: "краска для бетонного пола",
+    supplierName: "Внутренний поставщик",
+    supplierKg: 200,
+    supplierStockKg: 260,
+    supplierPricePerKg: 402,
+    deliveryDays: 4,
+    stockCheckedAt: "01.08.2026, 10:00",
+  };
+  const market = [
+    {
+      category: plan.category,
+      competitor: plan.supplierName,
+      stockKg: plan.supplierStockKg,
+      pricePerKg: plan.supplierPricePerKg,
+      deliveryDays: plan.deliveryDays,
+      stockCheckedAt: plan.stockCheckedAt,
+    },
+  ];
+  const order = { inventorySnapshotJson: JSON.stringify({ market }) };
+
+  assert.equal(
+    confirmedSupplierPlanForSnapshot(order, plan, market)?.supplierName,
+    plan.supplierName,
+  );
+  assert.equal(
+    confirmedSupplierPlanForSnapshot(order, plan, [
+      { ...market[0], pricePerKg: 403 },
+    ]),
+    null,
+  );
+  assert.equal(
+    confirmedSupplierPlanForSnapshot(
+      { inventorySnapshotJson: JSON.stringify({ market: [] }) },
+      plan,
+      market,
+    ),
+    null,
   );
 });
 
@@ -752,14 +1776,23 @@ test("routes a manager question back to the same customer conversation", async (
     }),
     true,
   );
+  assert.equal(
+    optionNeedsCustomerReply({
+      id: "confirm-supplier-plan",
+      followUpActor: "supplier",
+      reply: "Поставщик подтвердит объём и срок перед коммерческим действием.",
+    }),
+    false,
+  );
 
   const approval = ordersRoute.slice(
     ordersRoute.indexOf('if (action !== "approve"'),
   );
   assert.match(
     approval,
-    /needsCustomerReply[\s\S]*?result\.route = "needs_info"[\s\S]*?"clarification_ready"/,
+    /result\.resolvedIntent\.target\.state === "ambiguous"[\s\S]*?needsCustomerReply[\s\S]*?result\.route = "needs_info"/,
   );
+  assert.match(approval, /approvalStatus\(needsCustomerReply, result\.commitment\)/);
   assert.match(
     approval,
     /\.set\(\{[\s\S]*?status:\s*nextStatus,[\s\S]*?zone:\s*result\.zone,[\s\S]*?managerDecision:/,
@@ -822,4 +1855,76 @@ test("replaces live model product facts after the manager chooses another paint"
     "Цена: 382 ₽/кг",
   ]);
   assert.doesNotMatch(understood.join(" "), /КР-001|349|300 кг/iu);
+});
+
+test("keeps canonical supplier plans except for approved product alternatives", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const supplierPlanAfterApproval = exportedFunctionFromTypeScript(
+    route,
+    "supplierPlanAfterApproval",
+  );
+  const plan = {
+    supplierName: "Поставщик",
+    supplierKg: 200,
+    confirmedAt: "old",
+  };
+  const canonicalPlan = { ...plan };
+  const confirmed = { ...plan, supplierStockKg: 300, confirmedAt: "old" };
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      supplierPlanAfterApproval(plan, "split-from-stock", confirmed, "now", false),
+    )),
+    canonicalPlan,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      supplierPlanAfterApproval(plan, "schedule-production", confirmed, "now", false),
+    )),
+    canonicalPlan,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      supplierPlanAfterApproval(plan, "confirm-supplier-plan", confirmed, "now", false),
+    )),
+    { ...confirmed, confirmedAt: "now" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      supplierPlanAfterApproval(plan, "custom-internal-option", confirmed, "now", false),
+    )),
+    canonicalPlan,
+  );
+  assert.equal(
+    supplierPlanAfterApproval(plan, "custom-internal-option", confirmed, "now", true),
+    undefined,
+  );
+});
+
+test("does not turn a complete non-clarification approval without commitment into a dead ready order", async () => {
+  const route = await readFile(
+    new URL("../app/api/orders/route.ts", import.meta.url),
+    "utf8",
+  );
+  const approvalStatus = exportedFunctionFromTypeScript(
+    route,
+    "approvalStatus",
+  );
+
+  assert.equal(approvalStatus(true, "commercial_offer"), "clarification_ready");
+  assert.equal(approvalStatus(false, "estimate"), "ready_to_send");
+  assert.equal(approvalStatus(false, "commercial_offer"), "ready_to_send");
+  assert.equal(approvalStatus(false, "none"), "error");
+  const approval = route.slice(route.indexOf('if (action !== "approve"'));
+  assert.match(
+    approval,
+    /if \(!isCompleteAgentResult\(result\)\)[\s\S]*?recalculate:\s*true[\s\S]*?return Response\.json/,
+  );
+  assert.ok(
+    approval.indexOf("if (!isCompleteAgentResult(result))") <
+      approval.indexOf("const historyQuery"),
+  );
 });

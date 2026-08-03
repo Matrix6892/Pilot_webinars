@@ -10,6 +10,9 @@ import {
 const floorPaint = demoData.products.find(
   (product) => product.sku === "КР-003",
 );
+const metalPaint = demoData.products.find(
+  (product) => product.sku === "КР-001",
+);
 
 test("считает совместную поставку по ценам каждой части", () => {
   const plan = buildSupplierPlan(floorPaint, demoData.market, 620);
@@ -68,6 +71,35 @@ test("график первой партии не меняет недостаю�
 
   assert.equal(plan?.ourKg, 420);
   assert.equal(plan?.supplierKg, 200);
+});
+
+test("при снижении быстрого поставщика до 150 кг выбирает полный fallback", () => {
+  const reducedMarket = demoData.market.map((item) =>
+    item.competitor === "Индустрия Покрытий"
+      ? { ...item, stockKg: 150 }
+      : item,
+  );
+  const plan = buildSupplierPlan(floorPaint, reducedMarket, 620);
+
+  assert.equal(plan?.supplierName, "Покрытия Волга");
+  assert.equal(plan?.supplierKg, 200);
+  assert.equal(plan?.deliveryDays, 7);
+  assert.equal(plan?.total, 256300);
+});
+
+test("закрывает дефицит 1700 кг подтверждённым учебным предложением", () => {
+  const plan = buildSupplierPlan(metalPaint, demoData.market, 2000);
+
+  assert.equal(plan?.ourKg, 300);
+  assert.equal(plan?.supplierKg, 1700);
+  assert.equal(plan?.supplierName, "ПромКолор Опт");
+  assert.equal(plan?.supplierStockKg, 2000);
+  assert.equal(plan?.supplierPricePerKg, 361);
+  assert.equal(plan?.deliveryDays, 4);
+  assert.equal(plan?.stockCheckedAt, "31.07.2026, 09:00");
+  assert.equal(plan?.ourSubtotal, 104700);
+  assert.equal(plan?.supplierSubtotal, 613700);
+  assert.equal(plan?.total, 718400);
 });
 
 test("повторная проверка принимает только то же актуальное предложение", () => {

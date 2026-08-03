@@ -1155,6 +1155,10 @@ main {
   opacity: 1;
 }
 
+.event-item.is-history {
+  background: var(--paper);
+}
+
 .event-item.is-error {
   border-color: #dda49e;
   background: var(--red-soft);
@@ -1194,6 +1198,33 @@ main {
   background: var(--blue);
   box-shadow: 0 0 0 0 rgb(49 92 115 / 30%);
   animation: pulse 1.4s ease-out infinite;
+}
+
+.previous-result-history {
+  display: grid;
+  margin: -8px 0 22px;
+  padding: 14px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 13px;
+  background: var(--paper);
+  gap: 4px;
+}
+
+.previous-result-history span,
+.previous-result-history small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.previous-result-history strong {
+  font-size: 13px;
+}
+
+.previous-result-history p {
+  margin: 2px 0;
+  color: #565c58;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .error-state {

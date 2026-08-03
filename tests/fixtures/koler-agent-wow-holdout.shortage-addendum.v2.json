@@ -1,0 +1,83 @@
+{
+  "manifest": {
+    "id": "koler-agent-wow-holdout-shortage-addendum",
+    "version": "2.0.0",
+    "schemaVersion": 2,
+    "status": "immutable-post-observation-addendum",
+    "extends": "koler-agent-wow-holdout@1.0.0",
+    "frozenParentCaseSetSha256": "03e49fcb83ad33f16410d2375484d1a0356215da6d895aa623b00ee276f58191",
+    "dataClass": "synthetic-recording",
+    "containsRealPersonalData": false,
+    "caseCount": 1,
+    "caseSetSha256": "710fddce0f18ea2acdae3ad92875d8fbfdda4af0d3e9ca77705865615467b5b8"
+  },
+  "cases": [
+    {
+      "id": "wow-08-shortage-opened-lead-addendum",
+      "baseCaseId": "wow-08-two-ton-shortage",
+      "toolObservation": {
+        "openedPages": [
+          {
+            "url": "https://catalog.bulkcoat.example/industrial/metal-coating",
+            "pageKind": "direct_supplier_page",
+            "openedAt": "2026-07-31T13:45:00+03:00"
+          }
+        ],
+        "searchSnippets": [
+          {
+            "resultUrl": "https://offers.paintmarket.example/metal/bulk-lot",
+            "opened": false
+          }
+        ]
+      },
+      "supplierLeadCandidates": [
+        {
+          "supplier": "Индустриальные покрытия Онлайн",
+          "url": "https://catalog.bulkcoat.example/industrial/metal-coating",
+          "openedAt": "2026-07-31T13:45:00+03:00",
+          "observedClaims": [
+            "На прямой странице поставщика опубликовано направление оптовых поставок покрытий для металла."
+          ],
+          "confirmationNeeded": [
+            "Совместимость с КР-001",
+            "Наличие 1 700 кг",
+            "Цена",
+            "Срок поставки"
+          ]
+        },
+        {
+          "supplier": "Северный резерв",
+          "url": "https://offers.paintmarket.example/metal/bulk-lot",
+          "openedAt": "2026-07-31T13:44:00+03:00",
+          "observedClaims": [
+            "Поисковый сниппет упоминает крупную партию покрытия."
+          ],
+          "confirmationNeeded": [
+            "Открыть прямую страницу",
+            "Наличие",
+            "Цена",
+            "Срок поставки"
+          ]
+        }
+      ],
+      "expected": {
+        "requestedKg": 2000,
+        "ownStockKg": 300,
+        "deficitKg": 1700,
+        "route": "manager",
+        "zone": "red",
+        "commitment": "commercial_offer",
+        "minOptions": 2,
+        "maxOptions": 3,
+        "confirmedSnapshotPlan": {
+          "supplierName": "ПромКолор Опт",
+          "ourKg": 300,
+          "supplierKg": 1700,
+          "total": 718400
+        },
+        "publicLeadUrl": "https://catalog.bulkcoat.example/industrial/metal-coating",
+        "snippetOnlyUrl": "https://offers.paintmarket.example/metal/bulk-lot"
+      }
+    }
+  ]
+}

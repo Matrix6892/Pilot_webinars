@@ -1,22 +1,33 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdtemp,
   readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
+import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   applyReviewerResult,
-  normalizeAgentResult,
+  isCompleteAgentResult,
+  managerFallbackAgentResult,
+  normalizeV2AgentResult,
+  reviewerAllowedPathPrefixes,
+  reviewerDecisionValidationErrors,
+  validateReviewerDecisionV2,
 } from "../lib/agent-guard.mjs";
 import {
   normalizeVisionObservation,
   resolveVisionImageUrl,
   visionPromptBlock,
 } from "../lib/upload-guard.mjs";
-import { downloadVisionImage } from "../lib/upload-vision.mjs";
+import {
+  downloadVisionImage,
+  IMAGE_DOWNLOAD_TIMEOUT_MS,
+} from "../lib/upload-vision.mjs";
+import { isSearchResultUrl } from "../lib/public-web-url.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -60,20 +71,34 @@ const visionInstruction = await readFile(
   resolve(root, "public/prompts/vision-agent.md"),
   "utf8",
 );
-const allowedModels = new Set(modelCatalog.options.map((model) => model.id));
+const allowedPrimaryModels = new Set(
+  modelCatalog.options
+    .filter((model) => model.roles?.includes("primary"))
+    .map((model) => model.id),
+);
+const modelOption = (id) =>
+  modelCatalog.options.find((model) => model.id === id);
 const modelLabel = (id) =>
-  modelCatalog.options.find((model) => model.id === id)?.label ?? id;
+  modelOption(id)?.label ?? id;
+const modelVariant = (id) => modelOption(id)?.variant;
 const requestedPrimary =
   process.env.OPENCODE_PRIMARY_MODEL ?? modelCatalog.default;
-const fallbackPrimary = allowedModels.has(requestedPrimary)
+const fallbackPrimary = allowedPrimaryModels.has(requestedPrimary)
   ? requestedPrimary
   : modelCatalog.default;
 const strongReviewer = "opencode-go/deepseek-v4-pro";
 const visionModel = "opencode-go/mimo-v2.5";
+const bridgeWorkerId = `bridge-${crypto.randomUUID()}`;
 const agentApiTimeoutMs = 12_000;
-const openCodeTimeoutMs = 120_000;
-const openCodeSearchTimeoutMs = 70_000;
+const openCodeTimeoutMs = 300_000;
+const visionOpenCodeTimeoutMs = 180_000;
+const primaryOpenCodeTimeoutMs = 600_000;
+const reviewerOpenCodeTimeoutMs = 300_000;
+const jobDeadlineMs = 700_000;
 const openCodeTerminationGraceMs = 5_000;
+const terminalPublicationReserveMs = agentApiTimeoutMs;
+const MAX_OPENED_SOURCE_EXCERPT_CHARS = 12_000;
+const leaseRenewalMs = 30_000;
 
 let stopped = false;
 let busy = false;
@@ -83,7 +108,7 @@ function sleep(ms) {
 }
 
 function selectedModel(job) {
-  return allowedModels.has(job.requestedModel)
+  return allowedPrimaryModels.has(job.requestedModel)
     ? job.requestedModel
     : fallbackPrimary;
 }
@@ -162,7 +187,412 @@ function storedJobJson(value, fallback) {
   }
 }
 
-function childEnvironment() {
+function promptText(value, max) {
+  return typeof value === "string"
+    ? value.replace(/\s+/gu, " ").trim().slice(0, max)
+    : "";
+}
+
+function promptStringList(value, limit, max) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => promptText(item, max))
+        .filter(Boolean)
+        .slice(0, limit)
+    : [];
+}
+
+function promptHttpUrl(value) {
+  const url = canonicalHttpUrl(value);
+  return url && !isSearchResultUrl(url) ? url : "";
+}
+
+function promptAttachment(job) {
+  const value = storedJobJson(job?.attachmentJson, null);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const name = promptText(value.name, 160);
+  const src = promptText(value.src, 240);
+  const alt = promptText(value.alt, 240);
+  return name && src && alt ? { name, src, alt } : null;
+}
+
+function promptConversation(job) {
+  const value = storedJobJson(job?.conversationJson, []);
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((message) => {
+      if (
+        !message ||
+        typeof message !== "object" ||
+        !["agent", "customer"].includes(message.role)
+      ) {
+        return null;
+      }
+      const body = promptText(message.body, 2_000);
+      if (!body) return null;
+      return {
+        role: message.role,
+        body,
+        createdAt: promptText(message.createdAt, 80),
+      };
+    })
+    .filter(Boolean)
+    .slice(-20);
+}
+
+function reviewerOrderView(job) {
+  return {
+    company: promptText(job?.company, 200),
+    website: promptText(job?.website, 240),
+    subject: promptText(job?.subject, 300),
+    body: promptText(job?.body, 6_000),
+    attachment: promptAttachment(job),
+    conversation: promptConversation(job),
+    round: Math.max(1, Number(job?.roundNo) || 1),
+  };
+}
+
+function promptEvidenceSource(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  if (value.kind === "message") {
+    const quote = promptText(value.quote, 420);
+    const roundNo = Number(value.roundNo);
+    return quote && Number.isSafeInteger(roundNo) && roundNo > 0
+      ? { kind: "message", roundNo, quote }
+      : null;
+  }
+  if (value.kind === "vision") {
+    const attachmentRef = promptText(value.attachmentRef, 240);
+    const observation = promptText(value.observation, 320);
+    return attachmentRef && observation
+      ? { kind: "vision", attachmentRef, observation }
+      : null;
+  }
+  if (value.kind === "web") {
+    const url = promptHttpUrl(value.url);
+    const title = promptText(value.title, 200);
+    const openedAt = promptText(value.openedAt, 80);
+    const excerpt = promptText(value.excerpt, 12_000);
+    const sha256 = /^[a-f0-9]{64}$/u.test(String(value.sha256 ?? ""))
+      ? String(value.sha256)
+      : "";
+    return url && title && openedAt
+      ? {
+          kind: "web",
+          url,
+          title,
+          openedAt,
+          ...(excerpt
+            ? {
+                excerptLength: excerpt.length,
+                excerptSha256:
+                  sha256 || createHash("sha256").update(excerpt).digest("hex"),
+                guardGrounded: Boolean(
+                  sha256 &&
+                    createHash("sha256").update(excerpt).digest("hex") === sha256,
+                ),
+              }
+            : {}),
+        }
+      : null;
+  }
+  if (
+    value.kind === "snapshot" &&
+    ["catalog", "inventory", "supplier"].includes(value.dataset)
+  ) {
+    const key = promptText(value.key, 140);
+    const version = promptText(value.version, 100);
+    const checkedAt = promptText(value.checkedAt, 80);
+    return key && version && checkedAt
+      ? {
+          kind: "snapshot",
+          dataset: value.dataset,
+          key,
+          version,
+          checkedAt,
+        }
+      : null;
+  }
+  return null;
+}
+
+function promptResolvedIntent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const evidence = Array.isArray(value.evidence)
+    ? value.evidence
+        .map((item) => {
+          const source = promptEvidenceSource(item?.source);
+          const id = promptText(item?.id, 100);
+          const claim = promptText(item?.claim, 360);
+          const confidence = Number(item?.confidence);
+          return id &&
+            claim &&
+            Number.isFinite(confidence) &&
+            confidence >= 0 &&
+            confidence <= 1 &&
+            source
+            ? { id, claim, confidence, source }
+            : null;
+        })
+        .filter(Boolean)
+        .slice(0, 16)
+    : [];
+  const assumptions = Array.isArray(value.assumptions)
+    ? value.assumptions
+        .map((item) => {
+          const id = promptText(item?.id, 100);
+          const claim = promptText(item?.claim, 360);
+          const confidence = Number(item?.confidence);
+          const confirmBefore = [
+            "never",
+            "commercial_offer",
+            "reserve",
+            "production",
+          ].includes(item?.confirmBefore)
+            ? item.confirmBefore
+            : "";
+          if (
+            !id ||
+            !claim ||
+            !Number.isFinite(confidence) ||
+            confidence < 0 ||
+            confidence > 1 ||
+            !confirmBefore
+          ) {
+            return null;
+          }
+          const basedOnEvidenceIds = promptStringList(
+            item.basedOnEvidenceIds,
+            12,
+            100,
+          );
+          const min = Number(item.range?.min);
+          const max = Number(item.range?.max);
+          const unit = promptText(item.range?.unit, 24);
+          return {
+            id,
+            claim,
+            basedOnEvidenceIds,
+            confidence,
+            ...(Number.isFinite(min) &&
+            Number.isFinite(max) &&
+            max >= min &&
+            unit
+              ? { range: { min, max, unit } }
+              : {}),
+            confirmBefore,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+  const target =
+    value.target?.state === "resolved"
+      ? {
+          state: "resolved",
+          label: promptText(value.target.label, 160),
+          evidenceIds: promptStringList(
+            value.target.evidenceIds,
+            12,
+            100,
+          ),
+        }
+      : value.target?.state === "ambiguous"
+        ? {
+            state: "ambiguous",
+            candidates: Array.isArray(value.target.candidates)
+              ? value.target.candidates
+                  .map((candidate) => {
+                    const label = promptText(candidate?.label, 160);
+                    const confidence = Number(candidate?.confidence);
+                    return label &&
+                      Number.isFinite(confidence) &&
+                      confidence >= 0 &&
+                      confidence <= 1
+                      ? {
+                          label,
+                          confidence,
+                          evidenceIds: promptStringList(
+                            candidate.evidenceIds,
+                            12,
+                            100,
+                          ),
+                        }
+                      : null;
+                  })
+                  .filter(Boolean)
+                  .slice(0, 6)
+              : [],
+          }
+        : null;
+  const blocker =
+    value.blocker?.kind === "target_ambiguity"
+      ? {
+          kind: "target_ambiguity",
+          question: promptText(value.blocker.question, 320),
+          choices: promptStringList(value.blocker.choices, 6, 120),
+        }
+      : null;
+  const goal = promptText(value.goal, 320);
+  return goal && target && evidence.length
+    ? { goal, target, evidence, assumptions, blocker }
+    : null;
+}
+
+function reviewerResultView(result) {
+  const supplierPlan = result?.supplierPlan
+    ? {
+        supplierName: result.supplierPlan.supplierName,
+        ourKg: result.supplierPlan.ourKg,
+        supplierKg: result.supplierPlan.supplierKg,
+        ourPricePerKg: result.supplierPlan.ourPricePerKg,
+        supplierPricePerKg: result.supplierPlan.supplierPricePerKg,
+        total: result.supplierPlan.total,
+        deliveryDays: result.supplierPlan.deliveryDays,
+        supplierStockKg: result.supplierPlan.supplierStockKg,
+        stockCheckedAt: result.supplierPlan.stockCheckedAt,
+        source: {
+          kind: "snapshot",
+          dataset: "supplier",
+          key: result.supplierPlan.supplierName,
+          checkedAt: result.supplierPlan.stockCheckedAt,
+        },
+      }
+    : undefined;
+  return {
+    schemaVersion: result?.schemaVersion,
+    zone: result?.zone,
+    route: result?.route,
+    commitment: result?.commitment,
+    confidence: result?.confidence,
+    resolvedIntent: promptResolvedIntent(result?.resolvedIntent),
+    estimates: result?.estimates,
+    supplierLeads: Array.isArray(result?.supplierLeads)
+      ? result.supplierLeads.map((lead) => ({
+          supplier: lead.supplier,
+          url: lead.url,
+          openedAt: lead.openedAt,
+          observedClaims: lead.observedClaims,
+          confirmationNeeded: lead.confirmationNeeded,
+        }))
+      : [],
+    product: result?.product,
+    supplierPlan,
+    options: Array.isArray(result?.options)
+      ? result.options.map((option) => ({
+          id: option.id,
+          title: promptText(option.title, 160),
+          rationale: promptText(option.rationale, 260),
+          tradeoff: promptText(option.tradeoff, 260),
+          reply: promptText(option.reply, 260),
+          followUpActor: option.followUpActor,
+        }))
+      : [],
+    reply: result?.reply,
+  };
+}
+
+function promptResearch(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const sources = Array.isArray(value.sources)
+    ? value.sources
+        .map((source) => {
+          const title = promptText(source?.title, 200);
+          const url = promptHttpUrl(source?.url);
+          const checkedAt = promptText(source?.checkedAt, 80);
+          const fact = promptText(source?.fact, 360);
+          return title && url && checkedAt && fact
+            ? { title, url, checkedAt, fact }
+            : null;
+        })
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+  if (!sources.length) return null;
+  return {
+    checked: value.checked === true,
+    summary: promptText(value.summary, 700),
+    sources,
+  };
+}
+
+function continuationContextForJob(job) {
+  const previousResult = storedJobJson(job?.resultJson, null);
+  const conversation = promptConversation(job);
+  const latestCustomerReply = [...conversation]
+    .reverse()
+    .find((message) => message.role === "customer");
+  const currentRound = Number(job?.roundNo);
+  const priorMessageRound = Math.max(
+    1,
+    ...(Array.isArray(previousResult?.resolvedIntent?.evidence)
+      ? previousResult.resolvedIntent.evidence
+          .filter((item) => item?.source?.kind === "message")
+          .map((item) => Number(item.source.roundNo))
+          .filter((roundNo) => Number.isSafeInteger(roundNo) && roundNo > 0)
+      : []),
+  );
+  if (
+    !Number.isSafeInteger(currentRound) ||
+    currentRound <= priorMessageRound ||
+    previousResult?.schemaVersion !== 2 ||
+    previousResult?.resolvedIntent?.blocker?.kind !==
+      "target_ambiguity" ||
+    !latestCustomerReply
+  ) {
+    return null;
+  }
+
+  const resolvedIntent = promptResolvedIntent(
+    previousResult.resolvedIntent,
+  );
+  if (!resolvedIntent) return null;
+  const culturalResearch = promptResearch(previousResult.research);
+  const visionObservation =
+    normalizeVisionObservation(previousResult.visionObservation) ?? null;
+  const openedSources = (Array.isArray(previousResult.resolvedIntent?.evidence)
+    ? previousResult.resolvedIntent.evidence
+    : [])
+    .map((item) => item?.source)
+    .filter(
+      (source) =>
+        source?.kind === "web" &&
+        source.excerpt &&
+        /^[a-f0-9]{64}$/u.test(source.sha256 ?? ""),
+    )
+    .map(({ url, openedAt, excerpt, sha256 }) => ({
+      url,
+      openedAt,
+      excerpt,
+      sha256,
+    }));
+  const openedSourceUrls = [
+    ...resolvedIntent.evidence
+      .filter((item) => item.source.kind === "web")
+      .map((item) => item.source.url),
+    ...(culturalResearch?.sources.map((source) => source.url) ?? []),
+  ].filter(Boolean);
+
+  return {
+    previousRound: currentRound - 1,
+    latestCustomerReply,
+    resolvedIntent,
+    visionObservation,
+    culturalResearch,
+    openedSourceUrls: [...new Set(openedSourceUrls)],
+    openedSources,
+  };
+}
+
+function childEnvironment(model) {
   const names = [
     "HOME",
     "LANG",
@@ -180,6 +610,9 @@ function childEnvironment() {
     "USER",
     "XDG_CONFIG_HOME",
   ];
+  if (String(model).startsWith("deepseek/")) {
+    names.push("DEEPSEEK_API_KEY");
+  }
   return Object.fromEntries(
     names
       .filter((name) => typeof process.env[name] === "string")
@@ -187,13 +620,18 @@ function childEnvironment() {
   );
 }
 
-async function agentRequest(payload, method = "POST") {
+async function agentRequest(
+  payload,
+  method = "POST",
+  timeoutMs = agentApiTimeoutMs,
+) {
   const response = await fetch(`${standUrl}/api/agent`, {
     method,
-    signal: AbortSignal.timeout(agentApiTimeoutMs),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       authorization: `Bearer ${bridgeToken}`,
       "content-type": "application/json",
+      "x-bridge-worker-id": bridgeWorkerId,
     },
     ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
   });
@@ -203,15 +641,103 @@ async function agentRequest(payload, method = "POST") {
   return response.json();
 }
 
-async function addEvent(orderId, stage, title, detail, state = "done") {
-  await agentRequest({
-    action: "event",
-    orderId,
-    stage,
-    title,
-    detail,
-    state,
+function claimPayload(job) {
+  return {
+    orderId: job.id,
+    roundNo: Number(job.roundNo),
+    claimId: job.claimId,
+  };
+}
+
+function openedSourceUrlsFromTools(tools) {
+  return [
+    ...new Set(
+      (Array.isArray(tools) ? tools : [])
+        .filter(
+          (tool) =>
+            tool?.tool === "public_webfetch" &&
+            tool.completed === true &&
+            tool.failed !== true,
+        )
+        .flatMap((tool) =>
+          Array.isArray(tool.urls)
+            ? tool.urls.filter((url) => typeof url === "string")
+            : [],
+        ),
+    ),
+  ];
+}
+
+function openedSourcesFromTools(tools) {
+  return (Array.isArray(tools) ? tools : [])
+    .filter((tool) => tool?.tool === "public_webfetch" && tool.completed === true && tool.failed !== true)
+    .flatMap((tool) => (Array.isArray(tool.urls) ? tool.urls : []).map((url) => ({
+      url,
+      openedAt: tool.openedAt,
+      excerpt: typeof tool.excerpt === "string" ? tool.excerpt.slice(0, MAX_OPENED_SOURCE_EXCERPT_CHARS) : "",
+      sha256: typeof tool.sha256 === "string" ? tool.sha256 : "",
+    })))
+    .filter((source) => source.url && source.openedAt && source.excerpt && /^[a-f0-9]{64}$/u.test(source.sha256))
+    .slice(0, 20);
+}
+
+function resultPayload(
+  job,
+  result,
+  openedSourceUrls,
+  agentModel,
+  reviewerModel,
+  reviewerProvenance,
+  openedSources,
+) {
+  return {
+    action: "result",
+    ...claimPayload(job),
+    result,
+    openedSourceUrls: [
+      ...new Set(
+        Array.isArray(openedSourceUrls)
+          ? openedSourceUrls.filter((url) => typeof url === "string")
+          : [],
+      ),
+    ],
+    ...(Array.isArray(openedSources) && openedSources.some((source) => source?.excerpt && source?.sha256)
+      ? { openedSources: openedSources.filter((source) => source?.excerpt && source?.sha256).slice(0, 20) }
+      : {}),
+    agentModel,
+    reviewerModel,
+    reviewerProvenance,
+  };
+}
+
+function addEvent(job, stage, title, detail, state = "done") {
+  let publication;
+  try {
+    publication = agentRequest({
+      action: "event",
+      ...claimPayload(job),
+      stage,
+      title,
+      detail,
+      state,
+    });
+  } catch {
+    telemetryWarning(`event publication failed: ${stage}`);
+    return Promise.resolve(false);
+  }
+  void publication.catch(() => {
+    telemetryWarning(`event publication failed: ${stage}`);
   });
+  return Promise.resolve(true);
+}
+
+function startLeaseRenewal(job) {
+  const timer = setInterval(() => {
+    agentRequest({ action: "renew", ...claimPayload(job) }).catch((error) => {
+      console.error(`[bridge] lease ${job.id}:`, error.message);
+    });
+  }, leaseRenewalMs);
+  return () => clearInterval(timer);
 }
 
 function extractJson(text) {
@@ -231,6 +757,99 @@ function extractJson(text) {
   }
 }
 
+function telemetryWarning(scope) {
+  globalThis.console?.warn?.(`[bridge] ${scope}`);
+}
+
+function partialRunResult(partialRun) {
+  const text = Array.isArray(partialRun?.textParts)
+    ? partialRun.textParts
+        .filter((part) => typeof part === "string")
+        .join("\n")
+    : "";
+  return {
+    value: extractJson(text),
+    tools: Array.isArray(partialRun?.tools) ? partialRun.tools : [],
+  };
+}
+
+function toolSummaryKey(tool) {
+  return JSON.stringify([
+    tool?.tool,
+    Array.isArray(tool?.urls) ? tool.urls : [],
+    tool?.openedAt,
+    tool?.completed,
+    tool?.failed,
+    tool?.detail,
+  ]);
+}
+
+function mergeToolSummaries(...runs) {
+  const seen = new Set();
+  return runs
+    .flatMap((run) => (Array.isArray(run?.tools) ? run.tools : []))
+    .filter((tool) => {
+      const key = toolSummaryKey(tool);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
+function mergePartialRuns(...runs) {
+  return {
+    textParts: runs.flatMap((run) =>
+      Array.isArray(run?.textParts) ? run.textParts : [],
+    ),
+    tools: mergeToolSummaries(...runs),
+  };
+}
+
+function safeManagerOptions(value) {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 3) {
+    return false;
+  }
+  const ids = new Set();
+  return value.every((option) => {
+    if (!option || typeof option !== "object" || Array.isArray(option)) {
+      return false;
+    }
+    const fields = [
+      option.id,
+      option.title,
+      option.rationale,
+      option.tradeoff,
+      option.reply,
+    ];
+    if (
+      fields.some((field) => typeof field !== "string" || !field.trim()) ||
+      !["supplier", "internal", "none"].includes(option.followUpActor) ||
+      ids.has(option.id)
+    ) {
+      return false;
+    }
+    ids.add(option.id);
+    return true;
+  });
+}
+
+function isCompleteFailClosedManager(result) {
+  return Boolean(
+    isCompleteAgentResult(result) &&
+      result?.schemaVersion === 2 &&
+      result.zone === "red" &&
+      result.decision === "escalate" &&
+      result.route === "manager" &&
+      result.commitment === "none" &&
+      result.product === null &&
+      Array.isArray(result.estimates) &&
+      result.estimates.length === 0 &&
+      result.resolvedIntent?.blocker === null &&
+      safeManagerOptions(result.options),
+  );
+}
+
 function inventorySnapshotDetail(productCount, version) {
   const normalizedVersion = String(version ?? "").trim();
   if (/^\d+$/.test(normalizedVersion)) {
@@ -241,73 +860,182 @@ function inventorySnapshotDetail(productCount, version) {
   }.`;
 }
 
-function sourcePlanForJob(job) {
-  const website = String(job?.website ?? "").trim();
-  const company = String(job?.company ?? "").trim();
-  const orderText = `${job?.subject ?? ""}\n${job?.body ?? ""}`;
-  const mentionsInn = /(?:^|[^\p{L}])инн(?:[^\p{L}]|$)/iu.test(
-    orderText,
-  );
-  const hasRealWebsite =
-    Boolean(website) && !/\.example(?:[/:?#]|$)/iu.test(website);
-  const hasSpecificCompanyName =
-    company.length >= 4 &&
-    !/^(?:клиент|частное лицо|физлицо|не указано|—)$/iu.test(company);
-  const businessContextCanChangeDecision =
-    /(?:тендер|конкурс|скидк|отсроч|после\s+(?:поставк|отгрузк)|сроч|завтра|пробн|тестов|провер|оборот|производ|парк|партн[её]р|долгосроч|фармацевт|медицин|санитар|дезинф(?:екц|иц)|склад|(?:^|[^\p{L}])пол(?:а|у|ом|ы|ов|е)?(?:[^\p{L}]|$))/iu.test(
-      orderText,
-    ) ||
-    /(?:^|[^\d])(?:[1-9]|[1-3]\d|40)\s*(?:кг|килограмм)/iu.test(
-      orderText,
-    );
-  const shouldSearchByName =
-    hasSpecificCompanyName &&
-    !website &&
-    businessContextCanChangeDecision;
-  const shouldCheckCompany =
-    mentionsInn ||
-    hasRealWebsite ||
-    shouldSearchByName;
-  return shouldCheckCompany
-    ? {
-        allowsPublicSearch: true,
-        title: "Агент решил проверить компанию",
-        detail: shouldSearchByName
-          ? "Название компании и условия заказа могут повлиять на предложение. Агент проверит открытые источники и отдельно отметит совпадение по названию."
-          : "ИНН или сайт помогут оценить масштаб клиента и выбрать следующий коммерческий шаг.",
-      }
-    : {
-        allowsPublicSearch: false,
-        title: "Для решения хватает данных заказа",
-        detail:
-          "Агент продолжает по письму, каталогу, складу и правилам продаж.",
-      };
-}
-
 function isOpenCodeTimeout(error) {
   return /OpenCode timed out/iu.test(
     String(error instanceof Error ? error.message : error ?? ""),
   );
 }
 
-async function runPrimaryWithOfflineRetry({
-  initialRun,
-  offlineRun,
-  onRetry,
-}) {
+function hasReusablePrimaryResearch(error) {
+  return (error?.partialRun?.tools ?? []).some(
+    (tool) => Array.isArray(tool?.urls) && tool.urls.length > 0,
+  );
+}
+
+function hasRetryablePrimaryTransportFailure(error) {
+  const partialRun = error?.partialRun;
+  return error?.completedMalformed === true || (
+    Boolean(partialRun) &&
+    (partialRun.textParts ?? []).length === 0 &&
+    (partialRun.tools ?? []).length === 0 &&
+    /OpenCode exited with \d+/iu.test(String(error?.message ?? ""))
+  );
+}
+
+function stageTimeoutForDeadline(
+  jobStartedAtMs,
+  nowMs,
+  capMs,
+  deadlineMs,
+  reservedMs,
+  terminationGraceMs,
+) {
+  const elapsedMs = Math.max(0, nowMs - jobStartedAtMs);
+  return Math.max(
+    0,
+    Math.min(
+      capMs,
+      Math.floor(
+        deadlineMs - elapsedMs - reservedMs - terminationGraceMs,
+      ),
+    ),
+  );
+}
+
+function isJobDeadlineExceeded(error) {
+  return /job deadline exhausted/iu.test(
+    String(error instanceof Error ? error.message : error ?? ""),
+  );
+}
+
+async function runPrimaryWithRetry({ run, retry = run, onRetry }) {
   try {
-    return await initialRun();
+    return await run();
   } catch (error) {
-    if (!isOpenCodeTimeout(error)) throw error;
-    await onRetry();
-    return offlineRun();
+    const partialRun = error?.partialRun;
+    if (partialRun) {
+      try {
+        return partialRunResult(partialRun);
+      } catch {
+        // A complete JSON result was not observable before classification.
+      }
+    }
+    if (isJobDeadlineExceeded(error)) {
+      throw error;
+    }
+    if (
+      !isOpenCodeTimeout(error) &&
+      !hasReusablePrimaryResearch(error) &&
+      !hasRetryablePrimaryTransportFailure(error)
+    ) {
+      throw error;
+    }
+    const primaryPartialRun = partialRun ?? { textParts: [], tools: [] };
+    try {
+      if (typeof onRetry === "function") {
+        void Promise.resolve(onRetry(primaryPartialRun)).catch(() => {
+          telemetryWarning("retry event publication failed");
+        });
+      }
+    } catch {
+      telemetryWarning("retry event publication failed");
+    }
+    try {
+      const completed = await retry(primaryPartialRun);
+      return {
+        ...completed,
+        tools: mergeToolSummaries(primaryPartialRun, completed),
+      };
+    } catch (retryError) {
+      const retryPartial = retryError?.partialRun ?? {
+        textParts: [],
+        tools: [],
+      };
+      const mergedPartialRun = mergePartialRuns(
+        primaryPartialRun,
+        retryPartial,
+      );
+      try {
+        return partialRunResult(mergedPartialRun);
+      } catch {
+        // Only a complete JSON document may cross the model boundary.
+      }
+      const surfacedError =
+        retryError instanceof Error
+          ? retryError
+          : new Error(String(retryError ?? "Primary retry failed"));
+      surfacedError.partialRun = mergedPartialRun;
+      throw surfacedError;
+    }
   }
+}
+
+function isPrivateIpAddress(value) {
+  const address = String(value ?? "")
+    .replace(/^\[|\]$/gu, "")
+    .toLocaleLowerCase();
+  const version = isIP(address);
+  if (version === 4) {
+    const [first, second, third, fourth] = address.split(".").map(Number);
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+      (first === 198 && second >= 18 && second <= 19) ||
+      (first === 198 && second === 51 && third === 100) ||
+      (first === 203 && second === 0 && third === 113) ||
+      first >= 240 ||
+      (first === 255 && second === 255 && third === 255 && fourth === 255)
+    );
+  }
+  if (version !== 6) return false;
+  if (address.startsWith("::ffff:")) {
+    return isPrivateIpAddress(address.slice("::ffff:".length));
+  }
+  return (
+    address === "::" ||
+    address === "::1" ||
+    address.startsWith("fc") ||
+    address.startsWith("fd") ||
+    address.startsWith("fe8") ||
+    address.startsWith("fe9") ||
+    address.startsWith("fea") ||
+    address.startsWith("feb")
+  );
+}
+
+function isPrivateHost(value) {
+  const hostname = String(value ?? "")
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "")
+    .toLocaleLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "local" ||
+    hostname.endsWith(".local") ||
+    hostname === "internal" ||
+    hostname.endsWith(".internal") ||
+    isPrivateIpAddress(hostname)
+  );
 }
 
 function canonicalHttpUrl(value) {
   try {
     const url = new URL(String(value ?? ""));
-    if (!["http:", "https:"].includes(url.protocol)) return "";
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      isPrivateHost(url.hostname)
+    ) {
+      return "";
+    }
     url.hash = "";
     return url.toString().replace(/\/$/, "");
   } catch {
@@ -315,24 +1043,59 @@ function canonicalHttpUrl(value) {
   }
 }
 
+function completedToolOpenedAt(state) {
+  const raw = state?.time?.end;
+  const numeric = Number(raw);
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric < 1_000_000_000_000 ? numeric * 1000 : numeric)
+    : new Date(String(raw ?? ""));
+  return Number.isNaN(date.getTime())
+    ? new Date().toISOString()
+    : date.toISOString();
+}
+
+function structuredToolOutput(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function toolSummary(event) {
   const tool = String(event.part?.tool ?? "web");
   const state = event.part?.state ?? {};
   const input = state.input ?? {};
-  const rawUrls = [
+  const output = structuredToolOutput(state.output);
+  const inputUrls = [
     input.url,
     input.href,
     ...(Array.isArray(input.urls) ? input.urls : []),
   ];
+  const outputUrls = [
+    output.url,
+    output.finalUrl,
+    output.redirectedUrl,
+  ];
+  const rawUrls = outputUrls.some(Boolean) ? outputUrls : inputUrls;
   const observedUrls = [
     ...new Set(rawUrls.map(canonicalHttpUrl).filter(Boolean)),
   ];
-  const status = String(state.status ?? "");
-  const completed =
-    !status || /^(?:completed|success|succeeded)$/iu.test(status);
+  const status = String(state.status ?? "").trim().toLocaleLowerCase();
+  const completed = status === "completed";
   const failed = /^(?:error|failed)$/iu.test(status);
+  const evidenceTool = tool === "public_webfetch";
+  const legacyWebTool = tool === "webfetch";
   const urls =
-    completed && !/search/iu.test(tool) ? observedUrls : [];
+    evidenceTool && completed
+      ? observedUrls.filter((url) => !isSearchResultUrl(url))
+      : [];
+  const openedAt = urls.length ? completedToolOpenedAt(state) : "";
+  const discoveryOnly =
+    observedUrls.length > 0 && observedUrls.every(isSearchResultUrl);
   const query =
     typeof input.query === "string" && input.query.trim()
       ? input.query.trim()
@@ -349,11 +1112,24 @@ function toolSummary(event) {
   } catch {
     host = "";
   }
+  const evidenceText = typeof output.text === "string"
+    ? output.text.replace(/\s+/gu, " ").trim().slice(0, 12_000)
+    : "";
+  const sha256 = typeof output.sha256 === "string" ? output.sha256 : "";
   return {
     tool,
     urls,
+    openedAt,
+    excerpt: urls.length && completed && !failed ? evidenceText : "",
+    sha256: urls.length && completed && !failed ? sha256 : "",
+    completed,
+    failed,
     detail: failed && host
       ? `Страница пока недоступна: ${host}`
+      : legacyWebTool
+        ? "Устаревший webfetch: URL не используется как evidence"
+      : discoveryOnly
+        ? "Выполнен поиск по открытым источникам"
       : !completed && host
         ? `Открывается страница: ${host}`
         : host
@@ -365,9 +1141,18 @@ function toolSummary(event) {
 function toolEventKey(event, summary) {
   const callId =
     event.part?.callID ?? event.part?.callId ?? event.part?.id ?? "";
+  const input = event.part?.state?.input ?? {};
+  const inputKey = [
+    input.url,
+    input.href,
+    ...(Array.isArray(input.urls) ? input.urls : []),
+    input.query,
+  ]
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
   return callId
     ? `${summary.tool}:${String(callId)}`
-    : JSON.stringify([summary.tool, summary.detail]);
+    : JSON.stringify([summary.tool, inputKey]);
 }
 
 function createOpenCodeEventStream(onToolUse) {
@@ -375,8 +1160,14 @@ function createOpenCodeEventStream(onToolUse) {
   const textParts = [];
   const tools = [];
   const toolIndexes = new Map();
-  let publicationQueue = Promise.resolve();
-  let publicationError;
+  function publish(summary) {
+    if (typeof onToolUse !== "function") return;
+    void Promise.resolve()
+      .then(() => onToolUse(summary))
+      .catch(() => {
+        telemetryWarning("event publication callback rejected");
+      });
+  }
 
   function acceptLine(line) {
     if (!line.trim()) return;
@@ -392,22 +1183,21 @@ function createOpenCodeEventStream(onToolUse) {
       const key = toolEventKey(event, summary);
       const existingIndex = toolIndexes.get(key);
       if (existingIndex !== undefined) {
-        if (!tools[existingIndex].urls.length && summary.urls.length) {
-          tools[existingIndex] = summary;
+        const previous = tools[existingIndex];
+        if (previous.completed) return;
+        tools[existingIndex] = summary;
+        if (
+          (!previous.completed && summary.completed) ||
+          (!previous.failed && summary.failed)
+        ) {
+          publish(summary);
         }
         return;
       }
       if (tools.length >= 20) return;
       toolIndexes.set(key, tools.length);
       tools.push(summary);
-
-      if (typeof onToolUse === "function") {
-        publicationQueue = publicationQueue
-          .then(() => onToolUse(summary))
-          .catch((error) => {
-            publicationError ??= error;
-          });
-      }
+      publish(summary);
     } catch {
       // Ignore non-event diagnostics.
     }
@@ -421,8 +1211,7 @@ function createOpenCodeEventStream(onToolUse) {
   }
 
   async function waitForPublished() {
-    await publicationQueue;
-    if (publicationError) throw publicationError;
+    return undefined;
   }
 
   async function complete() {
@@ -443,6 +1232,7 @@ async function runOpenCode({
   files = [],
   onToolUse,
   timeoutMs = openCodeTimeoutMs,
+  variant,
 }) {
   const promptDirectory = await mkdtemp(join(tmpdir(), "koler-agent-"));
   const promptPath = join(promptDirectory, "request.md");
@@ -459,6 +1249,7 @@ async function runOpenCode({
         agent,
         "-m",
         model,
+        ...(variant ? ["--variant", variant] : []),
         "--format",
         "json",
         "--title",
@@ -468,7 +1259,7 @@ async function runOpenCode({
       ],
       {
         cwd: root,
-        env: childEnvironment(),
+        env: childEnvironment(model),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -477,6 +1268,7 @@ async function runOpenCode({
     let finished = false;
     let timedOut = false;
     let forceKillTimer;
+    let timer;
     const eventStream = createOpenCodeEventStream(onToolUse);
 
     async function finish(error, value) {
@@ -484,7 +1276,9 @@ async function runOpenCode({
       finished = true;
       clearTimeout(timer);
       clearTimeout(forceKillTimer);
-      await rm(promptDirectory, { recursive: true, force: true });
+      void rm(promptDirectory, { recursive: true, force: true }).catch(
+        () => {},
+      );
       if (error) {
         rejectRun(error);
         return;
@@ -492,11 +1286,23 @@ async function runOpenCode({
       resolveRun(value);
     }
 
-    const timer = setTimeout(() => {
+    async function finishTimeout() {
+      if (finished) return;
+      const partialRun = await eventStream.complete().catch(() => ({
+        textParts: [],
+        tools: [],
+      }));
+      const error = new Error(`OpenCode timed out for ${model}`);
+      error.partialRun = partialRun;
+      await finish(error);
+    }
+
+    timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => {
         child.kill("SIGKILL");
+        void finishTimeout();
       }, openCodeTerminationGraceMs);
     }, timeoutMs);
 
@@ -507,24 +1313,44 @@ async function runOpenCode({
       stderr += chunk.toString();
     });
     child.on("error", async (error) => {
+      const partialRun = await eventStream.complete().catch(() => ({
+        textParts: [],
+        tools: [],
+      }));
+      error.partialRun = partialRun;
       await finish(error);
     });
     child.on("close", async (code) => {
       if (timedOut) {
-        await finish(new Error(`OpenCode timed out for ${model}`));
+        await finishTimeout();
         return;
       }
       if (code !== 0) {
-        await finish(
-          new Error(stderr.trim() || `OpenCode exited with ${code}`),
+        const partialRun = await eventStream.complete().catch(() => ({
+          textParts: [],
+          tools: [],
+        }));
+        const error = new Error(
+          stderr.trim() || `OpenCode exited with ${code}`,
         );
+        error.partialRun = partialRun;
+        await finish(error);
         return;
       }
 
       try {
-        const { textParts, tools } = await eventStream.complete();
+        const partialRun = await eventStream.complete();
+        const { textParts, tools } = partialRun;
+        let value;
+        try {
+          value = extractJson(textParts.join("\n"));
+        } catch (error) {
+          error.partialRun = partialRun;
+          error.completedMalformed = true;
+          throw error;
+        }
         await finish(null, {
-          value: extractJson(textParts.join("\n")),
+          value,
           tools,
         });
       } catch (error) {
@@ -534,51 +1360,144 @@ async function runOpenCode({
   });
 }
 
-async function visionObservationForJob(job) {
+function storedVisionObservationForJob(job, attachmentRef) {
+  const previousResult = storedJobJson(job.resultJson, null);
+  if (
+    previousResult?.visionObservation?.attachmentRef === attachmentRef
+  ) {
+    const storedObservation = normalizeVisionObservation(
+      previousResult.visionObservation,
+    );
+    if (storedObservation) {
+      return { ...storedObservation, attachmentRef };
+    }
+  }
+  return null;
+}
+
+async function visionObservationForJob(job, jobStartedAtMs) {
   const attachment = storedJobJson(job.attachmentJson, null);
   if (!resolveVisionImageUrl(attachment?.src, standUrl)) return null;
+  const attachmentRef = String(attachment.src);
+  const storedObservation = storedVisionObservationForJob(
+    job,
+    attachmentRef,
+  );
+  if (storedObservation) {
+    await addEvent(
+      job,
+      "vision-reused",
+      "Сохранённое наблюдение по фото добавлено",
+      "Вложение не изменилось, поэтому агент продолжает с уже проверенными видимыми фактами.",
+    );
+    return storedObservation;
+  }
 
   let downloaded;
   await addEvent(
-    job.id,
+    job,
     "vision",
     "Модель для фото изучает снимок",
     "Отдельная модель отмечает только видимые признаки.",
     "active",
   );
   try {
-    downloaded = await downloadVisionImage({ attachment, standUrl });
+    const downloadTimeoutMs = stageTimeoutForDeadline(
+      jobStartedAtMs,
+      performance.now(),
+      IMAGE_DOWNLOAD_TIMEOUT_MS,
+      jobDeadlineMs,
+      terminalPublicationReserveMs,
+      0,
+    );
+    if (downloadTimeoutMs <= 0) {
+      throw new Error(
+        "Image download timed out before vision: job deadline exhausted",
+      );
+    }
+    downloaded = await downloadVisionImage({
+      attachment,
+      standUrl,
+      timeoutMs: downloadTimeoutMs,
+    });
     if (!downloaded) return null;
-    const run = await runOpenCode({
-      model: visionModel,
-      prompt: `${visionInstruction}
+    const visionStageStartedAtMs = performance.now();
+    const visionTimeoutMs = stageTimeoutForDeadline(
+      jobStartedAtMs,
+      visionStageStartedAtMs,
+      visionOpenCodeTimeoutMs,
+      jobDeadlineMs,
+      terminalPublicationReserveMs,
+      openCodeTerminationGraceMs,
+    );
+    if (visionTimeoutMs <= 0) {
+      throw new Error(
+        "OpenCode timed out before vision: job deadline exhausted",
+      );
+    }
+    const prompt = `${visionInstruction}
 
 ## Имя вложения
 
-${JSON.stringify(String(attachment?.name ?? "photo"))}`,
-      title: `Колер · фото ${job.id.slice(-6)}`,
-      agent: "koler-reviewer",
-      files: [downloaded.path],
-    });
-    const observation = normalizeVisionObservation(run.value);
-    if (!observation) throw new Error("Vision model returned no observation");
+${JSON.stringify(String(attachment?.name ?? "photo"))}
+
+## Явный текст заявки
+
+Текст ниже помогает выбрать объект действия и важнее визуальной гипотезы:
+${JSON.stringify({
+  subject: String(job.subject ?? ""),
+  body: String(job.body ?? ""),
+})}`;
+    let observation;
+    let visionError;
+    // ponytail: one retry shares the original vision window.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const attemptTimeoutMs = stageTimeoutForDeadline(
+        visionStageStartedAtMs,
+        performance.now(),
+        visionTimeoutMs,
+        visionTimeoutMs,
+        0,
+        openCodeTerminationGraceMs,
+      );
+      if (attemptTimeoutMs <= 0) break;
+      try {
+        const run = await runOpenCode({
+          model: visionModel,
+          prompt,
+          title: `Колер · фото ${job.id.slice(-6)}`,
+          agent: "koler-reviewer",
+          files: [downloaded.path],
+          timeoutMs: attemptTimeoutMs,
+        });
+        observation = normalizeVisionObservation(run.value);
+        if (observation) break;
+        visionError = new Error("Vision model returned no observation");
+      } catch (error) {
+        visionError = error;
+      }
+    }
+    if (!observation) {
+      throw visionError ?? new Error("Vision model returned no observation");
+    }
+    const storedObservation = { ...observation, attachmentRef };
     await addEvent(
-      job.id,
+      job,
       "vision-result",
       "Фото осмотрено",
       observation.summary || "Видимые признаки добавлены в задачу.",
     );
-    return observation;
+    return storedObservation;
   } catch (error) {
     console.error(
       `[bridge] vision ${job.id}:`,
       error instanceof Error ? error.message : error,
     );
     await addEvent(
-      job.id,
+      job,
       "vision-fallback",
-      "Фото оставлено для уточнения",
-      "Агент продолжает работу и задаст клиенту вопросы по материалу и размерам.",
+      "Фото временно недоступно модели",
+      "Агент продолжает по тексту и не использует необработанное фото как доказательство.",
     ).catch(() => {});
     return null;
   } finally {
@@ -590,104 +1509,408 @@ ${JSON.stringify(String(attachment?.name ?? "photo"))}`,
   }
 }
 
-function primaryPrompt(job, liveDemoData, visionObservation) {
+function primaryPrompt(
+  job,
+  liveDemoData,
+  visionObservation,
+  continuationContext = continuationContextForJob(job),
+) {
   const visionBlock = visionPromptBlock(visionObservation);
+  const promptContext = continuationContext
+    ? { ...continuationContext }
+    : null;
+  if (promptContext) delete promptContext.openedSources;
+  const continuationBlock = promptContext
+    ? `## Сохранённый контекст прошлого раунда
+
+${JSON.stringify(promptContext)}
+
+- Свежий ответ клиента разрешает прежний blocker и имеет приоритет.
+- Переиспользуй прежние intent, evidence, assumptions, vision-наблюдение и открытые публичные источники; не задавай тот же вопрос повторно.
+- Evidence из прежних inventory/supplier snapshots историческое. Цену, остаток, срок и подтверждённый supplier plan построй заново только по текущим snapshots ниже.`
+    : "";
   return `${salesInstruction}
 
 ## Текущий заказ
 
-${JSON.stringify(
-  {
-    company: job.company,
-    website: job.website,
-    subject: job.subject,
-    body: job.body,
-    attachment: storedJobJson(job.attachmentJson, null),
-    conversation: storedJobJson(job.conversationJson, []),
-    round: Number(job.roundNo) || 1,
-  },
-  null,
-  2,
-)}
+${JSON.stringify(reviewerOrderView(job))}
+
+${continuationBlock}
 
 ## Демонстрационные источники истины
 
-${JSON.stringify(liveDemoData, null, 2)}
+${JSON.stringify({
+    products: liveDemoData.products,
+    supplierSnapshot: liveDemoData.market,
+    rules: liveDemoData.rules,
+    inventorySnapshot: liveDemoData.inventorySnapshot,
+  })}
 
 ${visionBlock}
 
 ## Уточнения запуска
 
-- Верни один JSON-объект без Markdown.
+- Верни один компактный primary draft без Markdown: обязательное ядро из
+  инструкции и только действительно применимые optional-поля. Не генерируй
+  производные поля полного AgentResult — их добавит guard.
 - Числа продукта возьми только из снимка склада внутри демонстрационных источников.
 - Пропусти веб-поиск для доменов .example и рутинной зелёной заявки.
 - Сайт и ИНН дают точное совпадение. По одному названию компании ищи осторожно и помечай каждый результат словами «Совпадение по названию».
-- Не запрашивай факты, которые клиент уже сообщил. Для забора отдельно проверь материал, размеры и число окрашиваемых сторон.
-- Для пола в компании с особыми требованиями сформулируй назначение как гипотезу, свяжи предварительный вариант только со свойствами каталога и задай один вопрос о материале, назначении, уборке и нагрузке.
-- Предложи клиенту три понятных ответа: медицинский склад, обычный склад или другое помещение. При новом условии принеси технологу контекст и готовый способ проверки.
-- При частичном остатке проверь учебную таблицу цен и наличия других поставщиков. Сохраняй точный остаток только из строки с датой проверки. Строка подтверждает свежесть расчёта; резерв другого поставщика появляется после его ответа. Если строки нет, перечисли данные для подтверждения у поставщика и предложи выпуск или поставку двумя партиями. Подготовь вариант с доступным объёмом, ценой, сроком, временем проверки и единым графиком для клиента. В письме сообщи, что запросишь у поставщика подтверждение объёма и срока. Каждый участок закрепи за продукцией одного поставщика; технолог проверит подготовку пола и применение двух красок на соседних участках.
+- Не запрашивай факты, которые клиент уже сообщил. Не превращай неизвестные размеры, материал основания, назначение помещения, режим уборки или нагрузку в blocker: запиши их как явные assumptions, дай полезный широкий диапазон и укажи границу подтверждения.
+- Единственный вопрос клиенту допустим только при настоящей неоднозначности объекта действия.
+- При дефиците обязательно найди и открой публичные страницы возможных поставщиков, верни их как supplierLeads и включи руководителю выполнимый вариант с followUpActor="supplier". Публичная страница даёт только lead и список для подтверждения.
+- Подтверждённые цена, остаток и срок берутся только из текущего supplier snapshot/API. Не возвращай supplierPlan: его программно построит guard. Не выдавай публичный supplier lead за подтверждённый факт.
 - Не обещай ГОСТ, GMP, ISO, СанПиН, санитарную обработку, дезинфекцию или химическую стойкость без точного подтверждения в карточке товара с документом и источником.
 - При реальном домене исследуй компанию, когда масштаб, профиль или надёжность могут изменить жёлтое или красное решение.
-- Сохрани до трёх публичных источников в research.sources.
-- Ставь research.checked=true, только когда открыл каждый сохранённый URL.
+- Каждый использованный внешний факт свяжи с web evidence внутри resolvedIntent; отдельный research не возвращай.
 - Пиши активным русским языком без оправданий и риторических противопоставлений.`;
 }
 
-function reviewPrompt(job, draft, liveDemoData) {
+function primaryRetryPrompt(prompt, partialRun) {
+  const contextStart = prompt.indexOf("## Текущий заказ");
+  const compactContext =
+    contextStart >= 0 ? prompt.slice(contextStart) : prompt.slice(-24_000);
+  const contractStart = salesInstruction.indexOf("## Компактный JSON-draft");
+  const compactContract =
+    contractStart >= 0
+      ? salesInstruction.slice(contractStart)
+      : salesInstruction.slice(-12_000);
+  const openedSourceUrls = [
+    ...new Set(partialRun.tools.flatMap((tool) => tool.urls)),
+  ];
+  const partialDraft = (partialRun.textParts ?? [])
+    .join("\n")
+    .slice(-8_000);
+  return `# Завершение primary draft
+
+${compactContract}
+
+${compactContext}
+
+## Завершение незаконченного исследования
+
+Первый запуск уже открыл эти прямые страницы:
+${JSON.stringify(openedSourceUrls)}
+
+${
+  partialDraft
+    ? `Незавершённый видимый черновик первого запуска:\n${JSON.stringify(partialDraft)}`
+    : ""
+}
+
+- Не вызывай инструменты и не начинай новый поиск.
+- Сразу собери компактный primary draft: schemaVersion, confidence,
+  resolvedIntent, commitment и только применимые estimates, product,
+  supplierLeads, route, options или reply. Полный AgentResult построит guard.
+- Не возвращай zone, decision, understood, missing, visionObservation, market,
+  research, businessContext, zoneReason, managerNote, checks, sources,
+  decisionBasis, review, calculation или supplierPlan.
+- Если открытая страница не даёт точного кода или свойства, сохрани широкое
+  направление либо честную границу знания; не продолжай поиск точности.
+- Не используй внешнее утверждение, которое нельзя связать с одной из ссылок
+  выше.`;
+}
+
+function reviewPrompt(
+  job,
+  draft,
+  liveDemoData,
+  packet = Object.freeze({
+    order: reviewerOrderView(job),
+    result: reviewerResultView(draft),
+  }),
+) {
+  const order = packet.order;
+  const latestCustomerMessage =
+    [...order.conversation].reverse().find((message) => message.role === "customer")?.body ??
+    order.body;
+  const reviewerTargetAmbiguityBoundary = (result) => Boolean(
+    result?.zone === "yellow" &&
+      result.route === "needs_info" &&
+      result.commitment === "none" &&
+      result.resolvedIntent?.target?.state === "ambiguous" &&
+      result.resolvedIntent?.blocker?.kind === "target_ambiguity" &&
+      result.product === null &&
+      Array.isArray(result.estimates) &&
+      result.estimates.length === 0 &&
+      Array.isArray(result.supplierLeads) &&
+      result.supplierLeads.length === 0 &&
+      Array.isArray(result.options) &&
+      result.options.length === 0
+  );
+  const targetAmbiguityBoundary = reviewerTargetAmbiguityBoundary(packet.result);
+  const allowedPathPrefixes = reviewerAllowedPathPrefixes(packet);
   return `${reviewerInstruction}
 
 ## Заказ
 
-${JSON.stringify(job, null, 2)}
+${JSON.stringify({ ...order, attachment: undefined })}
+
+## Последнее сообщение клиента целиком
+
+${JSON.stringify(latestCustomerMessage.slice(0, 2_000))}
 
 ## Каталог, склад, прайс и правила
 
-${JSON.stringify(liveDemoData, null, 2)}
+${JSON.stringify({
+    products: liveDemoData.products,
+    market: liveDemoData.market,
+    rules: liveDemoData.rules,
+    inventorySnapshot: liveDemoData.inventorySnapshot,
+  })}
+
+## Машинный источник supplierPlan
+
+${JSON.stringify({
+    kind: "snapshot",
+    dataset: "supplier",
+    key: packet.result.supplierPlan?.supplierName ?? null,
+    checkedAt: packet.result.supplierPlan?.stockCheckedAt ?? null,
+  })}
+
+Если tuple supplierPlan.source совпадает с текущим market/supplier snapshot,
+это программно выведенный trusted plan. Не отклоняй его за отсутствие
+дублирующего model evidence; несовпадающие числа, ключ или checkedAt по-прежнему
+отклоняй.
+
+## Машинная граница неоднозначной цели
+
+${JSON.stringify({
+    targetAmbiguityBoundary,
+    candidateIsNotRecommendation: targetAmbiguityBoundary,
+  })}
+
+При targetAmbiguityBoundary=true candidate/choice не является применением или
+рекомендацией товара. Reject по human_safety, основанный только на таком
+candidate/choice, структурно недействителен; допускаются только grounded
+privacy, target inconsistency или другое реальное нарушение.
+
+## Разрешённые пути по правилам (authoritative runtime map)
+
+${JSON.stringify(allowedPathPrefixes)}
+
+Для каждого issue: issue.path должен быть равен одному из перечисленных префиксов
+для этого rule или находиться ниже него. Если для rule нет разрешённого
+подтверждённого нарушения, одобри решение с blockingIssues=[]. Никогда не
+выдумывай и не изменяй детерминированные факты packet.
 
 ## Черновик агента
 
-${JSON.stringify(draft, null, 2)}
+${JSON.stringify(packet.result)}
 
 Верни только JSON по схеме инструкции.`;
 }
 
+function reviewerRetryMetadata(review, packet) {
+  const schemaVersion = review?.schemaVersion;
+  return {
+    schemaVersion: {
+      type: typeof schemaVersion,
+      ...(typeof schemaVersion === "number" &&
+      Number.isFinite(schemaVersion) &&
+      Math.abs(schemaVersion) <= 100
+        ? { value: schemaVersion }
+        : {}),
+    },
+    approved:
+      typeof review?.approved === "boolean" ? review.approved : null,
+    blockingIssueCount: Array.isArray(review?.blockingIssues)
+      ? review.blockingIssues.length
+      : 0,
+    validationErrors: reviewerDecisionValidationErrors(review, packet),
+  };
+}
+
+function reviewRetryPrompt(packet, reviewMetadata) {
+  const reviewerTargetAmbiguityBoundary = (result) => Boolean(
+    result?.zone === "yellow" &&
+      result.route === "needs_info" &&
+      result.commitment === "none" &&
+      result.resolvedIntent?.target?.state === "ambiguous" &&
+      result.resolvedIntent?.blocker?.kind === "target_ambiguity" &&
+      result.product === null &&
+      Array.isArray(result.estimates) &&
+      result.estimates.length === 0 &&
+      Array.isArray(result.supplierLeads) &&
+      result.supplierLeads.length === 0 &&
+      Array.isArray(result.options) &&
+      result.options.length === 0
+  );
+  const targetAmbiguityBoundary = reviewerTargetAmbiguityBoundary(packet.result);
+  const allowedPathPrefixes = reviewerAllowedPathPrefixes(packet);
+  return `${reviewerInstruction}
+
+## Повторная проверка
+
+Первый ответ не прошёл ReviewerDecisionV2. Исправь только перечисленные безопасные ошибки.
+Безопасная структурная сводка первого ответа:
+${JSON.stringify(reviewMetadata)}
+
+## Машинная граница неоднозначной цели
+
+${JSON.stringify({
+    targetAmbiguityBoundary,
+    candidateIsNotRecommendation: targetAmbiguityBoundary,
+  })}
+
+При targetAmbiguityBoundary=true candidate/choice не является применением или
+рекомендацией товара. Ошибку path_not_allowed исправляй безопасно: не создавай
+raw verdict/reasoning и не отклоняй только за human_safety по candidate/choice.
+
+## Разрешённые пути по правилам (authoritative runtime map)
+
+${JSON.stringify(allowedPathPrefixes)}
+
+Для каждого issue: issue.path должен быть равен одному из перечисленных префиксов
+для этого rule или находиться ниже него. Ошибку path_not_allowed исправляй,
+выбирая только существующий путь из карты; если для rule нет разрешённого
+подтверждённого нарушения, одобри решение с blockingIssues=[]. Никогда не
+выдумывай и не изменяй детерминированные факты packet.
+
+## Неизменяемый пакет
+
+${JSON.stringify(packet)}
+
+- Используй только этот пакет.
+- Не вызывай инструменты и не начинай новый поиск.
+- Верни только ReviewerDecisionV2 по схеме инструкции.
+- Не возвращай reasoning, credentials или другие секреты.`;
+}
+
+function legacyReviewerDecision(decision) {
+  return {
+    approved: decision.approved,
+    verdict: decision.verdict,
+    notes: decision.notes,
+    blockingIssues: decision.blockingIssues.map((issue) => issue.detail),
+  };
+}
+
+function unavailableReviewerDecision() {
+  return {
+    approved: false,
+    unavailable: true,
+    verdict: "Руководитель получил пункты для решения",
+    notes: ["Черновик сохранён для проверки руководителем."],
+    blockingIssues: ["Требуется ручная проверка перед отправкой."],
+  };
+}
+
+async function reviewerDecisionWithRetry({
+  run,
+  packet,
+  prompt,
+  onRetry,
+}) {
+  let firstRun;
+  try {
+    firstRun = await run({ prompt, packet });
+  } catch (error) {
+    if (!error?.completedMalformed) {
+      return { review: unavailableReviewerDecision(), retried: false, error };
+    }
+    firstRun = { value: null };
+  }
+
+  let firstDecision;
+  try {
+    firstDecision = validateReviewerDecisionV2(firstRun?.value, packet);
+  } catch {
+    firstDecision = null;
+  }
+  if (firstDecision) {
+    return {
+      review: legacyReviewerDecision(firstDecision),
+      retried: false,
+    };
+  }
+
+  try {
+    await onRetry?.();
+  } catch {
+    telemetryWarning("review retry event publication failed");
+  }
+
+  let secondRun;
+  try {
+    secondRun = await run({
+      prompt: reviewRetryPrompt(
+        packet,
+        reviewerRetryMetadata(firstRun?.value, packet),
+      ),
+      packet,
+    });
+  } catch (error) {
+    return { review: unavailableReviewerDecision(), retried: true, error };
+  }
+
+  let secondDecision;
+  try {
+    secondDecision = validateReviewerDecisionV2(secondRun?.value, packet);
+  } catch {
+    secondDecision = null;
+  }
+  return secondDecision
+    ? { review: legacyReviewerDecision(secondDecision), retried: true }
+    : { review: unavailableReviewerDecision(), retried: true };
+}
+
 async function processJob(job) {
+  const jobStartedAtMs = performance.now();
   busy = true;
+  const stopLeaseRenewal = startLeaseRenewal(job);
   const primaryModel = selectedModel(job);
   const reviewerModel = reviewerFor();
+  const primaryVariant = modelVariant(primaryModel);
+  const reviewerVariant = modelVariant(reviewerModel);
   const liveDemoData = demoDataForJob(job);
   const inventoryVersion =
     liveDemoData.inventorySnapshot?.version ?? "исходная";
 
   try {
     await addEvent(
-      job.id,
+      job,
       "model",
       "Выбран исполнитель",
-      `${modelLabel(primaryModel)} получил инструкцию, подготовленную GPT-5.6 Sol.`,
+      `${modelLabel(primaryModel)}${
+        primaryVariant ? ` работает с усилием ${primaryVariant}` : ""
+      } и получил инструкцию, подготовленную GPT-5.6 Sol.`,
     );
     await addEvent(
-      job.id,
+      job,
       "inventory",
       "Каталог и склад добавлены в задачу",
       inventorySnapshotDetail(liveDemoData.products.length, inventoryVersion),
     );
     await addEvent(
-      job.id,
+      job,
       "market",
       "Цены похожих предложений подготовлены",
       `${liveDemoData.market.length} предложений с датой проверки.`,
     );
-    const sourcePlan = sourcePlanForJob(job);
     await addEvent(
-      job.id,
+      job,
       "source-plan",
-      sourcePlan.title,
-      sourcePlan.detail,
+      "Агент сам выбирает нужные источники",
+      "Веб-инструменты доступны для косвенных референсов, поставщиков и других фактов, которые могут изменить решение.",
     );
 
-    const visionObservation = await visionObservationForJob(job);
-    const prompt = primaryPrompt(job, liveDemoData, visionObservation);
+    const continuationContext = continuationContextForJob(job);
+    const visionObservation = await visionObservationForJob(
+      job,
+      jobStartedAtMs,
+    );
+    const prompt = primaryPrompt(
+      job,
+      liveDemoData,
+      visionObservation,
+      continuationContext,
+    );
+    const continuationOpenedSourceUrls = Array.isArray(
+      continuationContext?.openedSourceUrls,
+    )
+      ? continuationContext.openedSourceUrls
+      : [];
     const runPrimary = ({
       agent,
       timeoutMs,
@@ -696,6 +1919,7 @@ async function processJob(job) {
     }) =>
       runOpenCode({
         model: primaryModel,
+        variant: primaryVariant,
         prompt: runPrompt,
         title: `Колер · заказ ${job.id.slice(-6)}`,
         agent,
@@ -703,7 +1927,7 @@ async function processJob(job) {
         onToolUse: publishResearch
           ? (tool) =>
               addEvent(
-                job.id,
+                job,
                 "research",
                 tool.urls.length
                   ? "Агент открыл публичный источник"
@@ -712,104 +1936,242 @@ async function processJob(job) {
               )
           : undefined,
       });
-    const primaryRun = await runPrimaryWithOfflineRetry({
-      initialRun: () =>
-        runPrimary({
-          agent: sourcePlan.allowsPublicSearch
-            ? "koler-sales"
-            : "koler-sales-local",
-          timeoutMs: sourcePlan.allowsPublicSearch
-            ? openCodeSearchTimeoutMs
-            : openCodeTimeoutMs,
-          publishResearch: sourcePlan.allowsPublicSearch,
-        }),
-      onRetry: () =>
-        addEvent(
-          job.id,
-          "primary-retry",
-          "Агент собирает итог по данным заказа",
-          "Первый запуск занял больше времени. Агент сразу готовит итоговый ответ по письму, каталогу и свежим остаткам на складе.",
-        ),
-      offlineRun: () =>
-        runPrimary({
-          agent: "koler-sales-local",
-          timeoutMs: openCodeTimeoutMs,
-          runPrompt: `${prompt}
-
-## Продолжение того же заказа
-
-- Сразу собери итоговый JSON по письму, каталогу, свежему снимку склада и правилам.
-- Используй только приложенные данные. Не вызывай веб-поиск и другие инструменты.
-- Для research укажи checked=false, summary="" и sources=[].`,
-        }),
-    });
-
-    const guardedJob = {
+    let guardedJob = {
       ...job,
-      openedSourceUrls: primaryRun.tools.flatMap((tool) => tool.urls),
+      visionObservation,
+      openedSourceUrls: continuationOpenedSourceUrls,
+      openedSources: continuationContext?.openedSources ?? [],
     };
-    let result = normalizeAgentResult(
-      primaryRun.value,
-      liveDemoData,
-      guardedJob,
-    );
-
-    await addEvent(
-      job.id,
-      "review",
-      "Черновик передан модели проверки",
-      `${modelLabel(reviewerModel)} проверяет объём, цену, источники и полномочия.`,
-      "active",
-    );
-
+    let attemptOpenedSourceUrls = [];
+    let verifiedOpenedSourceUrls = continuationOpenedSourceUrls;
+    let result;
     try {
-      const reviewRun = await runOpenCode({
-        model: reviewerModel,
-        prompt: reviewPrompt(job, result, liveDemoData),
-        title: `Колер · проверка ${job.id.slice(-6)}`,
-        agent: "koler-reviewer",
+      const primaryRun = await runPrimaryWithRetry({
+        run: () => {
+          const primaryTimeoutMs = stageTimeoutForDeadline(
+            jobStartedAtMs,
+            performance.now(),
+            primaryOpenCodeTimeoutMs,
+            jobDeadlineMs,
+            terminalPublicationReserveMs,
+            openCodeTerminationGraceMs,
+          );
+          if (primaryTimeoutMs <= 0) {
+            throw new Error(
+              "OpenCode timed out before primary: job deadline exhausted",
+            );
+          }
+          return runPrimary({
+            agent: "koler-sales",
+            timeoutMs: primaryTimeoutMs,
+            publishResearch: true,
+          });
+        },
+        retry: (partialRun) => {
+          const synthesisTimeoutMs = stageTimeoutForDeadline(
+            jobStartedAtMs,
+            performance.now(),
+            openCodeTimeoutMs,
+            jobDeadlineMs,
+            terminalPublicationReserveMs,
+            openCodeTerminationGraceMs,
+          );
+          if (synthesisTimeoutMs <= 0) {
+            const error = new Error(
+              "OpenCode timed out before synthesis: job deadline exhausted",
+            );
+            error.partialRun = partialRun;
+            throw error;
+          }
+          return runPrimary({
+            agent: "koler-sales-local",
+            timeoutMs: synthesisTimeoutMs,
+            runPrompt: primaryRetryPrompt(prompt, partialRun),
+          });
+        },
+        onRetry: () =>
+          addEvent(
+            job,
+            "primary-retry",
+            "Агент собирает ответ из найденных фактов",
+            "Исследовательский запуск не завершил JSON. Повтор использует уже открытые источники и завершает ответ без нового поиска.",
+          ),
       });
-      result = applyReviewerResult(
-        result,
-        reviewRun.value,
-        reviewerModel,
+      attemptOpenedSourceUrls = openedSourceUrlsFromTools(primaryRun.tools);
+      verifiedOpenedSourceUrls = [
+        ...new Set([
+          ...continuationOpenedSourceUrls,
+          ...attemptOpenedSourceUrls,
+        ]),
+      ];
+      guardedJob = {
+        ...guardedJob,
+        openedSourceUrls: verifiedOpenedSourceUrls,
+        openedSources: [
+          ...guardedJob.openedSources,
+          ...openedSourcesFromTools(primaryRun.tools),
+        ],
+      };
+      result = normalizeV2AgentResult(
+        primaryRun.value,
         liveDemoData,
         guardedJob,
       );
-      await addEvent(
-        job.id,
-        "review-result",
-        `${modelLabel(reviewerModel)} завершила проверку`,
-        result.review?.verdict || "Факты и границы полномочий подтверждены.",
-      ).catch(() => {});
-    } catch (reviewError) {
+    } catch (primaryError) {
+      if (Array.isArray(primaryError?.partialRun?.tools)) {
+        attemptOpenedSourceUrls = openedSourceUrlsFromTools(
+          primaryError.partialRun.tools,
+        );
+      }
+      verifiedOpenedSourceUrls = [
+        ...new Set([
+          ...continuationOpenedSourceUrls,
+          ...attemptOpenedSourceUrls,
+        ]),
+      ];
+      guardedJob = {
+        ...guardedJob,
+        openedSourceUrls: verifiedOpenedSourceUrls,
+        openedSources: [
+          ...guardedJob.openedSources,
+          ...openedSourcesFromTools(primaryError?.partialRun?.tools),
+        ],
+      };
       console.error(
-        `[bridge] reviewer ${job.id}:`,
-        reviewError instanceof Error ? reviewError.message : reviewError,
+        `[bridge] primary ${job.id}:`,
+        primaryError instanceof Error
+          ? primaryError.message
+          : primaryError,
       );
       await addEvent(
-        job.id,
-        "review-fallback",
-        "Решение передано руководителю",
-        "Черновик и проверенные факты сохранены. Руководитель получил готовые варианты.",
+        job,
+        "primary-fallback",
+        "Черновик передан на безопасную проверку",
+        "Неполный ответ рабочей модели отброшен. Клиенту не задаются новые вопросы и не создаётся неподтверждённое предложение.",
         "error",
       ).catch(() => {});
-      result = applyReviewerResult(
-        result,
-        {
-          approved: false,
-          verdict: "Руководитель получил пункты для решения",
-          notes: ["Черновик сохранён для проверки руководителем."],
-          blockingIssues: ["Требуется ручная проверка перед отправкой."],
-        },
+      result = managerFallbackAgentResult(guardedJob, {
         reviewerModel,
-        liveDemoData,
-        guardedJob,
+        reason: "Рабочая модель не вернула полный безопасный контракт.",
+      });
+    }
+
+    const completeFailClosedManager = isCompleteFailClosedManager(result);
+    let reviewerProvenance;
+    if (completeFailClosedManager) {
+      reviewerProvenance = {
+        stage: "review-skipped",
+        title: "Безопасный результат уже сформирован",
+        detail: "Полный fail-closed результат не передаётся на долгую повторную проверку; руководитель получил безопасные варианты.",
+      };
+    } else {
+      await addEvent(
+        job,
+        "review",
+        "Черновик передан модели проверки",
+        `${modelLabel(reviewerModel)}${
+          reviewerVariant ? ` с усилием ${reviewerVariant}` : ""
+        } проверяет объём, цену, источники и полномочия.`,
+        "active",
       );
+
+      try {
+        const reviewerPacket = Object.freeze({
+          order: reviewerOrderView(job),
+          result: reviewerResultView(result),
+        });
+        const runReviewer = async ({ prompt }) => {
+          const reviewerTimeoutMs = stageTimeoutForDeadline(
+            jobStartedAtMs,
+            performance.now(),
+            reviewerOpenCodeTimeoutMs,
+            jobDeadlineMs,
+            terminalPublicationReserveMs,
+            openCodeTerminationGraceMs,
+          );
+          if (reviewerTimeoutMs <= 0) {
+            throw new Error(
+              "OpenCode timed out before reviewer: job deadline exhausted",
+            );
+          }
+          const reviewRun = await runOpenCode({
+            model: reviewerModel,
+            variant: reviewerVariant,
+            prompt,
+            title: `Колер · проверка ${job.id.slice(-6)}`,
+            agent: "koler-reviewer",
+            timeoutMs: reviewerTimeoutMs,
+          });
+          return reviewRun;
+        };
+        const reviewOutcome = await reviewerDecisionWithRetry({
+          run: runReviewer,
+          packet: reviewerPacket,
+          prompt: reviewPrompt(job, result, liveDemoData, reviewerPacket),
+          onRetry: () =>
+            addEvent(
+              job,
+              "review-retry",
+              "Повторная проверка reviewer",
+              "Первый ответ не прошёл ReviewerDecisionV2; повтор использует тот же неизменяемый пакет без инструментов и нового поиска.",
+              "active",
+            ),
+        });
+        if (reviewOutcome.error) {
+          console.error(
+            `[bridge] reviewer ${job.id}: проверка недоступна`,
+          );
+        }
+        result = applyReviewerResult(
+          result,
+          reviewOutcome.review,
+          reviewerModel,
+          liveDemoData,
+          guardedJob,
+        );
+        reviewerProvenance = reviewOutcome.review.unavailable
+          ? {
+              stage: "review-fallback",
+              title: "Решение передано руководителю",
+              detail:
+                "Черновик и проверенные факты сохранены. Руководитель получил готовые варианты.",
+            }
+          : {
+              stage: "review-result",
+              title: `${modelLabel(reviewerModel)} завершила проверку`,
+              detail:
+                result.review?.verdict ||
+                "Факты и границы полномочий подтверждены.",
+            };
+      } catch (reviewError) {
+        console.error(
+          `[bridge] reviewer ${job.id}:`,
+          reviewError instanceof Error ? reviewError.message : reviewError,
+        );
+        result = applyReviewerResult(
+          result,
+          {
+            approved: false,
+            unavailable: true,
+            verdict: "Руководитель получил пункты для решения",
+            notes: ["Черновик сохранён для проверки руководителем."],
+            blockingIssues: ["Требуется ручная проверка перед отправкой."],
+          },
+          reviewerModel,
+          liveDemoData,
+          guardedJob,
+        );
+        reviewerProvenance = {
+          stage: "review-fallback",
+          title: "Решение передано руководителю",
+          detail:
+            "Черновик и проверенные факты сохранены. Руководитель получил готовые варианты.",
+        };
+      }
     }
 
     await addEvent(
-      job.id,
+      job,
       "research-result",
       "Данные для решения собраны",
       [result.businessContext, result.research?.summary]
@@ -817,25 +2179,59 @@ async function processJob(job) {
         .join(" "),
     ).catch(() => {});
 
-    await agentRequest({
-      action: "result",
-      orderId: job.id,
-      result,
-      agentModel: primaryModel,
-      reviewerModel,
-    });
+    const terminalTimeoutMs = stageTimeoutForDeadline(
+      jobStartedAtMs,
+      performance.now(),
+      agentApiTimeoutMs,
+      jobDeadlineMs,
+      0,
+      0,
+    );
+    if (terminalTimeoutMs <= 0) {
+      throw new Error(
+        "Agent API timed out before result: job deadline exhausted",
+      );
+    }
+    await agentRequest(
+      resultPayload(
+        job,
+        result,
+        verifiedOpenedSourceUrls,
+        primaryModel,
+        reviewerModel,
+        reviewerProvenance,
+        guardedJob.openedSources,
+      ),
+      "POST",
+      terminalTimeoutMs,
+    );
   } catch (error) {
     console.error(
       `[bridge] job ${job.id}:`,
       error instanceof Error ? error.message : error,
     );
-    await agentRequest({
-      action: "error",
-      orderId: job.id,
-      detail:
-        "Письмо и журнал сохранены. Запустите карточку снова или выберите другого исполнителя.",
-    }).catch(() => {});
+    const errorPublicationTimeoutMs = stageTimeoutForDeadline(
+      jobStartedAtMs,
+      performance.now(),
+      agentApiTimeoutMs,
+      jobDeadlineMs,
+      0,
+      0,
+    );
+    if (errorPublicationTimeoutMs > 0) {
+      await agentRequest(
+        {
+          action: "error",
+          ...claimPayload(job),
+          detail:
+            "Письмо и журнал сохранены. Запустите карточку снова или выберите другого исполнителя.",
+        },
+        "POST",
+        errorPublicationTimeoutMs,
+      ).catch(() => {});
+    }
   } finally {
+    stopLeaseRenewal();
     busy = false;
   }
 }
@@ -874,7 +2270,14 @@ process.on("SIGTERM", () => {
 
 console.log(`[bridge] ${standUrl}`);
 console.log(`[bridge] default=${fallbackPrimary}`);
-console.log(`[bridge] reviewer=${strongReviewer}`);
+console.log(
+  `[bridge] default-variant=${modelVariant(fallbackPrimary) ?? "default"}`,
+);
+console.log(
+  `[bridge] reviewer=${strongReviewer} variant=${
+    modelVariant(strongReviewer) ?? "default"
+  }`,
+);
 console.log(`[bridge] vision=${visionModel}`);
 
 await Promise.all([heartbeatLoop(), jobLoop()]);

@@ -68,6 +68,105 @@ export type DemoCatalogSnapshot = {
   capturedAt?: string;
 };
 
+export type EvidenceSource =
+  | { kind: "message"; roundNo: number; quote: string }
+  | { kind: "vision"; attachmentRef: string; observation: string }
+  | {
+      kind: "web";
+      url: string;
+      title: string;
+      openedAt: string;
+      excerpt?: string;
+      sha256?: string;
+    }
+  | {
+      kind: "snapshot";
+      dataset: "catalog" | "inventory" | "supplier";
+      key: string;
+      version: string;
+      checkedAt: string;
+    };
+
+export type OrderEvidence = {
+  id: string;
+  claim: string;
+  confidence: number;
+  source: EvidenceSource;
+};
+
+export type AgentAssumption = {
+  id: string;
+  claim: string;
+  basedOnEvidenceIds: string[];
+  confidence: number;
+  range?: { min: number; max: number; unit: string };
+  confirmBefore: "never" | "commercial_offer" | "reserve" | "production";
+};
+
+export type TargetCandidate = {
+  label: string;
+  confidence: number;
+  evidenceIds: string[];
+};
+
+export type ResolvedIntent = {
+  goal: string;
+  target:
+    | { state: "resolved"; label: string; evidenceIds: string[] }
+    | {
+        state: "ambiguous";
+        candidates: [TargetCandidate, TargetCandidate, ...TargetCandidate[]];
+      };
+  evidence: OrderEvidence[];
+  assumptions: AgentAssumption[];
+  blocker: null | {
+    kind: "target_ambiguity";
+    question: string;
+    choices: [string, string, ...string[]];
+  };
+};
+
+export type Commitment = "none" | "estimate" | "commercial_offer";
+
+export type RangeEstimate = {
+  metric: "surface_area" | "paint_quantity" | "budget";
+  range: { min: number; max: number; unit: string };
+  method: string;
+  evidenceIds: string[];
+  assumptionIds: string[];
+  confidence: number;
+  candidateSku?: string;
+};
+
+export type SupplierLead = {
+  supplier: string;
+  url: string;
+  openedAt: string;
+  observedClaims: string[];
+  confirmationNeeded: string[];
+};
+
+export type VisionObservation = {
+  attachmentRef?: string;
+  summary: string;
+  relevance: "relevant" | "irrelevant" | "uncertain";
+  targetCandidates: Array<{
+    label: string;
+    confidence: number;
+    evidence: string;
+  }>;
+  visibleFacts: string[];
+  scaleEvidence: string[];
+  areaEstimate?: {
+    min: number;
+    max: number;
+    unit: string;
+    method: string;
+    confidence: number;
+  };
+  uncertainties: string[];
+};
+
 export type AgentOption = {
   id: string;
   title: string;
@@ -75,6 +174,7 @@ export type AgentOption = {
   tradeoff: string;
   reply: string;
   businessResult?: string;
+  followUpActor: "customer" | "supplier" | "internal" | "none";
 };
 
 export type DecisionBasis = {
@@ -128,10 +228,16 @@ type SurfaceFacts = {
 };
 
 export type AgentResult = {
+  schemaVersion: 2;
   zone: "green" | "yellow" | "red";
   decision: "quote" | "clarify" | "escalate";
   route: "ready" | "needs_info" | "manager";
   confidence: number;
+  resolvedIntent: ResolvedIntent;
+  visionObservation: VisionObservation | null;
+  commitment: Commitment;
+  estimates: RangeEstimate[];
+  supplierLeads: SupplierLead[];
   understood: string[];
   missing: string[];
   product: {
@@ -1080,6 +1186,294 @@ function orderLogisticsLine(value: string) {
   return `${normalized.charAt(0).toLocaleLowerCase("ru-RU")}${normalized.slice(1)}`;
 }
 
+type DemoOptionDraft = Omit<AgentOption, "followUpActor"> & {
+  followUpActor?: AgentOption["followUpActor"];
+};
+type AgentResultDraft = Omit<
+  AgentResult,
+  | "schemaVersion"
+  | "resolvedIntent"
+  | "visionObservation"
+  | "commitment"
+  | "estimates"
+  | "supplierLeads"
+  | "options"
+> & {
+  options: DemoOptionDraft[];
+};
+
+function withV2Result(
+  result: AgentResultDraft,
+  input: OrderInput,
+): AgentResult {
+  const quote = `${input.subject}\n${input.body}`.trim().slice(0, 420);
+  const claims = result.understood.length
+    ? result.understood.slice(0, 8)
+    : ["Задача клиента сохранена"];
+  const evidence: OrderEvidence[] = claims.map((claim, index) => ({
+    id: `message-${index + 1}`,
+    claim,
+    confidence: 1,
+    source: { kind: "message", roundNo: 1, quote },
+  }));
+  const targetClaim =
+    claims.find((claim) => /^(?:Задача|Краска):/u.test(claim)) ?? claims[0];
+  const targetEvidence = evidence.find((item) => item.claim === targetClaim);
+  const calculationEvidenceId = targetEvidence?.id ?? evidence[0].id;
+  const estimates: RangeEstimate[] = result.calculation
+    ? [
+        {
+          metric: "surface_area",
+          range: {
+            min: result.calculation.paintAreaM2,
+            max: result.calculation.paintAreaM2,
+            unit: "м²",
+          },
+          method: result.calculation.explanation,
+          evidenceIds: [calculationEvidenceId],
+          assumptionIds: [],
+          confidence: 1,
+          ...(result.product?.sku
+            ? { candidateSku: result.product.sku }
+            : {}),
+        },
+        {
+          metric: "paint_quantity",
+          range: {
+            min: result.calculation.roundedKg,
+            max: result.calculation.roundedKg,
+            unit: "кг",
+          },
+          method: result.calculation.explanation,
+          evidenceIds: [calculationEvidenceId],
+          assumptionIds: [],
+          confidence: 1,
+          ...(result.product?.sku
+            ? { candidateSku: result.product.sku }
+            : {}),
+        },
+      ]
+    : [];
+  // ponytail: one explicit recorded asset has a checked fixture; all free uploads stay on the live vision path.
+  const recordedFencePhoto = input.attachment?.src === "/fence-demo.jpg";
+  const recordedVision: VisionObservation | null = recordedFencePhoto
+    ? {
+        attachmentRef: input.attachment?.src,
+        summary:
+          "На снимке виден деревянный штакетник со старым отслаивающимся покрытием.",
+        relevance: "relevant",
+        targetCandidates: [
+          {
+            label: "забор",
+            confidence: 0.99,
+            evidence: "Забор занимает основную часть кадра и назван в письме.",
+          },
+        ],
+        visibleFacts: [
+          "В кадре деревянные вертикальные доски.",
+          "Старое покрытие заметно отслаивается.",
+          "Видна одна сторона фрагмента забора.",
+        ],
+        scaleEvidence: [
+          "Повторяющаяся ширина досок даёт только грубый ориентир масштаба.",
+        ],
+        areaEstimate: {
+          min: 15,
+          max: 60,
+          unit: "м²",
+          method:
+            "Широкий диапазон по видимому фрагменту и повторяющемуся размеру досок; полная длина и вторая сторона не видны.",
+          confidence: 0.35,
+        },
+        uncertainties: [
+          "Полная длина забора и число окрашиваемых сторон не видны.",
+          "Точный цвет и состояние древесины проверяются перед коммерческим предложением.",
+        ],
+      }
+    : null;
+  if (recordedVision) {
+    evidence.push({
+      id: "vision-recorded-1",
+      claim: recordedVision.summary,
+      confidence: 0.9,
+      source: {
+        kind: "vision",
+        attachmentRef: recordedVision.attachmentRef ?? "recorded-photo",
+        observation: recordedVision.summary,
+      },
+    });
+  }
+  const gapAssumptions: AgentAssumption[] = result.missing.map(
+    (gap, index) => ({
+      id: `recorded-gap-${index + 1}`,
+      claim: `Для точного обязательства потребуется подтвердить: ${gap}`,
+      basedOnEvidenceIds: [calculationEvidenceId],
+      confidence: 0.35,
+      confirmBefore: "commercial_offer",
+    }),
+  );
+  if (recordedVision?.areaEstimate && estimates.length === 0) {
+    const assumptionIds = gapAssumptions.map((assumption) => assumption.id);
+    estimates.push(
+      {
+        metric: "surface_area",
+        range: {
+          min: recordedVision.areaEstimate.min,
+          max: recordedVision.areaEstimate.max,
+          unit: recordedVision.areaEstimate.unit,
+        },
+        method: recordedVision.areaEstimate.method,
+        evidenceIds: ["vision-recorded-1"],
+        assumptionIds,
+        confidence: recordedVision.areaEstimate.confidence,
+        candidateSku: "КР-005",
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 10, max: 20, unit: "кг" },
+        method:
+          "Диапазон площади × 0,14 кг/м² × 2 слоя + 10% запаса, округлено до упаковок по 10 кг.",
+        evidenceIds: ["vision-recorded-1"],
+        assumptionIds,
+        confidence: 0.3,
+        candidateSku: "КР-005",
+      },
+    );
+  }
+  const legacyClarification = result.route === "needs_info";
+  const recordedEstimate = legacyClarification && estimates.length > 0;
+  const normalizedResult: AgentResultDraft = legacyClarification
+    ? recordedEstimate
+      ? {
+          ...result,
+          zone: "yellow",
+          decision: "clarify",
+          route: "ready",
+          missing: [],
+          product: null,
+          businessContext:
+            "Цель понятна по письму и фото. Записанное vision-наблюдение даёт широкий предварительный диапазон; точные обязательства появятся только после живой проверки.",
+          zoneReason:
+            "Предварительная диапазонная оценка готова без запроса уже выводимых данных.",
+          managerNote:
+            "Перед коммерческим предложением подтвердить геометрию, число сторон и выбранный оттенок.",
+          options: [],
+          reply: {
+            subject: "Предварительная оценка по заявке",
+            body:
+              "Добрый день! По фотографии цель понятна: деревянный забор со старым покрытием. Предварительно площадь составляет 15–60 м², ориентир по краске КР-005 — 10–20 кг. Это диапазонная оценка; точный объём и оттенок подтвердим перед коммерческим предложением.",
+          },
+          checks: [
+            "Цель определена по письму и фото",
+            "Площадь и расход указаны диапазоном",
+            "Точный оффер не обещан",
+          ],
+          sources: [
+            "Письмо клиента",
+            "Записанное наблюдение по синтетическому фото",
+            "Каталог товаров",
+          ],
+          decisionBasis: [
+            {
+              fact: recordedVision?.summary ?? "Фото приложено к заявке.",
+              source: "Записанное vision-наблюдение",
+              checkedAt: today,
+            },
+            {
+              fact:
+                "Площадь оценена диапазоном 15–60 м², расход — 10–20 кг.",
+              source: "Диапазонный расчёт",
+              checkedAt: today,
+            },
+          ],
+        }
+      : {
+          ...result,
+          zone: "red",
+          decision: "escalate",
+          route: "manager",
+          missing: [],
+          product: null,
+          options: [
+            {
+              id: "запустить-живой-разбор",
+              title: "Запустить живого агента",
+              rationale:
+                "Живая модель проверит вложение, допущения и открытые источники.",
+              tradeoff: "Результат появится после завершения живого прогона.",
+              reply:
+                "Внутренний шаг: передать сохранённую заявку живому агенту.",
+            },
+            {
+              id: "проверить-вручную",
+              title: "Передать специалисту",
+              rationale:
+                "Специалист увидит исходное письмо и подготовит безопасный следующий шаг.",
+              tradeoff: "Потребуется ручная проверка.",
+              reply:
+                "Внутренний шаг: открыть сохранённую заявку специалисту.",
+            },
+          ],
+          businessContext: `${result.businessContext} Записанный прогон сохранил задачу, но не подменяет живое понимание свободного запроса.`,
+          zoneReason:
+            "Записанный прогон не подменяет свободный разбор недостающими вопросами.",
+          managerNote:
+            "Запустите живого агента: он проверит фото, допущения и открытые источники.",
+          reply: {
+            subject: "Нужен живой разбор заявки",
+            body:
+              "Клиентское предложение не создано: записанный прогон не делает неподтверждённых выводов.",
+          },
+          checks: [
+            "Исходное письмо сохранено",
+            "Неподтверждённое предложение не создано",
+            "Следующий шаг назначен внутренней команде",
+          ],
+          sources: ["Письмо клиента", "Каталог товаров"],
+          decisionBasis: [
+            ...result.decisionBasis,
+            {
+              fact:
+                "Записанный прогон не получил достаточного основания для диапазонной оценки.",
+              source: "Проверка записанного сценария",
+              checkedAt: today,
+            },
+          ],
+        }
+    : { ...result, missing: [] };
+  const commitment: Commitment =
+    normalizedResult.route === "ready" && recordedEstimate
+      ? "estimate"
+      : normalizedResult.route === "ready" ||
+          (normalizedResult.route === "manager" && normalizedResult.product)
+      ? "commercial_offer"
+      : "none";
+
+  return {
+    ...normalizedResult,
+    schemaVersion: 2,
+    resolvedIntent: {
+      goal: targetClaim.replace(/^[^:]+:\s*/u, "") || targetClaim,
+      target: {
+        state: "resolved",
+        label: targetClaim.replace(/^[^:]+:\s*/u, "") || "задача клиента",
+        evidenceIds: [targetEvidence?.id ?? evidence[0].id],
+      },
+      evidence,
+      assumptions: gapAssumptions,
+      blocker: null,
+    },
+    visionObservation: recordedVision,
+    commitment,
+    estimates,
+    supplierLeads: [],
+    options: normalizedResult.options.map((option) => ({
+      ...option,
+      followUpActor: option.followUpActor ?? "internal",
+    })),
+  };
+}
+
 export function buildDemoResult(
   input: OrderInput,
   snapshot?: DemoCatalogSnapshot | null,
@@ -1359,7 +1753,7 @@ export function buildDemoResult(
     const visibleMarketBasis = marketBasis(view);
     if (visibleMarketBasis && product) decisionBasis.push(visibleMarketBasis);
 
-    return {
+    return withV2Result({
       zone: "yellow",
       decision: "clarify",
       route: "needs_info",
@@ -1458,7 +1852,7 @@ export function buildDemoResult(
           "Клиенту легко ответить",
         ],
       },
-    };
+    }, input);
   }
 
   const total = requestedKg * product.pricePerKg;
@@ -1659,7 +2053,7 @@ export function buildDemoResult(
         )} кг краски «${product.name}» по цене ${money.format(
           product.pricePerKg,
         )} ₽/кг. Можем сохранить эту цену при обычной оплате до отгрузки.`;
-    const technicalOptions: AgentOption[] = /масл/iu.test(evidenceText)
+    const technicalOptions: DemoOptionDraft[] = /масл/iu.test(evidenceText)
       ? [
       {
         id: "проверка-образца",
@@ -1734,7 +2128,7 @@ export function buildDemoResult(
               "Добрый день!\n\nНапишите обязательный документ и средство для уборки. Технолог подберёт покрытие по этим требованиям. Остальные сведения о помещении и расчёт уже сохранены.",
           },
         ];
-    const options: AgentOption[] = technicalReview
+    const options: DemoOptionDraft[] = technicalReview
       ? technicalOptions
       : shortage
       ? [
@@ -1755,6 +2149,7 @@ export function buildDemoResult(
             ? [
                 {
                   id: "помочь-с-недостающим-объёмом",
+                  followUpActor: "supplier" as const,
                   title: `Собрать ${money.format(
                     requestedKg,
                   )} кг вместе с «${supplierPlan.supplierName}»`,
@@ -1986,7 +2381,7 @@ export function buildDemoResult(
           },
           ];
 
-    return {
+    return withV2Result({
       zone: "red",
       decision: "escalate",
       route: "manager",
@@ -2087,10 +2482,10 @@ export function buildDemoResult(
           "Готовый текст приложен",
         ],
       },
-    };
+    }, input);
   }
 
-  return {
+  return withV2Result({
     zone: "green",
     decision: "quote",
     route: "ready",
@@ -2185,5 +2580,5 @@ export function buildDemoResult(
         "Письмо собрано по правилам",
       ],
     },
-  };
+  }, input);
 }

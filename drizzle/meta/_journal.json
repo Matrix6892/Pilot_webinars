@@ -43,6 +43,20 @@
       "when": 1785299377340,
       "tag": "0005_unique_selene",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1785482607491,
+      "tag": "0006_lean_northstar",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785567632545,
+      "tag": "0007_thin_toad_men",
+      "breakpoints": true
     }
   ]
 }

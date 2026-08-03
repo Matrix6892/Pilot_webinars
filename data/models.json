@@ -1,15 +1,19 @@
 {
-  "default": "opencode-go/deepseek-v4-flash",
+  "default": "deepseek/deepseek-v4-flash",
   "options": [
     {
-      "id": "opencode-go/deepseek-v4-flash",
-      "label": "DeepSeek V4 Flash",
-      "note": "Быстрый разбор заказа"
+      "id": "deepseek/deepseek-v4-flash",
+      "label": "DeepSeek V4 Flash · API DeepSeek",
+      "note": "Основной исполнитель через официальный DeepSeek API, max effort",
+      "variant": "max",
+      "roles": ["primary"]
     },
     {
       "id": "opencode-go/deepseek-v4-pro",
-      "label": "DeepSeek V4 Pro",
-      "note": "Подробный разбор заказа"
+      "label": "DeepSeek V4 Pro · reviewer",
+      "note": "Независимая проверка результата, max effort",
+      "variant": "max",
+      "roles": ["reviewer"]
     }
   ]
 }

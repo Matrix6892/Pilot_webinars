@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import {
   createUploadKey,
   MAX_UPLOAD_BYTES,
+  UPLOAD_RETENTION_SECONDS,
   UploadValidationError,
   uploadSource,
   validateImageUpload,
@@ -23,14 +24,19 @@ type StoredUpload = {
   httpEtag?: string;
   httpMetadata?: {
     contentType?: string;
+    cacheControl?: string;
   };
+  customMetadata?: Record<string, string>;
 };
 
 type UploadBucket = {
   put(
     key: string,
     value: ReadableStream<Uint8Array>,
-    options: { httpMetadata: { contentType: string } },
+    options: {
+      httpMetadata: { contentType: string; cacheControl: string };
+      customMetadata: Record<string, string>;
+    },
   ): Promise<unknown>;
   get(key: string): Promise<StoredUpload | null>;
 };
@@ -123,8 +129,15 @@ export async function POST(request: Request) {
       head,
     });
     const key = createUploadKey(image.contentType);
+    const retentionUntil = new Date(
+      Date.now() + UPLOAD_RETENTION_SECONDS * 1_000,
+    ).toISOString();
     await uploads.put(key, file.stream(), {
-      httpMetadata: { contentType: image.contentType },
+      httpMetadata: {
+        contentType: image.contentType,
+        cacheControl: "private, no-store",
+      },
+      customMetadata: { "retention-until": retentionUntil },
     });
 
     return Response.json(
@@ -147,7 +160,11 @@ export async function POST(request: Request) {
         maxBytes: MAX_UPLOAD_BYTES,
       });
     }
-    throw error;
+    return errorResponse(
+      503,
+      "Фото не удалось проверить и сохранить. Повторите загрузку позже.",
+      "upload_storage_failed",
+    );
   }
 }
 
@@ -175,10 +192,27 @@ export async function GET(request: Request) {
     return errorResponse(404, "Изображение не найдено.", "upload_not_found");
   }
 
+  const contentType = object.httpMetadata?.contentType;
+  const retentionUntil = object.customMetadata?.["retention-until"] ?? "";
+  if (
+    !Number.isSafeInteger(object.size) ||
+    object.size <= 0 ||
+    object.size > MAX_UPLOAD_BYTES ||
+    !["image/jpeg", "image/png", "image/webp"].includes(contentType ?? "") ||
+    !Number.isFinite(Date.parse(retentionUntil)) ||
+    Date.parse(retentionUntil) <= Date.now()
+  ) {
+    return errorResponse(
+      410,
+      "Фотография больше недоступна. Загрузите её ещё раз.",
+      "upload_expired",
+    );
+  }
+
   const headers = new Headers({
-    "Cache-Control": "public, max-age=31536000, immutable",
+    "Cache-Control": "no-store",
     "Content-Length": String(object.size),
-    "Content-Type": object.httpMetadata?.contentType ?? "application/octet-stream",
+    "Content-Type": contentType ?? "",
     "Cross-Origin-Resource-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
   });

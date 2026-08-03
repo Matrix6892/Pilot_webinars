@@ -19,6 +19,9 @@ type ConditionalOrderEvent = {
   title: string;
   detail?: string;
   state?: string;
+  roundNo?: number | null;
+  claimId?: string | null;
+  attemptNo?: number | null;
   createdAt?: string;
 };
 
@@ -36,6 +39,18 @@ export function insertOrderEventWhen(
         title: sql<string>`${event.title}`.as("title"),
         detail: sql<string>`${event.detail ?? ""}`.as("detail"),
         state: sql<string>`${event.state ?? "done"}`.as("state"),
+        roundNo:
+          event.roundNo === undefined
+            ? sql<number | null>`NULL`.as("round_no")
+            : sql<number | null>`${event.roundNo}`.as("round_no"),
+        claimId:
+          event.claimId === undefined
+            ? sql<string | null>`NULL`.as("claim_id")
+            : sql<string | null>`${event.claimId}`.as("claim_id"),
+        attemptNo:
+          event.attemptNo === undefined
+            ? sql<number | null>`NULL`.as("attempt_no")
+            : sql<number | null>`${event.attemptNo}`.as("attempt_no"),
         createdAt: event.createdAt
           ? sql<string>`${event.createdAt}`.as("created_at")
           : sql<string>`CURRENT_TIMESTAMP`.as("created_at"),
@@ -75,6 +90,10 @@ async function initializeDb() {
         inventory_snapshot_json TEXT,
         manager_option_id TEXT,
         manager_decided_at TEXT,
+        claim_id TEXT,
+        claimed_by TEXT,
+        attempt_no INTEGER NOT NULL DEFAULT 0,
+        lease_until TEXT,
         sent_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -88,6 +107,9 @@ async function initializeDb() {
         title TEXT NOT NULL,
         detail TEXT NOT NULL DEFAULT '',
         state TEXT NOT NULL DEFAULT 'done',
+        round_no INTEGER,
+        claim_id TEXT,
+        attempt_no INTEGER,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
     `),
@@ -243,6 +265,34 @@ async function initializeDb() {
       ),
     });
   }
+  if (!names.has("claim_id")) {
+    additions.push({
+      name: "claim_id",
+      statement: env.DB.prepare("ALTER TABLE orders ADD COLUMN claim_id TEXT"),
+    });
+  }
+  if (!names.has("claimed_by")) {
+    additions.push({
+      name: "claimed_by",
+      statement: env.DB.prepare("ALTER TABLE orders ADD COLUMN claimed_by TEXT"),
+    });
+  }
+  if (!names.has("attempt_no")) {
+    additions.push({
+      name: "attempt_no",
+      statement: env.DB.prepare(
+        "ALTER TABLE orders ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 0",
+      ),
+    });
+  }
+  if (!names.has("lease_until")) {
+    additions.push({
+      name: "lease_until",
+      statement: env.DB.prepare(
+        "ALTER TABLE orders ADD COLUMN lease_until TEXT",
+      ),
+    });
+  }
 
   for (const addition of additions) {
     try {
@@ -251,6 +301,53 @@ async function initializeDb() {
       const refreshed = await env.DB.prepare("PRAGMA table_info(orders)").all<{
         name: string;
       }>();
+      if (!refreshed.results.some((column) => column.name === addition.name)) {
+        throw error;
+      }
+    }
+  }
+
+  await env.DB.prepare(
+    "CREATE INDEX IF NOT EXISTS orders_status_lease_until_idx ON orders (status, lease_until)",
+  ).run();
+
+  const eventColumns = await env.DB.prepare(
+    "PRAGMA table_info(order_events)",
+  ).all<{ name: string }>();
+  const eventNames = new Set(
+    eventColumns.results.map((column) => column.name),
+  );
+  const eventAdditions: Array<{
+    name: string;
+    statement: D1PreparedStatement;
+  }> = [
+    {
+      name: "round_no",
+      statement: env.DB.prepare(
+        "ALTER TABLE order_events ADD COLUMN round_no INTEGER",
+      ),
+    },
+    {
+      name: "claim_id",
+      statement: env.DB.prepare(
+        "ALTER TABLE order_events ADD COLUMN claim_id TEXT",
+      ),
+    },
+    {
+      name: "attempt_no",
+      statement: env.DB.prepare(
+        "ALTER TABLE order_events ADD COLUMN attempt_no INTEGER",
+      ),
+    },
+  ].filter((addition) => !eventNames.has(addition.name));
+
+  for (const addition of eventAdditions) {
+    try {
+      await addition.statement.run();
+    } catch (error) {
+      const refreshed = await env.DB.prepare(
+        "PRAGMA table_info(order_events)",
+      ).all<{ name: string }>();
       if (!refreshed.results.some((column) => column.name === addition.name)) {
         throw error;
       }

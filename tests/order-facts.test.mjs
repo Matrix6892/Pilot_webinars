@@ -214,6 +214,8 @@ test("does not read a budget in thousands as tonnes", () => {
   assert.equal(quantityFromText("Бюджет 300 тыс. рублей."), 0);
   assert.equal(quantityFromText("Требуется 1,5 тонны покрытия."), 1500);
   assert.equal(quantityFromText("Требуется 2 т. покрытия."), 2000);
+  assert.equal(quantityFromText("Need 2,000 kg of paint."), 2000);
+  assert.equal(quantityFromText("Дайте две тонны покрытия."), 2000);
 });
 
 test("does not read packaging or a unit-price request as order volume", () => {

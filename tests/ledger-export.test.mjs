@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   buildLedgerCsv,
+  decodeStoredAgentResultForLedger,
   LEDGER_CSV_HEADERS,
+  projectLedgerOrder,
+  projectLedgerResultHistory,
   queryForLedgerFormat,
 } from "../lib/ledger-export.mjs";
 
@@ -47,6 +50,114 @@ test("renames the internal-number header without changing the CSV shape", () => 
     "Внутренний номер записи",
   );
   assert.equal(LEDGER_CSV_HEADERS.includes("Служебный ID"), false);
+});
+
+test("fails closed for malformed and partial persisted results in JSON projections and CSV", () => {
+  const leaked = "PARTIAL_PRIVATE_REPLY_SHOULD_NOT_ESCAPE";
+  const partial = JSON.stringify({
+    schemaVersion: 2,
+    reply: { subject: "partial", body: leaked },
+    options: [{ title: "partial option", reply: leaked }],
+  });
+  const order = {
+    id: "malformed-order",
+    subject: "Исходное письмо администратора",
+    body: "Текст доступен только admin",
+    status: "processing",
+    resultJson: partial,
+    conversationJson: "[]",
+    createdAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:00.000Z",
+  };
+  const history = {
+    id: 1,
+    orderId: order.id,
+    roundNo: 1,
+    zone: "red",
+    route: "manager",
+    status: "awaiting_approval",
+    reason: "Решение рабочей модели",
+    replySubject: leaked,
+    replyBody: leaked,
+    zoneReason: leaked,
+    optionsJson: JSON.stringify([{ reply: leaked }]),
+    resultJson: partial,
+    createdAt: "2026-07-29T10:01:00.000Z",
+  };
+
+  const projectedOrder = projectLedgerOrder(order);
+  const projectedHistory = projectLedgerResultHistory(history);
+  assert.equal(
+    decodeStoredAgentResultForLedger('{"schemaVersion":2,"reply":{'),
+    null,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(projectedOrder.result),
+    new RegExp(leaked, "u"),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(projectedHistory),
+    new RegExp(leaked, "u"),
+  );
+
+  const csv = buildLedgerCsv({
+    orders: [order],
+    resultHistory: [history],
+  });
+  assert.doesNotMatch(csv, new RegExp(leaked, "u"));
+});
+
+test("projects legacy stored results into the v2 ledger contract without turning missing into ambiguity", () => {
+  const legacy = JSON.stringify({
+    zone: "yellow",
+    decision: "clarify",
+    route: "needs_info",
+    understood: ["Клиент приложил фотографию"],
+    missing: ["Что требуется покрасить"],
+    product: null,
+    options: [],
+    reply: { subject: "Нужна деталь", body: "Уточним сохранённую заявку." },
+  });
+  const order = {
+    id: "legacy-order",
+    subject: "Старая заявка",
+    body: "Старый текст",
+    status: "clarification_ready",
+    resultJson: legacy,
+    conversationJson: "[]",
+    createdAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:00.000Z",
+  };
+  const history = {
+    id: 1,
+    orderId: order.id,
+    roundNo: 1,
+    zone: "yellow",
+    route: "needs_info",
+    status: "clarification_ready",
+    reason: "Старое решение",
+    resultJson: legacy,
+    replySubject: "",
+    replyBody: "",
+    zoneReason: "",
+    optionsJson: "[]",
+    createdAt: "2026-07-29T10:01:00.000Z",
+  };
+
+  const projectedOrder = projectLedgerOrder(order);
+  const projectedHistory = projectLedgerResultHistory(history);
+
+  for (const projected of [projectedOrder.result, projectedHistory.result]) {
+    assert.equal(projected.schemaVersion, 2);
+    assert.ok(projected.resolvedIntent);
+    assert.equal(projected.resolvedIntent.blocker, null);
+  }
+  assert.deepEqual(projectedOrder.result.legacyBlocker, {
+    kind: "legacy_missing",
+    questions: ["Что требуется покрасить"],
+  });
+  assert.equal(projectedHistory.replySubject, "Нужна деталь");
+  assert.equal(projectedHistory.replyBody, "Уточним сохранённую заявку.");
 });
 
 test("exports the incoming request and prepared agent email as separate full-text records", () => {
@@ -451,6 +562,7 @@ test("assigns a readable record type and sender to every known event stage", () 
     ["recalculate", "Пересчёт заказа", "Программа расчёта"],
     ["market", "Сравнение цен других поставщиков", "Агент отдела продаж"],
     ["review", "Проверка ответа", "Программа проверки"],
+    ["review-skipped", "Безопасное завершение", "Программа проверки"],
     ["understanding", "Анализ заявки", "Агент отдела продаж"],
     ["received", "Приём заявки", "Система"],
   ];
@@ -600,7 +712,7 @@ test("exports Google-safe dates and readable model names", () => {
         }),
         conversationJson: "[]",
         roundNo: 1,
-        agentModel: "opencode-go/deepseek-v4-flash",
+        agentModel: "opencode/deepseek-v4-flash",
         reviewerModel: "opencode-go/deepseek-v4-pro",
         sentAt: "2026-07-29T21:26:42.260Z",
         createdAt: "2026-07-29T21:18:13.000Z",
@@ -849,6 +961,14 @@ test("gives every model step a specific Russian presentation", () => {
       "Программа проверки",
       "Руководитель",
       "Программа передала решение руководителю",
+    ],
+    [
+      "review-skipped",
+      "Безопасное завершение",
+      "Безопасное завершение без повторной проверки",
+      "Программа проверки",
+      "Руководитель",
+      "Fail-closed результат передан руководителю",
     ],
     [
       "vision",

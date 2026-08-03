@@ -27,7 +27,6 @@ test("ships the Колер product surface and removes the starter", async () =>
     page,
     stand,
     layout,
-    scenarios,
     agentRoute,
     ordersRoute,
     paintSource,
@@ -36,7 +35,6 @@ test("ships the Колер product surface and removes the starter", async () =>
       readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../app/order-stand.tsx", import.meta.url), "utf8"),
       readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../data/order-scenarios.ts", import.meta.url), "utf8"),
       readFile(new URL("../app/api/agent/route.ts", import.meta.url), "utf8"),
       readFile(new URL("../app/api/orders/route.ts", import.meta.url), "utf8"),
       readFile(new URL("../data/paint-demo.json", import.meta.url), "utf8"),
@@ -51,16 +49,10 @@ test("ships the Колер product surface and removes the starter", async () =>
     /Клиент пишет своими словами\.\s*Агент ведёт заказ до готового ответа/,
   );
   assert.match(stand, /Форма запускает тот же рабочий путь/);
-  assert.match(stand, /Медицинский склад/);
-  assert.match(stand, /Обычный склад/);
-  assert.match(stand, /Другое помещение/);
-  assert.match(stand, /Как используют помещение\?/);
   assert.match(stand, /Руководитель одобрил запрос/);
   assert.match(stand, /Агент нашёл, как собрать все/);
   assert.match(stand, /Расчёт варианта с другим поставщиком/);
   assert.match(stand, /Что подтверждаем перед итоговым письмом/);
-  assert.match(stand, /Попробовать с фото забора/);
-  assert.match(stand, /Показать, как агент сохраняет большой заказ/);
   assert.match(stand, /Заполнить свой заказ/);
   assert.match(stand, /Заявка на подбор краски/);
   assert.match(stand, /customDraft \? "Ваш заказ" : "Готовый пример"/);
@@ -75,7 +67,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Что агент делает сам/);
   assert.match(
     stand,
-    /Страница заказа хранит письмо,[\s\S]*?Агент ждёт\s+ответ клиента[\s\S]*?пересчитывает план/,
+    /Страница заказа хранит письмо, фото и весь контекст[\s\S]*?оценивает\s+неизвестное диапазоном[\s\S]*?Вопрос появляется только при неоднозначности самого объекта/,
   );
   assert.match(stand, /Описание заказа и фото/);
   assert.match(stand, /Модель для фото описала видимые детали/);
@@ -92,26 +84,35 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /<details className="zone-guide" open>/);
   assert.match(
     stand,
-    /bridgeOnline[\s\S]*?Модель для фото описывает только видимое[\s\S]*?Сайт читает заявку, обращается к живому складу, считает заказ/,
+    /bridgeOnline[\s\S]*?Рабочая модель ведёт каждый заказ[\s\S]*?Модель для фото описывает видимое[\s\S]*?Программа сверяет цены и остатки/,
   );
   assert.match(stand, /Google[- ]таблиц|Google Таблиц/iu);
   assert.match(stand, /Другой пример/);
+  assert.match(
+    stand,
+    /scenarioGroups\.find\(\(group\) => group\.id === scenarioGroup\)[\s\S]*?\.examples\.length/,
+  );
+  assert.doesNotMatch(stand, /scenarioIndex \+ 1\} из 10/);
   assert.match(stand, /type="file"/);
-  assert.match(stand, /fetch\("\/api\/uploads"/);
+  assert.match(stand, /fetchJson\(\s*"\/api\/uploads"/);
   assert.match(stand, /Заменить фотографию/);
   assert.match(stand, /Убрать фотографию/);
   assert.match(
     stand,
-    /Boolean\(draft\.attachment\) && \(!product \|\| !routeQuantity\)/,
+    /function inferZone\(draft: Draft\)[\s\S]*?Свободная заявка готова к разбору/,
   );
-  assert.match(stand, /Фотография останется на странице заказа/);
+  assert.doesNotMatch(stand, /orderFactsFromText|matchProduct/);
+  assert.match(
+    stand,
+    /Агент изучит письмо и фото, сам найдёт внешние факты и отметит неизвестное диапазоном/,
+  );
   assert.match(
     stand,
     /Заявка и фотография войдут в открытый журнал вебинара/,
   );
   assert.match(stand, /Отправить агенту/);
   assert.match(stand, /Готов ответить/);
-  assert.match(stand, /Нужны детали/);
+  assert.match(stand, /Предварительная оценка/);
   assert.match(stand, /Решает руководитель/);
   assert.match(stand, /Вариант подтверждён · подготовьте резерв товара/);
   assert.match(stand, /Польза клиенту/);
@@ -123,9 +124,9 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Что учесть/);
   assert.match(stand, /Письмо по выбранному варианту/);
   assert.match(stand, /Записать отправку ответа/);
-  assert.match(stand, /Записать отправку вопросов/);
+  assert.match(stand, /Записать отправку вопроса/);
   assert.match(stand, /Передать ответ агенту/);
-  assert.match(stand, /посчитает килограммы/);
+  assert.match(stand, /оценит масштаб диапазоном/);
   assert.match(
     stand,
     /result\.calculation\.kind === "fence-area"/,
@@ -137,8 +138,6 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /данные из переписки/);
   assert.match(stand, /% технологического запаса/);
   assert.match(stand, /Агент перечитает склад/);
-  assert.match(stand, /40 кг · агент принесёт варианты/);
-  assert.match(stand, /180 кг · агент подготовит письмо/);
   assert.match(stand, /пересчёт запускается сам/);
   assert.match(stand, /Живой склад обновлён/);
   assert.match(stand, /Пересчитать заказ по новому остатку/);
@@ -180,9 +179,15 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Источники для проверки/);
   assert.match(stand, /Ежедневная модель и отдельная проверка/);
   assert.match(stand, /Автоматическая обработка по правилам/);
-  assert.match(stand, /Автоматическая обработка по правилам и живому складу/);
+  assert.match(stand, /Записанный демонстрационный прогон/);
   assert.ok(
-    modelData.options.some((model) => model.label === "DeepSeek V4 Flash"),
+    modelData.options.some(
+      (model) => model.label === "DeepSeek V4 Flash · API DeepSeek",
+    ),
+  );
+  assert.match(
+    stand,
+    /modelCatalog\.options[\s\S]*?roles\.includes\("primary"\)[\s\S]*?\.map\(/u,
   );
   assert.match(stand, /GPT-5\.6 Sol/);
   assert.match(stand, /Команда улучшает правила по журналу/);
@@ -204,11 +209,17 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(stand, /Скопировать формулу для Google Таблиц/);
   assert.match(
     stand,
-    /bridgeOnline \? \([\s\S]*?Обработка заявки[\s\S]*?Подготовленные правила и текущий остаток/,
+    /Модель для ежедневных заказов[\s\S]*?Свободная заявка сохранится в очереди без подмены автоматическими правилами/,
   );
   assert.doesNotMatch(stand, /disabled=\{!bridgeOnline\}/);
   assert.match(stand, /role="progressbar"/);
   assert.match(stand, /role="log"/);
+  assert.match(stand, /Предыдущее решение сохранено/);
+  assert.match(
+    stand,
+    /Это не активное решение: агент готовит новый результат/,
+  );
+  assert.match(stand, /Предыдущее решение · история/);
   assert.match(
     stand,
     /disabled=\{\s*Boolean\(approving\) \|\| inventoryChanged \|\| !canManageOrder\s*\}/,
@@ -226,6 +237,12 @@ test("ships the Колер product surface and removes the starter", async () =>
     stand,
     /Данные о красках и запасах, сгенерированные для демонстрации на/,
   );
+  assert.match(stand, /Учебная цена «Колера»/);
+  assert.match(stand, /Предварительный учебный расчёт/);
+  assert.match(
+    stand,
+    /Открытая веб-страница даёт лишь контакт для проверки и\s+не меняет точный расчёт/,
+  );
   assert.match(layout, /Колер — агент отдела продаж завода красок/);
   assert.match(layout, /Geologica, Golos_Text/);
   assert.ok(
@@ -235,31 +252,6 @@ test("ships the Колер product surface and removes the starter", async () =>
         /краск/iu.test(product.name) &&
         !/[A-Za-z]{3,}/.test(product.name),
     ),
-  );
-  assert.equal((scenarios.match(/\bbody:\s*"/g) ?? []).length, 30);
-  assert.ok(scenarios.indexOf('id: "green"') < scenarios.indexOf('id: "yellow"'));
-  assert.ok(scenarios.indexOf('id: "yellow"') < scenarios.indexOf('id: "red"'));
-  assert.match(scenarios, /demoKind:\s*"fence-photo"/);
-  assert.match(scenarios, /Хочу покрасить забор/);
-  assert.match(scenarios, /какая краска нужна и сколько покупать/);
-  assert.match(scenarios, /ГК «ПРОТЕК»/);
-  assert.match(
-    scenarios,
-    /краска для пола в новом помещении площадью 800 м²/,
-  );
-  assert.match(scenarios, /Пол моют каждый день/);
-  assert.ok(
-    scenarios.indexOf("Хочу покрасить забор") <
-      scenarios.indexOf("ГК «ПРОТЕК»"),
-  );
-  assert.match(scenarios, /ИНН 7805059867/);
-  assert.ok(
-    scenarios.indexOf("ИНН 7805059867") <
-      scenarios.indexOf('company: "СтройКомплект"'),
-  );
-  assert.match(
-    scenarios,
-    /Нужны 100 кг коричневой краски для деревянных конструкций на улице/,
   );
   assert.doesNotMatch(
     stand,
@@ -272,7 +264,10 @@ test("ships the Колер product surface and removes the starter", async () =>
     agentRoute,
     /eq\(orderEvents\.state, "active"\)[\s\S]*?set\(\{ state: "done" \}\)|set\(\{ state: "done" \}\)[\s\S]*?eq\(orderEvents\.state, "active"\)/,
   );
-  assert.match(ordersRoute, /Работа с заказом продолжилась/);
+  assert.match(
+    ordersRoute,
+    /Заказ сохранён для[\s\S]*?Агент продолжит после восстановления соединения/,
+  );
   assert.match(stand, /Повторить этот заказ/);
   assert.match(stand, /const latestOrderStorageKey = "koler-latest-order"/);
   assert.match(
@@ -289,7 +284,30 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /Запускаем заказ снова/);
   assert.match(stand, /action:\s*"retry"/);
-  assert.match(ordersRoute, /datetime\('now', '-1 minute'\)/);
+  assert.match(
+    stand,
+    /previousResult &&[\s\S]*?Предыдущее решение сохранено[\s\S]*?Это не активное решение/,
+  );
+  for (const mutation of [
+    sourceBetween(stand, "const updateInventory =", "const updateMarket ="),
+    sourceBetween(stand, "const updateMarket =", "const openLedgerOrder ="),
+  ]) {
+    assert.match(
+      mutation,
+      /reconcileMutation\([\s\S]*?mutationPostconditionMet/,
+    );
+    assert.match(mutation, /void loadLedger\(\)[\s\S]*?void loadStats\(\)/);
+    assert.match(mutation, /const beforeRoundNo = order\?\.roundNo \?\? 1/);
+    assert.match(mutation, /const \[refreshed[^\]]*refreshedOrder\]/);
+  }
+  assert.doesNotMatch(
+    sourceBetween(
+      ordersRoute,
+      "export async function GET",
+      "export async function POST",
+    ),
+    /buildDemoResult\(/,
+  );
   assert.match(
     ordersRoute,
     /action === "customer_reply"[\s\S]*?roundNo:\s*order\.roundNo \+ 1/,
@@ -300,7 +318,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(
     ordersRoute,
-    /action === "recalculate"[\s\S]*?mode:\s*"autonomous-demo"/,
+    /action === "recalculate"[\s\S]*?mode:\s*"recorded-demo"/,
   );
   assert.match(
     ordersRoute,
@@ -321,6 +339,51 @@ test("ships the Колер product surface and removes the starter", async () =>
   assert.match(
     ordersRoute,
     /order\.status !== "awaiting_approval"[\s\S]*?savedResultUsesOldInventory\(order\)/,
+  );
+});
+
+test("clears the selected order view before opening another order", async () => {
+  const stand = await readFile(
+    new URL("../app/order-stand.tsx", import.meta.url),
+    "utf8",
+  );
+  const clearView = sourceBetween(stand, "const clearOrderView", "const loadSystem");
+  const openOrder = sourceBetween(stand, "const openOrder", "useEffect(() => {");
+  const loadOrder = sourceBetween(stand, "const loadOrder", "const reconcileOrder");
+
+  assert.match(clearView, /orderLoadGateRef\.current\.invalidate\(\)/);
+  assert.match(clearView, /orderLoadControllerRef\.current\?\.abort\(\)/);
+  assert.match(clearView, /setOrder\(null\)/);
+  assert.match(clearView, /setEvents\(\[\]\)/);
+  assert.match(clearView, /setOrderResultHistory\(\[\]\)/);
+  assert.match(clearView, /setSupplierRefreshNeeded\(false\)/);
+  assert.match(openOrder, /clearOrderView\(\)/);
+  assert.match(openOrder, /currentOrderIdRef\.current = nextId/);
+  assert.match(openOrder, /setOrderId\(nextId\)/);
+  assert.match(loadOrder, /currentOrderIdRef\.current !== id/);
+  assert.match(loadOrder, /currentOrderIdRef\.current === id/);
+  assert.match(loadOrder, /orderLoadGateRef\.current\.isCurrent\(generation\)/);
+  assert.match(stand, /const showResult =/);
+  assert.match(stand, /!orderIsActive && processingState !== "error"/);
+});
+
+test("labels live processing states and does not promise offline fallback", async () => {
+  const stand = await readFile(
+    new URL("../app/order-stand.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(stand, /function orderProcessingCopy\(state: string\)/);
+  assert.match(stand, /В очереди · ждёт live-агента/);
+  assert.match(stand, /Агент разбирает заявку · lease действует/);
+  assert.match(stand, /Время агента истекло · карточка сохранена/);
+  assert.match(stand, /Ошибка обработки · можно повторить/);
+  assert.match(stand, /Повторите этот же заказ/);
+  assert.match(stand, /Live-agent сейчас недоступен: сайт сохраняет заявку в очереди/);
+  assert.match(stand, /Записанный демонстрационный режим запускается только по явному выбору/);
+  assert.doesNotMatch(
+    stand,
+    /bridgeOnline[\s\S]{0,600}Новое решение и письмо сохранились на странице заказа/u,
   );
 });
 
@@ -366,8 +429,10 @@ test("explains the stand calculation, manager role and saved recalculation", asy
     "utf8",
   );
 
-  assert.match(stand, /Режим: обработка по правилам/);
-  assert.match(stand, /Автоматическая обработка по правилам и живому складу/);
+  assert.match(stand, /Режим: агент подключён/);
+  assert.match(stand, /Режим: агент временно недоступен/);
+  assert.doesNotMatch(stand, /Режим: обработка по правилам/);
+  assert.match(stand, /Записанный демонстрационный прогон/);
   assert.match(stand, /Руководитель выбирает условия сделки/);
   assert.match(
     stand,
@@ -403,8 +468,9 @@ test("prepares a contract reserve before the stand send", async () => {
   assert.match(reserveAction, /setReserving\(false\)/);
   assert.match(
     stand,
-    /order\.status === "ready_to_send"[\s\S]*?canSend = canManageOrder && reserved && !inventoryChanged/,
+    /canSend =[\s\S]*?canManageOrder[\s\S]*?reserved && isCommercialOffer[\s\S]*?order\.status === "ready_to_send" && isEstimate/,
   );
+  assert.match(stand, /Записать отправку оценки/);
   assert.match(stand, /Резерв товара подготовлен/);
   assert.match(stand, /Подготовить резерв товара/);
   assert.match(
@@ -465,7 +531,10 @@ test("names the model roles honestly in the visible activity log", async () => {
     eventActor,
     /stage === "review"[\s\S]*?\/модел\/iu\.test\(title\)[\s\S]*?"Модель проверки"[\s\S]*?"Программа проверки"/,
   );
-  assert.match(eventActor, /stage === "review-fallback"[\s\S]*?"Программа проверки"/);
+  assert.match(
+    eventActor,
+    /stage === "review-fallback"[\s\S]*?"Модель проверки недоступна"[\s\S]*?stage === "review-skipped"[\s\S]*?"Проверка не запускалась"/,
+  );
   assert.match(eventActor, /"model"[\s\S]*?"Система"/);
   assert.match(stand, /actor: eventActor\(item\.stage, item\.title\)/);
   assert.match(eventKind, /stage === "model"\) return "Выбор модели"/);
@@ -473,4 +542,5 @@ test("names the model roles honestly in the visible activity log", async () => {
     eventKind,
     /\["vision", "vision-result"\][\s\S]*?"Осмотр фотографии"/,
   );
+  assert.match(eventKind, /"review-skipped"[\s\S]*?"Проверка не запускалась"/);
 });

@@ -3,13 +3,50 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test, { after, before } from "node:test";
 import { createServer } from "vite";
+import { isCompleteAgentResult } from "../lib/agent-guard.mjs";
 
 const baseCatalog = JSON.parse(
   await readFile(new URL("../data/paint-demo.json", import.meta.url), "utf8"),
 );
+const researchedFloorCatalog = {
+  ...baseCatalog,
+  companyProfiles: [
+    {
+      name: "Исследованный склад",
+      website: "research.example.com",
+      summary:
+        "Открытые источники подтверждают фармацевтическую и медицинскую деятельность компании и наличие складского комплекса.",
+      applicationGuidance: {
+        kind: "floor-profile",
+        hypothesis:
+          "Агент предполагает, что краска нужна для склада, и проверит это одним вопросом.",
+        recommendation:
+          "Для бетонного пола склада с ежедневной уборкой и движением техники первым вариантом станет «Краска для бетонного пола» КР-003.",
+        question: "Как устроено помещение? Выберите ближайший вариант.",
+        documentRequest:
+          "Если закупка требует конкретного ГОСТ или протокола испытаний, пришлите название документа.",
+      },
+      sources: [
+        {
+          title: "Отраслевой профиль компании",
+          url: "https://research.example.com/industry",
+          checkedAt: "30.07.2026",
+          fact: "Компания работает в фармацевтической и медицинской отраслях.",
+        },
+        {
+          title: "Описание складского комплекса",
+          url: "https://research.example.com/warehouse",
+          checkedAt: "30.07.2026",
+          fact: "Компания использует складской комплекс с разными зонами хранения.",
+        },
+      ],
+    },
+  ],
+};
 
 let server;
 let buildDemoResult;
+let scenarioGroups;
 
 before(async () => {
   server = await createServer({
@@ -19,13 +56,63 @@ before(async () => {
     resolve: { alias: { "@": resolve(".") } },
   });
   ({ buildDemoResult } = await server.ssrLoadModule("/lib/demo-engine.ts"));
+  ({ scenarioGroups } = await server.ssrLoadModule(
+    "/data/order-scenarios.ts",
+  ));
 });
 
 after(async () => {
   await server?.close();
 });
 
-test("keeps a photo request without a product code or weight", () => {
+test("emits the v2 result envelope for recorded demo results", () => {
+  const result = buildDemoResult({
+    subject: "Заказ краски",
+    body: "Нужно 200 кг КР-001 для металла на улице, цвет RAL 7024.",
+  });
+
+  assert.equal(result.schemaVersion, 2);
+  assert.ok(result.resolvedIntent);
+  assert.ok(["none", "estimate", "commercial_offer"].includes(result.commitment));
+  assert.ok(Array.isArray(result.estimates));
+  assert.ok(Array.isArray(result.supplierLeads));
+  assert.equal(isCompleteAgentResult(result), true);
+  assert.ok(
+    result.options.every((option) =>
+      ["customer", "supplier", "internal", "none"].includes(
+        option.followUpActor,
+      ),
+    ),
+  );
+});
+
+test("webinar supplier rescue preset closes the exact 2000/300 gap", () => {
+  const scenario = scenarioGroups.find((group) => group.id === "red").examples[0];
+  const result = buildDemoResult(scenario);
+
+  assert.match(scenario.body, /2 000 кг.*КР-001/iu);
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "commercial_offer");
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.product?.requestedKg, 2000);
+  assert.equal(result.product?.stockKg, 300);
+  assert.equal(result.supplierPlan?.supplierKg, 1700);
+  assert.equal(result.supplierPlan?.supplierName, "ПромКолор Опт");
+  assert.equal(result.supplierPlan?.total, 718400);
+  assert.ok(result.options.length >= 2 && result.options.length <= 3);
+  assert.ok(
+    result.options.every((option) =>
+      ["supplier", "internal"].includes(option.followUpActor),
+    ),
+  );
+  assert.doesNotMatch(
+    result.options.map((option) => option.reply).join(" "),
+    /\?/u,
+  );
+});
+
+test("recorded fence fixture returns a broad estimate without customer blockers", () => {
   const result = buildDemoResult({
     subject: "Хочу покрасить забор",
     body: "Добрый день! Не знаю, какая краска нужна и сколько покупать. Прикладываю фото забора.",
@@ -39,19 +126,31 @@ test("keeps a photo request without a product code or weight", () => {
 
   assert.equal(result.zone, "yellow");
   assert.equal(result.decision, "clarify");
-  assert.equal(result.route, "needs_info");
+  assert.equal(result.route, "ready");
+  assert.equal(result.commitment, "estimate");
   assert.equal(result.product, null);
-  assert.deepEqual(result.missing, [
-    "материал забора",
-    "размер забора",
-    "стороны покраски",
-    "цвет забора",
-  ]);
+  assert.deepEqual(result.missing, []);
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.equal(result.resolvedIntent.assumptions.length, 4);
+  assert.equal(result.visionObservation?.relevance, "relevant");
+  assert.deepEqual(
+    result.estimates.map((estimate) => ({
+      metric: estimate.metric,
+      min: estimate.range.min,
+      max: estimate.range.max,
+      unit: estimate.range.unit,
+    })),
+    [
+      { metric: "surface_area", min: 15, max: 60, unit: "м²" },
+      { metric: "paint_quantity", min: 10, max: 20, unit: "кг" },
+    ],
+  );
   assert.match(result.understood.join(" "), /покрасить забор/i);
   assert.match(result.understood.join(" "), /фотограф/i);
-  assert.match(result.reply.body, /из чего сделан забор/i);
-  assert.match(result.reply.body, /длину и среднюю высоту/i);
-  assert.match(result.businessContext, /фото дополняет заявку/i);
+  assert.doesNotMatch(result.reply.body, /\?/u);
+  assert.match(result.reply.body, /15–60 м².*10–20 кг/iu);
+  assert.match(result.businessContext, /диапазон/iu);
+  assert.equal(isCompleteAgentResult(result), true);
 });
 
 test("does not claim that a photo was received when the attachment is absent", () => {
@@ -60,42 +159,45 @@ test("does not claim that a photo was received when the attachment is absent", (
     body: "Добрый день! Прикладываю фото забора, помогите подобрать краску.",
   });
 
-  assert.equal(result.route, "needs_info");
+  assert.equal(result.route, "manager");
+  assert.equal(result.resolvedIntent.blocker, null);
+  assert.deepEqual(result.missing, []);
   assert.doesNotMatch(result.understood.join(" "), /фотограф.*получен/i);
   assert.doesNotMatch(result.reply.body, /фото приложено/i);
   assert.doesNotMatch(result.businessContext, /фото/iu);
-  assert.match(
-    result.reply.body,
-    /приложите фотографию, которую упомянули в письме/iu,
-  );
+  assert.doesNotMatch(result.reply.body, /\?/u);
 });
 
-test("asks for a mentioned photo before sending an otherwise ready quote", () => {
+test("recorded fallback does not offer when a mentioned photo is unavailable", () => {
   const result = buildDemoResult({
     subject: "Краска для ограждений",
     body: "Нужны 200 кг краски для металлических ограждений на улице, цвет серый. Вот фото.",
   });
 
-  assert.equal(result.zone, "yellow");
-  assert.equal(result.route, "needs_info");
-  assert.deepEqual(result.missing, ["приложите фотографию"]);
+  assert.equal(result.zone, "red");
+  assert.equal(result.route, "manager");
+  assert.equal(result.commitment, "none");
+  assert.deepEqual(result.missing, []);
   assert.match(
-    result.reply.body,
-    /приложите фотографию, которую упомянули в письме/iu,
+    result.resolvedIntent.assumptions.map((item) => item.claim).join(" "),
+    /фотограф/iu,
   );
+  assert.doesNotMatch(result.reply.body, /\?/u);
 });
 
-test("lets a customer describe the color in words or use the RAL catalogue", () => {
+test("recorded fallback stores an unknown color as an assumption", () => {
   const result = buildDemoResult({
     subject: "Краска для ограждений",
     body: "Нужны 200 кг краски для металлических ограждений на улице.",
   });
 
-  assert.equal(result.route, "needs_info");
+  assert.equal(result.route, "manager");
+  assert.deepEqual(result.missing, []);
   assert.match(
-    result.reply.body,
-    /можно описать его словами или указать номер из каталога цветов RAL/iu,
+    result.resolvedIntent.assumptions.map((item) => item.claim).join(" "),
+    /цвет/iu,
   );
+  assert.doesNotMatch(result.reply.body, /\bRAL\b|\?/iu);
 });
 
 test("calculates fence paint by area, coats, reserve and whole packages", () => {
@@ -292,28 +394,27 @@ test("uses material and area recognized in a photo to calculate floor paint", ()
   );
 });
 
-test("uses a company profile to form a cautious floor hypothesis and one question", () => {
+test("recorded company profile keeps gaps as assumptions for the live agent", () => {
   const result = buildDemoResult({
-    company: "ГК «ПРОТЕК»",
-    website: "protek-group.ru",
+    company: "Исследованный склад",
+    website: "research.example.com",
     subject: "Помогите выбрать краску для пола",
     body: "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Марку и количество не знаем. Пол моют каждый день.",
-  });
+  }, researchedFloorCatalog);
   const visibleCopy = [
     result.businessContext,
     result.zoneReason,
     result.reply.body,
   ].join(" ");
 
-  assert.equal(result.route, "needs_info");
-  assert.equal(result.zone, "yellow");
-  assert.equal(result.product?.sku, "КР-003");
-  assert.equal(result.product?.requestedKg, 0);
+  assert.equal(result.route, "manager");
+  assert.equal(result.zone, "red");
+  assert.equal(result.product, null);
   assert.equal(result.research?.checked, true);
   assert.equal(result.research?.sources.length, 2);
-  assert.equal(result.missing.length, 1);
+  assert.equal(result.missing.length, 0);
   assert.match(
-    result.missing[0],
+    result.resolvedIntent.assumptions.map((item) => item.claim).join(" "),
     /материал пола.*назначение помещения.*способ уборки.*нагрузка/iu,
   );
   assert.match(result.businessContext, /фармацевтическ.*медицинск/iu);
@@ -322,37 +423,18 @@ test("uses a company profile to form a cautious floor hypothesis and one questio
     result.businessContext,
     /подходит для цехов и складов.*выдерживает тележки и технику/iu,
   );
-  assert.match(
-    result.reply.body,
-    /похоже, помещение может быть складом.*если (?:его|помещение) используют как медицинский склад.*первым вариантом станет краска/isu,
-  );
-  assert.match(
-    result.reply.body,
-    /обычный склад.*другое помещение.*подберём покрытие по назначению/isu,
-  );
-  assert.match(result.reply.body, /светло-серый.*есть в каталоге/iu);
-  assert.match(
-    result.reply.body,
-    /как используют помещение/iu,
-  );
+  assert.doesNotMatch(result.reply.body, /\?/u);
+  assert.match(result.reply.body, /клиентское предложение не создано/iu);
   assert.match(result.understood.join(" "), /цвет: светло-серый/iu);
-  assert.match(
-    result.reply.body,
-    /рассчитаем заказ на 800 м².*проверим цвет.*остаток на складе/isu,
-  );
   assert.doesNotMatch(result.reply.body, /ГОСТ|дезинфиц|технолог/iu);
-  assert.doesNotMatch(
-    result.reply.body,
-    /учебн\p{L}*\s+(?:таблиц|каталог)|\bагент\p{L}*/iu,
-  );
-  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 1);
+  assert.equal((result.reply.body.match(/\?/gu) ?? []).length, 0);
   assert.doesNotMatch(
     visibleCopy,
     /КР-003\s+(?:соответствует|подходит)\s+(?:ГОСТ|GMP|ISO|СанПиН)|выдерживает\s+дезинфекц/iu,
   );
   assert.match(
     result.decisionBasis.map((basis) => basis.source).join(" "),
-    /О группе компаний «ПРОТЕК».*Направления бизнеса/iu,
+    /Отраслевой профиль компании.*Описание складского комплекса/iu,
   );
 });
 
@@ -360,12 +442,12 @@ test("continues the floor card through a customer reply and a live stock change"
   const initialBody =
     "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Марку и количество не знаем. Пол моют каждый день.";
   const input = {
-    company: "ГК «ПРОТЕК»",
-    website: "protek-group.ru",
+    company: "Исследованный склад",
+    website: "research.example.com",
     subject: "Помогите выбрать краску для пола",
     body: `${initialBody}\n\nОтвет клиента 1: Пол бетонный. Храним лекарства. Моем нейтральным средством. По полу ездят погрузчики.`,
   };
-  const replenished = structuredClone(baseCatalog);
+  const replenished = structuredClone(researchedFloorCatalog);
   replenished.products = replenished.products.map((product) =>
     product.sku === "КР-003"
       ? {
@@ -377,9 +459,8 @@ test("continues the floor card through a customer reply and a live stock change"
       : product,
   );
 
-  const beforeRestock = buildDemoResult(input);
+  const beforeRestock = buildDemoResult(input, researchedFloorCatalog);
   const afterRestock = buildDemoResult(input, replenished);
-
   assert.equal(beforeRestock.route, "manager");
   assert.equal(beforeRestock.zone, "red");
   assert.equal(beforeRestock.product?.requestedKg, 620);
@@ -597,13 +678,17 @@ test("states the exact nearby market difference in both directions", () => {
     body: "Нужны 200 кг краски для металлических ограждений на улице, цвет RAL 7024.",
   };
   const belowMarket = structuredClone(baseCatalog);
+  const comparisonMarket = baseCatalog.market.filter(
+    (item) => item.competitor !== "ПромКолор Опт",
+  );
+  belowMarket.market = comparisonMarket;
   belowMarket.products = belowMarket.products.map((product) =>
     product.sku === "КР-001"
       ? { ...product, pricePerKg: 345 }
       : product,
   );
 
-  const above = buildDemoResult(input);
+  const above = buildDemoResult(input, { market: comparisonMarket });
   const below = buildDemoResult(input, belowMarket);
 
   assert.equal(
@@ -760,14 +845,14 @@ test("falls back to the safe catalog value when a snapshot has invalid stock", (
 });
 
 test("uses confirmed conditions for an ordinary room at a researched company", () => {
-  const replenished = structuredClone(baseCatalog);
+  const replenished = structuredClone(researchedFloorCatalog);
   replenished.products = replenished.products.map((product) =>
     product.sku === "КР-003" ? { ...product, stockKg: 700 } : product,
   );
   const result = buildDemoResult(
     {
-      company: "ГК «ПРОТЕК»",
-      website: "protek-group.ru",
+      company: "Исследованный склад",
+      website: "research.example.com",
       subject: "Помогите выбрать краску для пола",
       body: [
         "Нужна светло-серая краска для пола в новом помещении площадью 800 м². Пол моют каждый день.",
@@ -791,11 +876,11 @@ test("uses confirmed conditions for an ordinary room at a researched company", (
 
 test("keeps a named standard or disinfectant pending verification", () => {
   const result = buildDemoResult({
-    company: "ГК «ПРОТЕК»",
-    website: "protek-group.ru",
+    company: "Исследованный склад",
+    website: "research.example.com",
     subject: "Краска для пола медицинского склада",
     body: "Нужна светло-серая краска для бетонного пола медицинского склада площадью 400 м². Пол каждый день обрабатывают дезинфицирующим средством, по нему ездят погрузчики. Требуется соответствие ГОСТ.",
-  });
+  }, researchedFloorCatalog);
 
   const optionCopy = result.options
     .map(
@@ -806,7 +891,11 @@ test("keeps a named standard or disinfectant pending verification", () => {
 
   assert.equal(result.route, "manager");
   assert.equal(result.zone, "red");
-  assert.match(result.missing.join(" "), /документ|ГОСТ|средств|технолог/iu);
+  assert.deepEqual(result.missing, []);
+  assert.match(
+    result.resolvedIntent.assumptions.map((item) => item.claim).join(" "),
+    /документ|ГОСТ|средств|технолог/iu,
+  );
   assert.match(
     optionCopy,
     /точное название.*(?:документ|средств).*технолог.*паспортом качества.*описанием краски в каталоге/isu,

@@ -17,20 +17,28 @@ import {
 } from "@/data/order-scenarios";
 import type { AgentResult } from "@/lib/demo-engine";
 import {
-  asksCompatibility,
-  calculatedSurfaceQuantityFromText,
-  explicitSkuFromText,
-  hasColor,
-  hasSpecialTerms,
-  hasUsableEnvironment,
-  matchProduct,
-  orderFactsFromText,
-  quantityFromText,
-} from "@/lib/order-facts.mjs";
-import {
   changedProductInventory,
   resultInventorySkus,
 } from "@/lib/inventory-freshness.mjs";
+import {
+  apiTimeoutMs,
+  createLatestRequestGate,
+  createSerialPoller,
+  fetchJson,
+  fetchWithTimeout,
+  createOperationIdentity,
+  executeCreateOperation,
+  isCurrentOrderEvent,
+  loadWithOneRetry,
+  mutationPostconditionMet,
+  orderProcessingState,
+  operationOrderId,
+  operationReconciliationState,
+  operationReconciliationUrl,
+  reconciledMutationError,
+  timestampMs,
+  uploadTimeoutMs,
+} from "@/lib/client-request.mjs";
 
 type Draft = DemoScenario;
 
@@ -40,6 +48,9 @@ type EventRow = {
   title: string;
   detail: string;
   state: string;
+  roundNo?: number | null;
+  claimId?: string | null;
+  attemptNo?: number | null;
   createdAt: string;
 };
 
@@ -95,13 +106,18 @@ type OrderRecord = {
   company: string;
   website: string;
   status: string;
+  clientOrderId?: string | null;
   zone: ScenarioZone | null;
   mode: string;
   managerDecision?: string | null;
+  managerOptionId?: string | null;
   agentModel?: string | null;
   reviewerModel?: string | null;
   requestedModel?: string | null;
   sentAt?: string | null;
+  leaseUntil?: string | null;
+  claimId?: string | null;
+  attemptNo?: number | null;
   createdAt?: string;
   updatedAt?: string;
   attachment?: Attachment | null;
@@ -199,23 +215,18 @@ type ResultHistoryEntry = {
   createdAt: string;
 };
 
-const floorReplyPresets = [
-  {
-    label: "Медицинский склад",
-    answer:
-      "Медицинский склад. Пол бетонный. Моют каждый день нейтральным средством. По полу ездят гидравлические тележки. Для поставки нужен паспорт качества на партию.",
-  },
-  {
-    label: "Обычный склад",
-    answer:
-      "Обычный сухой склад. Пол бетонный. Влажная уборка раз в неделю. По полу ездят погрузчики. Для поставки достаточно паспорта качества на партию.",
-  },
-  {
-    label: "Другое помещение",
-    answer:
-      "Помещение будет мастерской. Пол бетонный. Влажная уборка раз в неделю. По полу ездят тележки. Моторное масло попадает на пол несколько раз в неделю.",
-  },
-] as const;
+type OperationIdentity = {
+  clientOrderId: string;
+  clientActionKey: string;
+};
+
+type CreateOperation = {
+  identity: OperationIdentity;
+  draft: Draft;
+  selectedModel: string;
+  executionMode: "live" | "recorded";
+  uncertain: boolean;
+};
 
 type DailyStats = {
   total: number;
@@ -231,22 +242,13 @@ type ModalName = "catalog" | "instructions" | "order" | null;
 const sheetUrl =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vR7jeOl2r8s8mHvuFEkhJgG9F9kRiUknVTDG_Qt7RwX3nzj8AtVJihpdhX1kxxXCULV3d5D1xhUNBmU/pubhtml";
 const publicSiteUrl = "https://koler-agent-demo.odinmaniac.chatgpt.site";
-const liveStockDemoSku = "КР-005";
-const floorStockDemoSku = "КР-003";
 const maxPhotoSizeMb = 8;
-const orderActionKeyStoragePrefix = "koler-order-key:";
 const latestOrderStorageKey = "koler-latest-order";
-const fenceDemoAnswer =
-  "Забор деревянный, длина 25 м, высота 1,8 м. Красим с двух сторон, цвет коричневый.";
 const emptyOrderDraft: Draft = {
   company: "",
   website: "",
   subject: "Заявка на подбор краски",
   body: "",
-};
-
-function answerForScenario(scenario: DemoScenario) {
-  return scenario.demoKind === "fence-photo" ? fenceDemoAnswer : "";
 }
 
 const zoneCopy = {
@@ -259,12 +261,13 @@ const zoneCopy = {
     next: "Проверьте письмо, подготовьте резерв товара и запишите отправку.",
   },
   yellow: {
-    name: "Нужны детали",
+    name: "Предварительная оценка",
     color: "Жёлтый",
-    short: "Агент задаёт точные вопросы",
+    short: "Агент оценивает диапазоном",
     description:
-      "Агент собрал известное и просит только те данные, которые меняют подбор или расчёт.",
-    next: "Отправьте вопросы и продолжите заказ на той же странице после ответа.",
+      "Агент даёт полезный диапазон. Один вопрос появляется только тогда, когда непонятно, какой объект нужно покрасить.",
+    next:
+      "Оценку можно отправить без резерва. Если объект неоднозначен, ответьте на один вопрос о цели.",
   },
   red: {
     name: "Решает руководитель",
@@ -543,7 +546,7 @@ function humanizeText(value: string) {
     .replace(/\bdecision basis\b/gi, "основание решения")
     .replace(/\broute ready\b/gi, "ответ готов")
     .replace(/\broute manager\b/gi, "решает руководитель")
-    .replace(/\bneeds_info\b/gi, "нужны детали")
+    .replace(/\bneeds_info\b/gi, "нужно выбрать объект")
     .replace(/версия склада/gi, "обновление склада")
     .replace(/склад №/gi, "обновление склада №")
     .replace(
@@ -561,7 +564,7 @@ function humanizeText(value: string) {
       /минимальн(?:ая|ой|ую)\s+(?:границ[аы]|цен[аы])(?:\s+с\s+прибылью)?/gi,
       "цена, от которой завод зарабатывает на заказе",
     )
-    .replace(/обнаружены пробелы/gi, "собраны вопросы клиенту")
+    .replace(/обнаружены пробелы/gi, "неизвестное отмечено допущениями")
     .replace(
       /цена сохраняет нужную прибыль/gi,
       "по этой цене завод зарабатывает на заказе",
@@ -598,7 +601,7 @@ function humanizeText(value: string) {
     )
     .replace(/следующий шаг:\s*/gi, "Что делать дальше: ")
     .replace(/красная зона/gi, "решает руководитель")
-    .replace(/ж[её]лтая зона/gi, "нужны детали")
+    .replace(/ж[её]лтая зона/gi, "предварительная оценка")
     .replace(/зел[её]ная зона/gi, "готов ответить");
 }
 
@@ -615,6 +618,14 @@ function researchHypothesis(result: AgentResult) {
 function positiveChecks(result: AgentResult) {
   const checks = result.checks.map(humanizeText);
   if (result.route === "ready") {
+    if (result.commitment === "estimate") {
+      return [
+        "Площадь и расход обозначены диапазоном",
+        "Точные условия будут подтверждены до коммерческого предложения",
+        "Резерв товара для оценки не открыт",
+        ...checks,
+      ].filter((item, index, rows) => rows.indexOf(item) === index);
+    }
     return [
       "По этой цене завод зарабатывает на заказе",
       "Весь объём подтверждён складом",
@@ -624,9 +635,7 @@ function positiveChecks(result: AgentResult) {
   }
   if (result.route === "needs_info") {
     return [
-      result.calculation
-        ? "Расход и число упаковок рассчитаны"
-        : "Агент собрал вопросы для точного расчёта",
+      "Агент задал один вопрос только об объекте действия",
       "Заказ продолжится под тем же номером",
       ...checks,
     ].filter((item, index, rows) => rows.indexOf(item) === index);
@@ -714,9 +723,8 @@ function attachmentFromOrder(order: OrderRecord) {
   return order.attachment ?? null;
 }
 
-function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
-  const text = `${draft.subject}\n${draft.body}`.trim();
-  if (text.length < 20) {
+function inferZone(draft: Draft) {
+  if (!draft.subject.trim() || draft.body.trim().length < 3) {
     return {
       zone: null,
       label: "Оценка появится по мере ввода",
@@ -724,101 +732,19 @@ function inferZone(draft: Draft, inventory: InventoryItem[] = []) {
     } as const;
   }
 
-  const quantity = quantityFromText(text);
-  const fence = orderFactsFromText(text).fence;
-  const product =
-    matchProduct(text, demoData.products) ??
-    (fence && fence.material !== "неясно"
-      ? matchProduct(`${fence.material} забор на улице`, demoData.products)
-      : null);
-  const calculatedQuantity = calculatedSurfaceQuantityFromText(
-    text,
-    product,
-    demoData.rules.calculationReservePercent,
-  );
-  const routeQuantity = quantity || calculatedQuantity;
-  const photoNeedsPickup =
-    Boolean(draft.attachment) && (!product || !routeQuantity);
-
-  if (fence) {
-    const missingFenceFacts = [
-      fence.material === "неясно" ? "материал" : "",
-      !fence.areaPerSideM2 ? "размеры" : "",
-      !fence.sides ? "стороны покраски" : "",
-      !hasColor(text) ? "цвет" : "",
-    ].filter(Boolean);
-    if (missingFenceFacts.length) {
-      return {
-        zone: "yellow",
-        label: "Жёлтый · нужны детали",
-        reason: `Агент уточнит ${missingFenceFacts.slice(0, 2).join(" и ")}, затем сам рассчитает количество.`,
-      } as const;
-    }
-  } else if (photoNeedsPickup) {
-    return {
-      zone: "yellow",
-      label: "Жёлтый · нужны детали",
-      reason:
-        "Фото помогает начать подбор. Агент спросит материал и размеры, затем сам рассчитает килограммы.",
-    } as const;
-  }
-
-  const liveProduct = product
-    ? inventory.find((item) => item.sku === product.sku)
-    : null;
-  const availableKg = liveProduct?.stockKg ?? product?.stockKg ?? 0;
-  const hasUnknownSku = Boolean(explicitSkuFromText(text)) && !product;
-  const special = hasSpecialTerms(text);
-
-  if (special || (product && routeQuantity > availableKg)) {
-    return {
-      zone: "red",
-      label: "Красный · решает руководитель",
-      reason: special
-        ? "Цена, оплата, срок или условия поставки требуют решения руководителя. Агент подготовит варианты."
-        : `Склад подтверждает ${formatMoney(availableKg)} кг сейчас. Агент предложит способ поставить остальной объём.`,
-    } as const;
-  }
-
-  const missing: string[] = [];
-  if (!product) {
-    missing.push(
-      hasUnknownSku
-        ? "код краски нужно сверить с каталогом"
-        : "агент подберёт краску по задаче",
-    );
-  }
-  if (!routeQuantity) missing.push("агент рассчитает или уточнит количество");
-  if (!fence && !hasUsableEnvironment(text)) {
-    missing.push("уточним: улица или помещение");
-  }
-  if (!hasColor(text)) {
-    missing.push("уточним цвет");
-  }
-  if (asksCompatibility(text)) {
-    missing.push("уточним нагрузку на покрытие");
-  }
-
-  if (missing.length) {
-    return {
-      zone: "yellow",
-      label: "Жёлтый · нужны детали",
-      reason: missing.slice(0, 2).join(" · "),
-    } as const;
-  }
-
   return {
-    zone: "green",
-    label: "Зелёный · готов ответить",
-    reason: calculatedQuantity
-      ? `Агент рассчитает ${formatMoney(calculatedQuantity)} кг по площади и проверит этот объём по складу.`
-      : draft.attachment
-      ? "Краска, объём, место работ и цвет уже указаны. Фотография останется на странице заказа."
-      : "Краска, объём, место работ и цвет уже указаны.",
+    zone: null,
+    label: "Свободная заявка готова к разбору",
+    reason: draft.attachment
+      ? "Агент изучит письмо и фото, сам найдёт внешние факты и отметит неизвестное диапазоном."
+      : "Агент изучит письмо, сам найдёт внешние факты и отметит неизвестное диапазоном.",
   } as const;
 }
 
 function modelLabel(id?: string | null) {
+  if (id === "Записанный демонстрационный прогон") {
+    return id;
+  }
   if (
     id === "Готовая инструкция" ||
     id === "Расчёт по готовой инструкции"
@@ -835,6 +761,13 @@ function usesOpenCode(mode?: string | null) {
   return Boolean(mode?.startsWith("opencode-"));
 }
 
+function executionLabel(mode?: string | null) {
+  if (mode === "recorded-demo") return "Записанный демонстрационный прогон";
+  return usesOpenCode(mode)
+    ? "Подключённая модель для заказов"
+    : "Сохранённый результат прежней версии";
+}
+
 function orderNumber(id: string) {
   let hash = 0;
   for (const character of id) {
@@ -846,18 +779,115 @@ function orderNumber(id: string) {
 function statusLabel(status: string) {
   return (
     {
-      queued: "Заявка принята",
-      processing: "Готовим решение",
-      clarification_ready: "Вопросы готовы",
+      queued: "В очереди · ждёт live-агента",
+      processing: "Агент разбирает заявку",
+      clarification_ready: "Нужно выбрать объект",
       awaiting_customer: "Ждём ответ клиента",
       awaiting_approval: "Руководитель выбирает вариант",
-      ready_to_send: "Ответ готов · подготовьте резерв товара",
+      ready_to_send: "Ответ готов",
       reserved: "Резерв товара подготовлен · можно записать отправку",
       completed: "Ответ готов",
       sent: "Отправка ответа записана",
-      error: "Можно запустить снова",
+      error: "Ошибка обработки · можно повторить",
     }[status] ?? "Состояние обновлено"
   );
+}
+
+function orderProcessingCopy(state: string) {
+  if (state === "queued") {
+    return {
+      badge: "В очереди · ждёт live-агента",
+      title: "Очередь ждёт live-agent",
+      detail:
+        "Карточка сохранена. Live-agent разберёт её после получения работы; автоматическая подмена не включается.",
+    };
+  }
+  if (state === "processing-active") {
+    return {
+      badge: "Агент разбирает заявку · lease действует",
+      title: "Агент разбирает заявку",
+      detail:
+        "Действующая lease сохраняет за агентом этот запуск. Новый результат появится на этой странице.",
+    };
+  }
+  if (state === "processing-expired") {
+    return {
+      badge: "Время агента истекло · карточка сохранена",
+      title: "Время live-agent истекло",
+      detail:
+        "Письмо, фото, переписка и прежнее решение сохранены. Повторите этот же заказ, чтобы снова поставить его live-agent.",
+    };
+  }
+  if (state === "error") {
+    return {
+      badge: "Ошибка обработки · можно повторить",
+      title: "Обработка остановилась с ошибкой",
+      detail:
+        "Письмо, номер заказа, переписка и история сохранены. Можно повторить этот же заказ.",
+    };
+  }
+  return {
+    badge: "Состояние обновляется",
+    title: "Состояние заказа обновляется",
+    detail: "Страница проверяет последнее подтверждённое состояние заказа.",
+  };
+}
+
+type ReviewerTransportState =
+  | "checked"
+  | "skipped"
+  | "unavailable"
+  | "unknown";
+
+function reviewerTransportState(
+  events: EventRow[],
+  order: OrderRecord,
+): ReviewerTransportState {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (!isCurrentOrderEvent(events[index], order)) continue;
+    const stage = events[index].stage;
+    if (stage === "review-result") return "checked";
+    if (stage === "review-fallback") return "unavailable";
+    if (stage === "review-skipped") return "skipped";
+  }
+  return "unknown";
+}
+
+function reviewerTransportCopy(
+  events: EventRow[],
+  order: OrderRecord,
+  result: AgentResult,
+) {
+  const state = reviewerTransportState(events, order);
+  if (state === "checked") {
+    return {
+      state,
+      label: "Проверка ответа завершена",
+      detail: result.review.verdict,
+    };
+  }
+  if (state === "skipped") {
+    return {
+      state,
+      label: "Проверка не запускалась · skipped",
+      detail:
+        "Transport skipped: безопасный результат сохранён без заявления о проверке reviewer.",
+    };
+  }
+  if (state === "unavailable") {
+    return {
+      state,
+      label: "Модель проверки недоступна · manager path",
+      detail:
+        "Reviewer недоступен. Результат не помечен как проверенный; следующий шаг остаётся под контролем руководителя.",
+    };
+  }
+  return {
+    state,
+    label: "Проверка reviewer не подтверждена",
+    detail:
+      "Событие завершённой проверки не найдено. Страница не заявляет, что reviewer проверил результат.",
+  };
 }
 
 function countNoun(value: number, one: string, few: string, many: string) {
@@ -887,6 +917,7 @@ export function OrderStand() {
   const [market, setMarket] = useState<MarketOffer[]>([]);
   const [ledger, setLedger] = useState<LedgerResponse>({});
   const [bridgeOnline, setBridgeOnline] = useState(false);
+  const [expiredLeaseKey, setExpiredLeaseKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [approving, setApproving] = useState("");
   const [reserving, setReserving] = useState(false);
@@ -903,9 +934,7 @@ export function OrderStand() {
   const [adminAuthenticated, setAdminAuthenticated] = useState(false);
   const [adminCode, setAdminCode] = useState("");
   const [adminBusy, setAdminBusy] = useState(false);
-  const initialInventoryProduct =
-    demoData.products.find((product) => product.sku === liveStockDemoSku) ??
-    demoData.products[0];
+  const initialInventoryProduct = demoData.products[0];
   const [inventorySku, setInventorySku] = useState(
     initialInventoryProduct?.sku ?? "",
   );
@@ -926,7 +955,14 @@ export function OrderStand() {
   const [error, setError] = useState("");
   const inventoryLoadedRef = useRef(false);
   const selectedMarketIdRef = useRef("");
+  const orderActionKeysRef = useRef(new Map<string, string>());
+  const currentOrderIdRef = useRef("");
   const lastOrderStatusRef = useRef<string | null>(null);
+  const orderLoadControllerRef = useRef<AbortController | null>(null);
+  const orderLoadGateRef = useRef(createLatestRequestGate());
+  const createOperationRef = useRef<CreateOperation | null>(null);
+  const [createOperation, setCreateOperation] =
+    useState<CreateOperation | null>(null);
   const mailBodyRef = useRef<HTMLTextAreaElement>(null);
   const closeModal = useCallback(() => setModal(null), []);
   const orderActionHeaders = useCallback(
@@ -937,10 +973,64 @@ export function OrderStand() {
     [orderActionKey],
   );
 
+  const clearOrderView = useCallback(() => {
+    currentOrderIdRef.current = "";
+    orderLoadGateRef.current.invalidate();
+    orderLoadControllerRef.current?.abort();
+    lastOrderStatusRef.current = null;
+    setOrderActionKey("");
+    setOrder(null);
+    setEvents([]);
+    setOrderResultHistory([]);
+    setExpiredLeaseKey("");
+    setApproving("");
+    setReserving(false);
+    setSending(false);
+    setClarifying(false);
+    setContinuing(false);
+    setRecalculating(false);
+    setSupplierRefreshNeeded(false);
+    setRetrying(false);
+    setCustomerAnswer("");
+    setError("");
+  }, []);
+
+  const updateCreateOperation = (operation: CreateOperation | null) => {
+    createOperationRef.current = operation;
+    setCreateOperation(operation);
+  };
+
+  const finishCreateOperation = () => updateCreateOperation(null);
+
+  const reconcileCreateOperation = async (operation: CreateOperation) => {
+    const { response, data } = await fetchJson(
+      operationReconciliationUrl(operation.identity),
+      {
+        cache: "no-store",
+        headers: { "x-order-key": operation.identity.clientActionKey },
+      },
+      apiTimeoutMs,
+    );
+    return {
+      state: operationReconciliationState(
+        response,
+        data,
+        operation.identity,
+      ),
+      orderId: operationOrderId(data, operation.identity),
+      data,
+    };
+  };
+
   const loadSystem = useCallback(async () => {
     try {
-      const response = await fetch("/api/orders?system=1", { cache: "no-store" });
-      const data = (await response.json()) as { bridgeOnline?: boolean };
+      const { data } = (await fetchJson(
+        "/api/orders?system=1",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      )) as {
+        data: { bridgeOnline?: boolean };
+      };
       setBridgeOnline(Boolean(data.bridgeOnline));
     } catch {
       setBridgeOnline(false);
@@ -949,8 +1039,12 @@ export function OrderStand() {
 
   const loadStats = useCallback(async () => {
     try {
-      const response = await fetch("/api/orders?stats=1", { cache: "no-store" });
-      if (response.ok) setStats((await response.json()) as DailyStats);
+      const { response, data } = await fetchJson(
+        "/api/orders?stats=1",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      );
+      if (response.ok) setStats(data as DailyStats);
     } catch {
       // The active order remains usable when the aggregate is temporarily unavailable.
     }
@@ -958,31 +1052,42 @@ export function OrderStand() {
 
   const loadInventory = useCallback(async () => {
     try {
-      const response = await fetch("/api/inventory", { cache: "no-store" });
-      const data = (await response.json()) as {
+      const { response, data } = (await fetchJson(
+        "/api/inventory",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
         items?: InventoryItem[];
         error?: string;
+        };
       };
       if (response.ok && Array.isArray(data.items)) {
         setInventory(data.items);
         if (!inventoryLoadedRef.current) {
-          const featured = data.items.find(
-            (item) => item.sku === liveStockDemoSku,
-          );
+          const featured = data.items[0];
           if (featured) setInventoryStock(String(featured.stockKg));
           inventoryLoadedRef.current = true;
         }
+        return data.items;
       }
+      return null;
     } catch {
       // The current card keeps its saved warehouse snapshot.
+      return null;
     }
   }, []);
 
   const loadMarket = useCallback(async () => {
     try {
-      const response = await fetch("/api/market", { cache: "no-store" });
-      const data = (await response.json()) as {
-        market?: MarketOffer[];
+      const { response, data } = (await fetchJson(
+        "/api/market",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: { market?: MarketOffer[] };
       };
       if (response.ok && Array.isArray(data.market)) {
         setMarket(data.market);
@@ -991,30 +1096,30 @@ export function OrderStand() {
             (offer) => offer.id === selectedMarketIdRef.current,
           )
         ) {
-          const preferred =
-            data.market.find(
-              (offer) =>
-                offer.competitor === "Индустрия Покрытий" &&
-                offer.category === "краска для бетонного пола",
-            ) ?? data.market[0];
+          const preferred = data.market[0];
           if (preferred) {
             selectedMarketIdRef.current = preferred.id;
             setMarketOfferId(preferred.id);
             setMarketStock(String(preferred.stockKg));
           }
         }
+        return data.market;
       }
+      return null;
     } catch {
       // The current card keeps the supplier data saved during its calculation.
+      return null;
     }
   }, []);
 
   const loadLedger = useCallback(async () => {
     try {
-      const response = await fetch("/api/ledger?limit=30", {
-        cache: "no-store",
-      });
-      if (response.ok) setLedger((await response.json()) as LedgerResponse);
+      const { response, data } = await fetchJson(
+        "/api/ledger?limit=30",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      );
+      if (response.ok) setLedger(data as LedgerResponse);
     } catch {
       // The active order remains available when the shared ledger is refreshing.
     }
@@ -1022,8 +1127,14 @@ export function OrderStand() {
 
   const loadAdmin = useCallback(async () => {
     try {
-      const response = await fetch("/api/admin", { cache: "no-store" });
-      const data = (await response.json()) as { authenticated?: boolean };
+      const { response, data } = (await fetchJson(
+        "/api/admin",
+        { cache: "no-store" },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: { authenticated?: boolean };
+      };
       if (response.ok) setAdminAuthenticated(Boolean(data.authenticated));
     } catch {
       setAdminAuthenticated(false);
@@ -1032,32 +1143,115 @@ export function OrderStand() {
 
   const loadOrder = useCallback(
     async (id: string) => {
-      const response = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, {
-        cache: "no-store",
-      });
-      if (!response.ok) return;
-      const data = (await response.json()) as {
-        order: OrderRecord;
-        events: EventRow[];
-        resultHistory?: ResultHistoryEntry[];
-      };
-      const previousStatus = lastOrderStatusRef.current;
-      lastOrderStatusRef.current = data.order.status;
-      setOrder(data.order);
-      setEvents(data.events);
-      setOrderResultHistory(data.resultHistory ?? []);
+      if (currentOrderIdRef.current !== id) return null;
+      const generation = orderLoadGateRef.current.next();
+      orderLoadControllerRef.current?.abort();
+      const controller = new AbortController();
+      orderLoadControllerRef.current = controller;
+      try {
+        const { response, data } = (await fetchJson(
+          `/api/orders?id=${encodeURIComponent(id)}`,
+          { cache: "no-store", signal: controller.signal },
+          apiTimeoutMs,
+        )) as {
+          response: Response;
+          data: {
+            bridgeOnline?: boolean;
+            order?: OrderRecord;
+            events?: EventRow[];
+            resultHistory?: ResultHistoryEntry[];
+            error?: string;
+          };
+        };
+        const isCurrentRequest =
+          currentOrderIdRef.current === id &&
+          orderLoadGateRef.current.isCurrent(generation);
+        if (
+          !response.ok ||
+          !data.order ||
+          !isCurrentRequest
+        ) {
+          if (isCurrentRequest) {
+            setError(
+              data.error ??
+                "Не удалось открыть страницу заказа. Повторите проверку.",
+            );
+          }
+          return null;
+        }
+        const previousStatus = lastOrderStatusRef.current;
+        lastOrderStatusRef.current = data.order.status;
+        setBridgeOnline(Boolean(data.bridgeOnline));
+        setOrder(data.order);
+        setEvents(data.events ?? []);
+        setOrderResultHistory(data.resultHistory ?? []);
 
-      if (
-        previousStatus &&
-        ["queued", "processing"].includes(previousStatus) &&
-        !["queued", "processing"].includes(data.order.status)
-      ) {
-        void loadStats();
-        void loadLedger();
+        if (
+          previousStatus &&
+          ["queued", "processing"].includes(previousStatus) &&
+          !["queued", "processing"].includes(data.order.status)
+        ) {
+          void loadStats();
+          void loadLedger();
+        }
+        return data.order;
+      } catch (loadError) {
+        if (
+          loadError instanceof DOMException &&
+          loadError.name === "AbortError"
+        ) {
+          return null;
+        }
+        if (
+          currentOrderIdRef.current === id &&
+          orderLoadGateRef.current.isCurrent(generation)
+        ) {
+          setError("Не удалось обновить страницу заказа. Повторите проверку.");
+        }
+        return null;
+      } finally {
+        if (orderLoadControllerRef.current === controller) {
+          orderLoadControllerRef.current = null;
+        }
       }
     },
     [loadLedger, loadStats],
   );
+
+  const reconcileOrder = useCallback(
+    async (id: string) => {
+      const refreshed = await loadWithOneRetry(() => loadOrder(id));
+      void loadStats();
+      void loadLedger();
+      return refreshed;
+    },
+    [loadLedger, loadOrder, loadStats],
+  );
+
+  const reconcileMutation = useCallback(
+    async (
+      id: string,
+      postcondition: (refreshed: OrderRecord) => boolean,
+    ) => {
+      const refreshed = await reconcileOrder(id);
+      const postconditionMet = Boolean(
+        refreshed &&
+          currentOrderIdRef.current === id &&
+          postcondition(refreshed),
+      );
+      if (refreshed && currentOrderIdRef.current === id) {
+        setError((current) =>
+          reconciledMutationError(current, postconditionMet),
+        );
+      }
+      return refreshed;
+    },
+    [reconcileOrder],
+  );
+
+  const setCurrentOrderError = (id: string, message: string) => {
+    if (currentOrderIdRef.current === id) setError(message);
+  };
 
   const rememberOrder = useCallback((id: string) => {
     sessionStorage.setItem(latestOrderStorageKey, id);
@@ -1065,6 +1259,18 @@ export function OrderStand() {
     url.searchParams.set("order", id);
     window.history.replaceState(null, "", url);
   }, []);
+
+  const openOrder = useCallback(
+    (id: string) => {
+      const nextId = id.trim();
+      if (!nextId) return;
+      clearOrderView();
+      currentOrderIdRef.current = nextId;
+      setOrderId(nextId);
+      setOrderActionKey(orderActionKeysRef.current.get(nextId) ?? "");
+    },
+    [clearOrderView],
+  );
 
   useEffect(() => {
     const queryOrderId = new URLSearchParams(window.location.search)
@@ -1075,16 +1281,10 @@ export function OrderStand() {
     if (!savedOrderId) return;
 
     const initial = window.setTimeout(() => {
-      setOrderActionKey(
-        sessionStorage.getItem(
-          `${orderActionKeyStoragePrefix}${savedOrderId}`,
-        ) ?? "",
-      );
-      setOrderId(savedOrderId);
-      void loadOrder(savedOrderId);
+      openOrder(savedOrderId);
     }, 0);
     return () => window.clearTimeout(initial);
-  }, [loadOrder]);
+  }, [openOrder]);
 
   useEffect(() => {
     const refreshSharedState = () => {
@@ -1115,19 +1315,38 @@ export function OrderStand() {
 
   useEffect(() => {
     if (!orderId) return;
-    const refreshOrder = () => {
-      if (document.visibilityState === "visible") void loadOrder(orderId);
+    const loadGate = orderLoadGateRef.current;
+    const refreshOrder = async () => {
+      if (document.visibilityState === "visible") {
+        await loadOrder(orderId);
+      }
     };
-    const initial = window.setTimeout(refreshOrder, 0);
     const shouldPoll = ["queued", "processing"].includes(order?.status ?? "");
-    const interval = shouldPoll
-      ? window.setInterval(refreshOrder, 3_000)
-      : undefined;
+    const poller = shouldPoll
+      ? createSerialPoller({ task: refreshOrder, intervalMs: 3_000 })
+      : null;
+    if (poller) poller.start();
+    else void refreshOrder();
     return () => {
-      window.clearTimeout(initial);
-      if (interval) window.clearInterval(interval);
+      poller?.stop();
+      loadGate.invalidate();
+      orderLoadControllerRef.current?.abort();
     };
   }, [loadOrder, order?.status, orderId]);
+
+  useEffect(() => {
+    if (order?.status !== "processing" || !order.leaseUntil) return;
+    const leaseKey = `${orderId}:${order.leaseUntil}`;
+    const expiresAt = timestampMs(order.leaseUntil);
+    const delay = Number.isFinite(expiresAt)
+      ? Math.max(0, expiresAt - Date.now())
+      : 0;
+    const timer = window.setTimeout(
+      () => setExpiredLeaseKey(leaseKey),
+      delay,
+    );
+    return () => window.clearTimeout(timer);
+  }, [order?.leaseUntil, order?.status, orderId]);
 
   const selectScenarioGroup = (zone: ScenarioZone) => {
     const group = scenarioGroups.find((item) => item.id === zone);
@@ -1136,7 +1355,7 @@ export function OrderStand() {
     setScenarioIndex(0);
     setCustomDraft(false);
     setDraft(group.examples[0]);
-    setCustomerAnswer(answerForScenario(group.examples[0]));
+    setCustomerAnswer("");
     setPhotoMessage("");
     setPhotoError("");
     setError("");
@@ -1153,29 +1372,7 @@ export function OrderStand() {
     }, 0);
   };
 
-  const startFenceExample = () => {
-    selectScenarioGroup("yellow");
-    focusMailBody();
-  };
-
-  const startSupplierRescueExample = () => {
-    const group = scenarioGroups.find((item) => item.id === "yellow");
-    const scenario = group?.examples[1];
-    if (!scenario) return;
-    setScenarioGroup("yellow");
-    setScenarioIndex(1);
-    setCustomDraft(false);
-    setDraft(scenario);
-    setCustomerAnswer(answerForScenario(scenario));
-    setPhotoMessage("");
-    setPhotoError("");
-    setError("");
-    setSupplierRefreshNeeded(false);
-    focusMailBody();
-  };
-
   const startCustomOrder = () => {
-    setScenarioGroup("yellow");
     setScenarioIndex(0);
     setCustomDraft(true);
     setDraft(emptyOrderDraft);
@@ -1194,7 +1391,7 @@ export function OrderStand() {
     setScenarioIndex(next);
     setCustomDraft(false);
     setDraft(group.examples[next]);
-    setCustomerAnswer(answerForScenario(group.examples[next]));
+    setCustomerAnswer("");
     setPhotoMessage("");
     setPhotoError("");
     setError("");
@@ -1222,11 +1419,14 @@ export function OrderStand() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const response = await fetch("/api/uploads", {
-        method: "POST",
-        body: form,
-      });
-      const data = (await response.json()) as UploadResponse;
+      const { response, data } = (await fetchJson(
+        "/api/uploads",
+        {
+          method: "POST",
+          body: form,
+        },
+        uploadTimeoutMs,
+      )) as { response: Response; data: UploadResponse };
       if (!response.ok || !data.attachment) {
         throw new Error(
           data.error ?? "Выберите другую фотографию и повторите загрузку.",
@@ -1264,38 +1464,80 @@ export function OrderStand() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submitting) return;
     setSubmitting(true);
     setError("");
-    setSupplierRefreshNeeded(false);
-    setOrder(null);
-    setEvents([]);
-    setOrderResultHistory([]);
 
     try {
-      const response = await fetch("/api/orders", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...draft, model: selectedModel }),
+      let operation = createOperationRef.current;
+      if (!operation) {
+        const submitter = (event.nativeEvent as SubmitEvent)
+          .submitter as HTMLButtonElement | null;
+        const executionMode: "live" | "recorded" =
+          submitter?.value === "recorded" ? "recorded" : "live";
+        operation = {
+          identity: createOperationIdentity(),
+          draft: { ...draft },
+          selectedModel,
+          executionMode,
+          uncertain: false,
+        };
+        updateCreateOperation(operation);
+        clearOrderView();
+        setOrderId("");
+      }
+
+      const result = await executeCreateOperation({
+        identity: operation.identity,
+        async post(identity: OperationIdentity) {
+          return fetchJson(
+            "/api/orders",
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                ...operation.draft,
+                model: operation.selectedModel,
+                executionMode: operation.executionMode,
+                clientOrderId: identity.clientOrderId,
+                clientActionKey: identity.clientActionKey,
+              }),
+            },
+            apiTimeoutMs,
+          );
+        },
+        reconcile: (identity: OperationIdentity) =>
+          reconcileCreateOperation({ ...operation, identity }),
       });
-      const data = (await response.json()) as {
-        id?: string;
-        actionKey?: string;
-        error?: string;
-      };
-      if (!response.ok || !data.id || !data.actionKey) {
+
+      if (result.state === "confirmed" && result.orderId) {
+        const actionKey =
+          typeof result.data?.actionKey === "string"
+            ? result.data.actionKey
+            : operation.identity.clientActionKey;
+        if (actionKey) {
+          orderActionKeysRef.current.set(result.orderId, actionKey);
+        }
+        finishCreateOperation();
+        rememberOrder(result.orderId);
+        openOrder(result.orderId);
+      } else if (result.state === "terminal-failure") {
+        finishCreateOperation();
         throw new Error(
-          data.error ?? "Проверьте тему и текст письма, затем повторите.",
+          result.data?.error ??
+            "Проверьте тему и текст письма, затем повторите.",
+        );
+      } else {
+        updateCreateOperation({ ...operation, uncertain: true });
+        setError(
+          "Создание заказа не подтверждено. Повторная отправка проверит ту же операцию и не создаст второй заказ.",
         );
       }
-      sessionStorage.setItem(
-        `${orderActionKeyStoragePrefix}${data.id}`,
-        data.actionKey,
-      );
-      rememberOrder(data.id);
-      setOrderActionKey(data.actionKey);
-      setOrderId(data.id);
-      await loadOrder(data.id);
-      await Promise.all([loadStats(), loadLedger(), loadInventory()]);
+
+      if (result.state !== "confirmed") return;
+      void loadStats();
+      void loadLedger();
+      void loadInventory();
       window.setTimeout(() => {
         document
           .getElementById("agent-work")
@@ -1317,14 +1559,20 @@ export function OrderStand() {
     setApproving(optionId);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({ id: orderId, action: "approve", optionId }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        recalculate?: boolean;
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "PATCH",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({ id: orderId, action: "approve", optionId }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          error?: string;
+          recalculate?: boolean;
+        };
       };
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
@@ -1333,15 +1581,17 @@ export function OrderStand() {
         );
       }
       setSupplierRefreshNeeded(false);
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (approvalError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         approvalError instanceof Error
           ? approvalError.message
           : "Обновите страницу заказа и выберите вариант снова.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { managerOptionId: optionId }),
+      );
       setApproving("");
     }
   };
@@ -1351,14 +1601,20 @@ export function OrderStand() {
     setReserving(true);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({ id: orderId, action: "reserve" }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        recalculate?: boolean;
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "PATCH",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({ id: orderId, action: "reserve" }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          error?: string;
+          recalculate?: boolean;
+        };
       };
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
@@ -1368,15 +1624,17 @@ export function OrderStand() {
         );
       }
       setSupplierRefreshNeeded(false);
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (reserveError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         reserveError instanceof Error
           ? reserveError.message
           : "Обновите страницу заказа и подготовьте резерв товара снова.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { status: "reserved" }),
+      );
       setReserving(false);
     }
   };
@@ -1386,14 +1644,20 @@ export function OrderStand() {
     setSending(true);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({ id: orderId, action: "send" }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        recalculate?: boolean;
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "PATCH",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({ id: orderId, action: "send" }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          error?: string;
+          recalculate?: boolean;
+        };
       };
       if (!response.ok) {
         if (data.recalculate) setSupplierRefreshNeeded(true);
@@ -1405,15 +1669,17 @@ export function OrderStand() {
         );
       }
       setSupplierRefreshNeeded(false);
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (sendError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         sendError instanceof Error
           ? humanizeText(sendError.message)
           : "Обновите страницу заказа и повторите запись отправки.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { status: "sent", sentAt: true }),
+      );
       setSending(false);
     }
   };
@@ -1423,48 +1689,57 @@ export function OrderStand() {
     setClarifying(true);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({
-          id: orderId,
-          action: "send_clarification",
-        }),
-      });
-      const data = (await response.json()) as { error?: string };
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "PATCH",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({
+            id: orderId,
+            action: "send_clarification",
+          }),
+        },
+        apiTimeoutMs,
+      )) as { response: Response; data: { error?: string } };
       if (!response.ok) {
         throw new Error(
           data.error ?? "Обновите страницу заказа и отправьте вопросы снова.",
         );
       }
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (actionError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         actionError instanceof Error
           ? actionError.message
           : "Обновите страницу заказа и отправьте вопросы снова.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { status: "awaiting_customer" }),
+      );
       setClarifying(false);
     }
   };
 
   const continueOrder = async () => {
     if (!orderId || customerAnswer.trim().length < 3) return;
+    const beforeRoundNo = order?.roundNo ?? 1;
     setContinuing(true);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "PATCH",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({
-          id: orderId,
-          action: "customer_reply",
-          answer: customerAnswer.trim(),
-        }),
-      });
-      const data = (await response.json()) as { error?: string };
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "PATCH",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({
+            id: orderId,
+            action: "customer_reply",
+            answer: customerAnswer.trim(),
+          }),
+        },
+        apiTimeoutMs,
+      )) as { response: Response; data: { error?: string } };
       if (!response.ok) {
         throw new Error(
           data.error ??
@@ -1472,26 +1747,31 @@ export function OrderStand() {
         );
       }
       setCustomerAnswer("");
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (actionError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         actionError instanceof Error
           ? actionError.message
           : "Проверьте ответ клиента и продолжите заказ на той же странице.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { roundNo: beforeRoundNo + 1 }),
+      );
       setContinuing(false);
     }
   };
 
   const requestRecalculation = async (id: string) => {
-    const response = await fetch("/api/orders", {
-      method: "PATCH",
-      headers: orderActionHeaders(),
-      body: JSON.stringify({ id, action: "recalculate" }),
-    });
-    const data = (await response.json()) as { error?: string };
+    const { response, data } = (await fetchJson(
+      "/api/orders",
+      {
+        method: "PATCH",
+        headers: orderActionHeaders(),
+        body: JSON.stringify({ id, action: "recalculate" }),
+      },
+      apiTimeoutMs,
+    )) as { response: Response; data: { error?: string } };
     if (!response.ok) {
       throw new Error(
         data.error ?? "Обновите склад и пересчитайте заказ снова.",
@@ -1501,57 +1781,68 @@ export function OrderStand() {
 
   const recalculateOrder = async () => {
     if (!orderId) return;
+    const beforeRoundNo = order?.roundNo ?? 1;
     setRecalculating(true);
     setError("");
     try {
       await requestRecalculation(orderId);
       setSupplierRefreshNeeded(false);
-      await loadOrder(orderId);
-      await Promise.all([
-        loadStats(),
-        loadLedger(),
-        loadInventory(),
-        loadMarket(),
-      ]);
+      void loadInventory();
+      void loadMarket();
     } catch (actionError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         actionError instanceof Error
           ? actionError.message
           : "Обновите склад и пересчитайте заказ снова.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { roundNo: beforeRoundNo + 1 }),
+      );
       setRecalculating(false);
     }
   };
 
   const retryOrder = async () => {
-    if (!orderId || order?.status !== "error") return;
+    const processingState = orderProcessingState(order);
+    if (
+      !orderId ||
+      !["error", "processing-expired"].includes(processingState)
+    ) {
+      return;
+    }
     setRetrying(true);
     setError("");
     try {
-      const response = await fetch("/api/orders", {
-        method: "POST",
-        headers: orderActionHeaders(),
-        body: JSON.stringify({
-          id: orderId,
-          action: "retry",
-        }),
-      });
-      const data = (await response.json()) as { error?: string };
+      const { response, data } = (await fetchJson(
+        "/api/orders",
+        {
+          method: "POST",
+          headers: orderActionHeaders(),
+          body: JSON.stringify({
+            id: orderId,
+            action: "retry",
+          }),
+        },
+        apiTimeoutMs,
+      )) as { response: Response; data: { error?: string } };
       if (!response.ok) {
         throw new Error(
           data.error ?? "Обновите страницу заказа и повторите запуск.",
         );
       }
-      await loadOrder(orderId);
-      await Promise.all([loadStats(), loadLedger()]);
     } catch (retryError) {
-      setError(
+      setCurrentOrderError(
+        orderId,
         retryError instanceof Error
           ? retryError.message
           : "Обновите страницу заказа и повторите запуск.",
       );
     } finally {
+      await reconcileMutation(orderId, (refreshed) =>
+        mutationPostconditionMet(refreshed, { status: "queued" }),
+      );
       setRetrying(false);
     }
   };
@@ -1564,14 +1855,20 @@ export function OrderStand() {
     setMarketError("");
     setMarketMessage("");
     try {
-      const response = await fetch("/api/admin", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: adminCode }),
-      });
-      const data = (await response.json()) as {
-        authenticated?: boolean;
-        error?: string;
+      const { response, data } = (await fetchJson(
+        "/api/admin",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: adminCode }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          authenticated?: boolean;
+          error?: string;
+        };
       };
       if (!response.ok || !data.authenticated) {
         throw new Error(
@@ -1605,7 +1902,11 @@ export function OrderStand() {
     setInventoryError("");
     setMarketError("");
     try {
-      await fetch("/api/admin", { method: "DELETE" });
+      await fetchWithTimeout(
+        "/api/admin",
+        { method: "DELETE" },
+        apiTimeoutMs,
+      );
       setAdminAuthenticated(false);
       setInventoryMessage("Панель администратора закрыта.");
       setMarketMessage("");
@@ -1645,25 +1946,42 @@ export function OrderStand() {
       setInventoryError("Укажите целое число килограммов от нуля.");
       return;
     }
+    const activeOrderUsesPaint =
+      Boolean(orderId) &&
+      order?.status !== "sent" &&
+      resultInventorySkus(
+        order?.inventorySnapshot,
+        order?.result,
+        demoData.products,
+      ).includes(item.sku);
+    const beforeRoundNo = order?.roundNo ?? 1;
+    let recalculationAttempted = false;
+    let recalculationFailed = false;
 
     setAdminBusy(true);
     setInventoryError("");
     setInventoryMessage("");
     try {
-      const response = await fetch("/api/inventory", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sku: item.sku,
-          stockKg: nextStock,
-          expectedRevision: item.revision,
-          reason: inventoryReason.trim() || "Поступление на склад",
-        }),
-      });
-      const data = (await response.json()) as {
-        item?: InventoryItem;
-        current?: InventoryItem;
-        error?: string;
+      const { response, data } = (await fetchJson(
+        "/api/inventory",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sku: item.sku,
+            stockKg: nextStock,
+            expectedRevision: item.revision,
+            reason: inventoryReason.trim() || "Поступление на склад",
+          }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          item?: InventoryItem;
+          current?: InventoryItem;
+          error?: string;
+        };
       };
       if (!response.ok || !data.item) {
         if (data.current) {
@@ -1689,43 +2007,30 @@ export function OrderStand() {
         ),
       );
       setInventoryStock(String(data.item.stockKg));
-      const activeOrderUsesPaint =
-        Boolean(orderId) &&
-        order?.status !== "sent" &&
-        resultInventorySkus(
-          order?.inventorySnapshot,
-          order?.result,
-          demoData.products,
-        ).includes(item.sku);
 
       if (activeOrderUsesPaint && orderId) {
         setInventoryMessage(
-          `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент уже заново сверяет заказ и письмо.`,
+          order?.mode === "recorded-demo"
+            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Запускается записанный демонстрационный пересчёт заказа.`
+            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Пересчёт поставлен в очередь live-agent.`,
         );
         setRecalculating(true);
-        await requestRecalculation(orderId);
-        await Promise.all([
-          loadOrder(orderId),
-          loadInventory(),
-          loadLedger(),
-          loadStats(),
-        ]);
+        recalculationAttempted = true;
+        try {
+          await requestRecalculation(orderId);
+        } catch (recalculationError) {
+          recalculationFailed = true;
+          throw recalculationError;
+        }
         setInventoryMessage(
-          bridgeOnline
-            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Агент пересчитывает заказ; новое решение и письмо появятся на его странице.`
-            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Новое решение и письмо сохранились на странице заказа.`,
+          order?.mode === "recorded-demo"
+            ? `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Записанный демонстрационный результат появится на странице заказа.`
+            : `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Live-agent получил пересчёт; новый результат появится после обработки.`,
         );
       } else {
         setInventoryMessage(
           `Остаток изменился: ${formatMoney(item.stockKg)} → ${formatMoney(data.item.stockKg)} кг. Следующий расчёт возьмёт свежие данные.`,
         );
-        await Promise.all([
-          loadInventory(),
-          loadLedger(),
-          orderId
-            ? loadOrder(orderId).catch(() => undefined)
-            : Promise.resolve(),
-        ]);
       }
       if (orderId) {
         window.setTimeout(() => {
@@ -1749,6 +2054,45 @@ export function OrderStand() {
           : "Обновите данные склада и повторите изменение.",
       );
     } finally {
+      if (activeOrderUsesPaint && orderId && !recalculationAttempted) {
+        try {
+          await requestRecalculation(orderId);
+        } catch {
+          recalculationFailed = true;
+        }
+      }
+      const [refreshedInventory, refreshedOrder] = await Promise.all([
+        loadInventory(),
+        orderId
+          ? reconcileMutation(
+              orderId,
+              (refreshed) =>
+                activeOrderUsesPaint &&
+                mutationPostconditionMet(refreshed, {
+                  roundNo: beforeRoundNo + 1,
+                }),
+            ).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      const recalculationConfirmed = Boolean(
+        activeOrderUsesPaint &&
+          refreshedOrder &&
+          mutationPostconditionMet(refreshedOrder, {
+            roundNo: beforeRoundNo + 1,
+          }),
+      );
+      const inventoryConfirmed = refreshedInventory?.some(
+        (candidate) =>
+          candidate.sku === item.sku &&
+          candidate.stockKg === nextStock &&
+          (candidate.revision !== item.revision ||
+            candidate.updatedAt !== item.updatedAt),
+      );
+      if (!recalculationFailed && (recalculationConfirmed || inventoryConfirmed)) {
+        setInventoryError("");
+      }
+      void loadLedger();
+      void loadStats();
       setRecalculating(false);
       setAdminBusy(false);
     }
@@ -1768,24 +2112,35 @@ export function OrderStand() {
       setMarketError("Укажите целое число килограммов от нуля.");
       return;
     }
+    const activeOrder =
+      Boolean(orderId) && Boolean(order) && order?.status !== "sent";
+    const beforeRoundNo = order?.roundNo ?? 1;
+    let recalculationAttempted = false;
+    let recalculationFailed = false;
 
     setMarketBusy(true);
     setMarketError("");
     setMarketMessage("");
     let savedChangeText = "";
     try {
-      const response = await fetch("/api/market", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          id: offer.id,
-          stockKg: nextStock,
-        }),
-      });
-      const data = (await response.json()) as {
-        market?: MarketOffer[];
-        changed?: MarketChange;
-        error?: string;
+      const { response, data } = (await fetchJson(
+        "/api/market",
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: offer.id,
+            stockKg: nextStock,
+          }),
+        },
+        apiTimeoutMs,
+      )) as {
+        response: Response;
+        data: {
+          market?: MarketOffer[];
+          changed?: MarketChange;
+          error?: string;
+        };
       };
       if (
         !response.ok ||
@@ -1811,16 +2166,16 @@ export function OrderStand() {
         data.changed.from,
       )} → ${formatMoney(data.changed.to)} кг.`;
       savedChangeText = changeText;
-      const activeOrder =
-        Boolean(orderId) && Boolean(order) && order?.status !== "sent";
-
       if (activeOrder && orderId) {
         let orderRecalculated = true;
         setMarketMessage(
-          `${changeText} Агент пересобирает вариант и письмо по свежему остатку.`,
+          order?.mode === "recorded-demo"
+            ? `${changeText} Запускается записанный демонстрационный пересчёт варианта и письма.`
+            : `${changeText} Пересчёт варианта и письма поставлен в очередь live-agent.`,
         );
         setRecalculating(true);
         setSupplierRefreshNeeded(false);
+        recalculationAttempted = true;
         try {
           await requestRecalculation(orderId);
         } catch (recalculationError) {
@@ -1829,36 +2184,22 @@ export function OrderStand() {
               ? recalculationError.message
               : "";
           if (!/уже рассчитана по свежим данным/iu.test(recalculationMessage)) {
+            recalculationFailed = true;
             throw recalculationError;
           }
           orderRecalculated = false;
         }
-        await Promise.all([
-          loadOrder(orderId),
-          loadLedger(),
-          loadInventory(),
-          loadMarket(),
-          loadStats(),
-        ]);
         setMarketMessage(
           !orderRecalculated
             ? `${changeText} Текущий вариант уже опирается на свежие данные; страница заказа сохранилась без изменений.`
-            : bridgeOnline
-            ? `${changeText} Агент пересчитывает заказ; обновлённый вариант появится на его странице.`
-            : `${changeText} Обновлённый вариант и письмо сохранены на странице заказа.`,
+            : order?.mode === "recorded-demo"
+              ? `${changeText} Записанный демонстрационный вариант появится на странице заказа.`
+              : `${changeText} Live-agent получил пересчёт; обновлённый вариант появится после обработки.`,
         );
       } else {
         setMarketMessage(
           `${changeText} Следующий расчёт возьмёт свежий остаток партнёра.`,
         );
-        await Promise.all([
-          loadMarket(),
-          loadLedger(),
-          loadInventory(),
-          orderId
-            ? loadOrder(orderId).catch(() => undefined)
-            : Promise.resolve(),
-        ]);
       }
 
       if (orderId) {
@@ -1883,16 +2224,48 @@ export function OrderStand() {
           ? `${savedChangeText} Остаток сохранён. ${detail}`
           : detail,
       );
-      if (savedChangeText) {
-        await Promise.all([
-          loadMarket(),
-          loadLedger(),
-          orderId
-            ? loadOrder(orderId).catch(() => undefined)
-            : Promise.resolve(),
-        ]);
-      }
     } finally {
+      if (activeOrder && orderId && !recalculationAttempted) {
+        try {
+          await requestRecalculation(orderId);
+        } catch {
+          recalculationFailed = true;
+        }
+      }
+      const [refreshedMarket, refreshedOrder] = await Promise.all([
+        loadMarket(),
+        orderId
+          ? reconcileMutation(
+              orderId,
+              (refreshed) =>
+                activeOrder &&
+                mutationPostconditionMet(refreshed, {
+                  roundNo: beforeRoundNo + 1,
+                }),
+            ).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      const recalculationConfirmed = Boolean(
+        activeOrder &&
+          refreshedOrder &&
+          mutationPostconditionMet(refreshedOrder, {
+            roundNo: beforeRoundNo + 1,
+          }),
+      );
+      const marketConfirmed = refreshedMarket?.some(
+        (candidate) =>
+          candidate.id === offer.id &&
+          candidate.stockKg === nextStock &&
+          (candidate.stockKg !== offer.stockKg ||
+            candidate.updatedAt !== offer.updatedAt ||
+            candidate.stockCheckedAt !== offer.stockCheckedAt),
+      );
+      if (!recalculationFailed && (recalculationConfirmed || marketConfirmed)) {
+        setMarketError("");
+      }
+      void loadInventory();
+      void loadLedger();
+      void loadStats();
       setRecalculating(false);
       setMarketBusy(false);
     }
@@ -1900,12 +2273,7 @@ export function OrderStand() {
 
   const openLedgerOrder = (id: string) => {
     rememberOrder(id);
-    setOrderActionKey(
-      sessionStorage.getItem(`${orderActionKeyStoragePrefix}${id}`) ?? "",
-    );
-    setOrderId(id);
-    setError("");
-    void loadOrder(id);
+    openOrder(id);
     window.setTimeout(() => {
       document
         .getElementById("agent-work")
@@ -1915,23 +2283,46 @@ export function OrderStand() {
 
   const reset = () => {
     sessionStorage.removeItem(latestOrderStorageKey);
+    if (orderId) orderActionKeysRef.current.delete(orderId);
     const url = new URL(window.location.href);
     url.searchParams.delete("order");
     window.history.replaceState(null, "", url);
+    clearOrderView();
     setOrderId("");
-    setOrderActionKey("");
-    setOrder(null);
-    setEvents([]);
-    lastOrderStatusRef.current = null;
-    setError("");
     document
       .getElementById("compose")
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   const result = order?.result;
-  const currentZone = result?.zone ?? order?.zone;
-  const hint = useMemo(() => inferZone(draft, inventory), [draft, inventory]);
+  const processingState = orderProcessingState(order);
+  const orderIsActive = [
+    "queued",
+    "processing-active",
+    "processing-expired",
+  ].includes(processingState);
+  const previousResult = orderIsActive
+    ? orderResultHistory.at(-1) ?? null
+    : null;
+  const currentZone =
+    orderIsActive || processingState === "error"
+      ? null
+      : result?.zone ?? order?.zone;
+  const activeLeaseKey =
+    order?.status === "processing" &&
+    order.leaseUntil
+      ? `${orderId}:${order.leaseUntil}`
+      : "";
+  const leaseExpired =
+    processingState === "processing-expired" ||
+    (Boolean(activeLeaseKey) && activeLeaseKey === expiredLeaseKey);
+  const agentNeedsRecovery = leaseExpired;
+  const processingCopy = orderProcessingCopy(
+    leaseExpired ? "processing-expired" : processingState,
+  );
+  const showResult =
+    Boolean(result) && Boolean(order) && !orderIsActive && processingState !== "error";
+  const hint = useMemo(() => inferZone(draft), [draft]);
   const progress = useMemo(() => {
     if (!orderId) return 0;
     if (order?.status === "sent") return 100;
@@ -1967,15 +2358,15 @@ export function OrderStand() {
           aria-live="polite"
           aria-label={
             bridgeOnline
-              ? "Режим: обработка моделью"
-              : "Режим: обработка по правилам"
+              ? "Режим: агент подключён"
+              : "Режим: агент временно недоступен"
           }
         >
           <span className="connection-dot" aria-hidden="true" />
           <span aria-hidden="true">
             {bridgeOnline
-              ? "Режим: обработка моделью"
-              : "Режим: обработка по правилам"}
+              ? "Режим: агент подключён"
+              : "Режим: агент временно недоступен"}
           </span>
         </div>
         <a
@@ -1994,27 +2385,26 @@ export function OrderStand() {
             <h1 id="main-title">
               Клиент пишет своими словами. Агент ведёт заказ до готового ответа
             </h1>
-            <p className="hero-lead">
-              Форма запускает тот же рабочий путь, который в компании начинает
-              входящее письмо. На странице заказа в одном месте остаются
-              письмо, фото, вопросы и ответы, расчёты, варианты и решения.
-              Агент понимает задачу, сверяет каталог, текущий остаток на складе
-              и таблицу поставщиков, а когда это влияет на подбор —{" "}
-              {bridgeOnline
-                ? "сам ищет открытые сведения о компании"
-                : "использует подготовленные сведения о компании"}
-              , готовит следующий шаг и сохраняет всю историю в общей таблице.
-            </p>
+              <p className="hero-lead">
+                Форма запускает тот же рабочий путь, который в компании начинает
+                входящее письмо. На странице заказа в одном месте остаются
+                письмо, фото, вопросы и ответы, расчёты, варианты и решения.
+                Агент понимает задачу, сверяет каталог, текущий остаток на складе
+                и таблицу поставщиков. {" "}
+                {bridgeOnline
+                  ? "Когда это влияет на подбор, он сам ищет открытые сведения о компании и готовит следующий шаг."
+                  : "Live-agent сейчас недоступен: заявка сохраняется в очереди без автоматической подмены; после восстановления агент продолжит работу."}{" "}
+                История сохраняется в общей таблице.
+              </p>
           </div>
 
           <aside className="agent-difference">
             <span>Что агент делает сам</span>
             <p>
-              Страница заказа хранит письмо, фото и весь контекст. Агент ждёт
-              ответ клиента, заново сверяет остаток, пересчитывает план и
-              продолжает работу под тем же номером. Заявка «Хочу покрасить этот
-              забор» превращается в точные вопросы, подбор краски, расчёт
-              килограммов и проверку наличия.
+              Страница заказа хранит письмо, фото и весь контекст. Агент сам
+              изучает изображение, открывает нужные источники, оценивает
+              неизвестное диапазоном и продолжает работу под тем же номером.
+              Вопрос появляется только при неоднозначности самого объекта.
             </p>
           </aside>
 
@@ -2030,8 +2420,8 @@ export function OrderStand() {
               <strong>Понимание задачи</strong>
               <small>
                 {bridgeOnline
-                  ? "Текст и фото превращаются в факты и вопросы"
-                  : "Текст превращается в факты и вопросы, фото остаётся на странице заказа"}
+                  ? "Текст и фото превращаются в доказательства и допущения"
+                  : "Письмо и фото сохранены; живой разбор продолжится после восстановления"}
               </small>
             </article>
             <i aria-hidden="true">→</i>
@@ -2120,12 +2510,12 @@ export function OrderStand() {
                 <strong>
                   {bridgeOnline
                     ? "Рабочая модель ведёт каждый заказ"
-                    : "Система работает по готовым правилам"}
+                    : "Свободные заявки остаются в очереди"}
                 </strong>
                 <small>
                   {bridgeOnline
                     ? `${modelLabel(selectedModel)} разбирает заявку, берёт данные из разрешённых источников и готовит ответ по заданным правилам.`
-                    : "Сайт читает заявку, проверяет текущий склад и показывает весь путь заказа."}
+                    : "Сайт сохраняет письмо, фото и историю без подмены упрощённым сценарием."}
                 </small>
               </li>
               <li>
@@ -2136,20 +2526,20 @@ export function OrderStand() {
                 </strong>
                 <small>
                   {bridgeOnline
-                    ? "Описывает только видимое. Материал и размеры подтверждает клиент."
-                    : "Система задаёт вопросы о материале, размерах и окрашиваемых сторонах по тексту заявки."}
+                    ? "Описывает только видимое, выделяет кандидатов цели и даёт широкий ориентир масштаба."
+                    : "Фото сохранится вместе с письмом и будет использовано после восстановления."}
                 </small>
               </li>
               <li>
                 <strong>
                   {bridgeOnline
                     ? "Отдельная модель проверяет решение"
-                    : "Правила и критерии подготовлены заранее"}
+                    : "Проверка продолжится после восстановления"}
                 </strong>
                 <small>
                   {bridgeOnline
                     ? "DeepSeek V4 Pro отдельным запуском проверяет факты, числа и обещания."
-                    : "GPT-5.6 Sol заранее подготовила правила и критерии. Администратор подключает рабочие модели."}
+                    : "Непроверенное решение не отправляется клиенту и остаётся в очереди."}
                 </small>
               </li>
               <li>
@@ -2171,7 +2561,7 @@ export function OrderStand() {
               <p>
                 {bridgeOnline
                   ? "Компьютер администратора запускает выбранную модель. Сайт хранит страницы заказов и журнал."
-                  : "Сайт обрабатывает заявки по тем же правилам и живым данным склада."}{" "}
+                  : "Live-agent сейчас недоступен: сайт сохраняет заявку в очереди и не запускает автоматическую подмену."}{" "}
                 В рабочей системе письмо из почтового ящика создаёт заявку, а
                 готовый ответ уходит с корпоративной почты.
               </p>
@@ -2232,17 +2622,12 @@ export function OrderStand() {
           </div>
           <div className="demo-heading-copy">
             <p>
-              Например: «Хочу покрасить забор». Добавьте фото — агент уточнит
-              материал и размеры, подберёт краску и рассчитает заказ. В рабочей
-              системе страницу заказа создаёт письмо из ящика компании.
+              Опишите поверхность, цель и желаемый результат своими словами.
+              Добавьте фото — агент определит цель, найдёт внешние факты и даст
+              диапазон площади и расхода. В рабочей системе страницу заказа
+              создаёт письмо из ящика компании.
             </p>
             <div className="demo-start-actions">
-              <button type="button" onClick={startFenceExample}>
-                Попробовать с фото забора
-              </button>
-              <button type="button" onClick={startSupplierRescueExample}>
-                Показать, как агент сохраняет большой заказ
-              </button>
               <button type="button" onClick={startCustomOrder}>
                 Заполнить свой заказ
               </button>
@@ -2278,7 +2663,11 @@ export function OrderStand() {
               </label>
               <button type="button" onClick={nextScenario}>
                 Другой пример
-                <small>{scenarioIndex + 1} из 10</small>
+                <small>
+                  {scenarioIndex + 1} из{" "}
+                  {scenarioGroups.find((group) => group.id === scenarioGroup)
+                    ?.examples.length ?? 0}
+                </small>
               </button>
             </div>
 
@@ -2359,8 +2748,8 @@ export function OrderStand() {
                   <strong>Покажите, что хотите покрасить</strong>
                   <small>
                     {bridgeOnline
-                      ? "Добавьте фото забора, стены или пола. Модель для фото опишет видимые детали, агент уточнит материал, размеры, стороны покраски и желаемый цвет, подберёт краску и посчитает килограммы."
-                      : "Добавьте фото забора, стены или пола. Агент сохранит его на странице заказа, уточнит материал, размеры, стороны покраски и желаемый цвет, подберёт краску и посчитает килограммы."}
+                      ? "Добавьте фото. Модель опишет только видимое, а агент сопоставит это с письмом, оценит масштаб диапазоном и сам найдёт нужные внешние факты."
+                      : "Добавьте фото. Оно сохранится вместе с письмом и будет разобрано после восстановления агента."}
                   </small>
                 </div>
                 <label className="photo-upload-button">
@@ -2393,7 +2782,6 @@ export function OrderStand() {
                     width={1200}
                     height={800}
                     sizes="(max-width: 720px) 100vw, 520px"
-                    priority={scenarioGroup === "yellow"}
                     unoptimized
                   />
                   <figcaption>
@@ -2402,8 +2790,8 @@ export function OrderStand() {
                       <strong>{draft.attachment.name}</strong>
                       <small>
                         {bridgeOnline
-                          ? "Модель для фото опишет видимые детали. Материал, размеры, стороны покраски и желаемый цвет подтвердит клиент."
-                          : "Фото сохранится на странице заказа. Агент задаст вопросы о материале, размерах, сторонах покраски и желаемом цвете."}
+                          ? "Модель опишет видимые факты и возможные объекты действия без выводов о человеке."
+                          : "Фото сохранится на странице заказа без автоматических домыслов."}
                       </small>
                       <button
                         className="photo-remove-button"
@@ -2429,30 +2817,25 @@ export function OrderStand() {
               )}
 
               <div className="mail-model">
-                {bridgeOnline ? (
-                  <label>
-                    <span>Модель для ежедневных заказов</span>
-                    <select
-                      value={selectedModel}
-                      onChange={(event) => setSelectedModel(event.target.value)}
-                    >
-                      {modelCatalog.options.map((model) => (
-                        <option value={model.id} key={model.id}>
-                          {model.label} · {model.note}
-                        </option>
+                <label>
+                  <span>Модель для ежедневных заказов</span>
+                  <select
+                    value={selectedModel}
+                    onChange={(event) => setSelectedModel(event.target.value)}
+                  >
+                    {modelCatalog.options
+                      .filter((model) => model.roles.includes("primary"))
+                      .map((model) => (
+                      <option value={model.id} key={model.id}>
+                        {model.label} · {model.note}
+                      </option>
                       ))}
-                    </select>
-                  </label>
-                ) : (
-                  <div className="mail-model-status">
-                    <span>Обработка заявки</span>
-                    <strong>Подготовленные правила и текущий остаток</strong>
-                  </div>
-                )}
+                  </select>
+                </label>
                 <small>
                   {bridgeOnline
                     ? `${modelLabel(selectedModel)} обрабатывает ежедневный заказ. DeepSeek V4 Pro отдельно проверяет факты, числа и условия.`
-                    : "Администратор подключает ежедневную модель и отдельную проверку для показа работы с моделями."}
+                    : "Соединение с агентом восстанавливается. Свободная заявка сохранится в очереди без подмены автоматическими правилами."}
                 </small>
               </div>
 
@@ -2477,12 +2860,27 @@ export function OrderStand() {
               </div>
 
               <div className="mail-actions">
-                <button className="send-button" type="submit" disabled={submitting}>
+                <button
+                  className="send-button"
+                  type="submit"
+                  value="live"
+                  disabled={submitting}
+                >
                   <span>
                     {submitting ? "Создаём страницу заказа…" : "Отправить агенту"}
                   </span>
                   <span aria-hidden="true">→</span>
                 </button>
+                {!bridgeOnline && draft.demoKind && (
+                  <button
+                    className="text-button"
+                    type="submit"
+                    value="recorded"
+                    disabled={submitting}
+                  >
+                    Запустить записанный пример
+                  </button>
+                )}
                 <small>
                   Агент покажет, что делать дальше, по заявке, живому складу и
                   трём правилам продаж.
@@ -2539,9 +2937,9 @@ export function OrderStand() {
                     <span aria-hidden="true">•</span>
                     <strong>Проверка решения</strong>
                     <small>
-                      {bridgeOnline
-                        ? "Модель проверки сверяет факты, обещания и решения для руководителя"
-                        : "Программа проверяет числа, условия и правила"}
+                     {bridgeOnline
+                         ? "Модель проверки сверяет факты, обещания и решения для руководителя"
+                         : "Live-agent проверит числа, условия и правила после восстановления"}
                     </small>
                   </li>
                   <li>
@@ -2575,7 +2973,7 @@ export function OrderStand() {
                               order?.requestedModel ??
                               selectedModel,
                           )
-                        : "Автоматическая обработка по правилам"}
+                        : executionLabel(order?.mode)}
                     </small>
                     {order?.body && (
                       <p className="order-card-preview">
@@ -2587,13 +2985,20 @@ export function OrderStand() {
                   </div>
                   <div
                     className={`zone-badge ${
-                      currentZone ? `zone-${currentZone}` : "is-processing"
+                      currentZone
+                        ? `zone-${currentZone}`
+                        : processingState === "error"
+                          ? "zone-red"
+                          : "is-processing"
                     }`}
                   >
                     <span />
                     {currentZone
-                      ? zoneCopy[currentZone].name
-                      : "Агент работает"}
+                      ? result?.commitment === "estimate" &&
+                        result.route === "ready"
+                        ? "Предварительная оценка готова"
+                        : zoneCopy[currentZone].name
+                      : processingCopy.badge}
                   </div>
                 </div>
 
@@ -2618,6 +3023,10 @@ export function OrderStand() {
                     <article
                       className={`event-item ${
                         item.state === "error" ? "is-error" : ""
+                      } ${
+                        order && isCurrentOrderEvent(item, order)
+                          ? "is-current"
+                          : "is-history"
                       }`}
                       key={item.id}
                       style={{ animationDelay: `${Math.min(index * 70, 350)}ms` }}
@@ -2632,17 +3041,58 @@ export function OrderStand() {
                       <time>{formatEventTime(item.createdAt)}</time>
                     </article>
                   ))}
-                  {["queued", "processing"].includes(order?.status ?? "") && (
+                  {orderIsActive && !agentNeedsRecovery && (
                     <article className="event-item is-active">
                       <div className="event-index">··</div>
                       <div>
-                        <h3>Агент продолжает работу</h3>
-                        <p>Новый результат появится на этой странице заказа.</p>
+                        <h3>{processingCopy.title}</h3>
+                        <p>{processingCopy.detail}</p>
                       </div>
                       <span className="event-pulse" />
                     </article>
                   )}
+                  {agentNeedsRecovery && (
+                    <article className="event-item is-error">
+                      <div className="event-index">!</div>
+                      <div>
+                        <h3>{processingCopy.title}</h3>
+                        <p>{processingCopy.detail}</p>
+                        <button
+                          className="text-button"
+                          type="button"
+                          onClick={() => void retryOrder()}
+                          disabled={
+                            retrying ||
+                            (!orderActionKey && !adminAuthenticated)
+                          }
+                        >
+                          {retrying
+                            ? "Повторяем этот заказ…"
+                            : "Повторить этот заказ"}
+                        </button>
+                      </div>
+                    </article>
+                  )}
                 </div>
+
+                {previousResult && (
+                  <section
+                    className="previous-result-history"
+                    aria-label="Предыдущее решение из истории заказа"
+                  >
+                    <span>
+                      История · этап {previousResult.roundNo}
+                    </span>
+                    <strong>Предыдущее решение сохранено</strong>
+                    <p>
+                      {zoneCopy[previousResult.zone].name}:{" "}
+                      {humanizeText(previousResult.zoneReason)}
+                    </p>
+                    <small>
+                      Это не активное решение: агент готовит новый результат.
+                    </small>
+                  </section>
+                )}
 
                 {order?.status === "error" && (
                   <div className="error-state">
@@ -2667,11 +3117,12 @@ export function OrderStand() {
                   </div>
                 )}
 
-                {result && order && (
+                {showResult && result && order && (
                   <ResultPanel
                     key={order.id}
                     result={result}
                     order={order}
+                    events={events}
                     approving={approving}
                     reserving={reserving}
                     sending={sending}
@@ -2701,6 +3152,12 @@ export function OrderStand() {
             {error && (
               <div className="error-banner" role="alert">
                 {humanizeText(error)}
+                {createOperation?.uncertain && (
+                  <span className="sr-only">
+                    Операция ожидает подтверждения; повтор использует тот же
+                    идентификатор.
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -2711,17 +3168,17 @@ export function OrderStand() {
             <p className="eyebrow">
               {bridgeOnline
                 ? "Ежедневная модель и отдельная проверка"
-                : "Автоматическая обработка по правилам"}
+                : "Свободные заявки ждут подключения агента"}
             </p>
             <h2>
               {bridgeOnline
                 ? "Рабочая модель действует по правилам, модель проверки сверяет решение"
-                : "Готовые правила, точные факты и журнал отвечают за качество"}
+                : "Карточка сохранится и продолжит работу после восстановления"}
             </h2>
             <p>
               {bridgeOnline
                 ? `${modelLabel(selectedModel)} обрабатывает заказ по готовым правилам. DeepSeek V4 Pro отдельно проверяет факты и обещания. Программа подтверждает цены и остатки перед каждым действием.`
-                : "Система читает заявку, сверяет склад и собирает ответ по подготовленным правилам. При подключении моделей сохраняется тот же путь и те же проверки."}
+                : "Свободное письмо не подменяется упрощённым расчётом. Для репетиции доступен только явно выбранный записанный прогон готового примера."}
             </p>
           </div>
           <div className="control-grid">
@@ -2730,14 +3187,14 @@ export function OrderStand() {
               <strong>
                 {bridgeOnline
                   ? `${modelLabel(selectedModel)} обрабатывает заказ`
-                  : "Система обрабатывает заказ по правилам"}
+                  : "Агент временно недоступен"}
               </strong>
               <p>
                 {bridgeOnline
                   ? `Модель для фото описывает только видимое. ${modelLabel(
                       selectedModel,
                     )} разбирает заявку, обращается к разрешённым источникам и собирает ответ по шагам.`
-                  : "Сайт читает заявку, обращается к живому складу, считает заказ и показывает решение. В живом режиме те же шаги выполняют выбранные модели."}
+                  : "Заявка и вложение уже сохранены. После восстановления lease новый worker продолжит live-разбор; кнопка повтора остаётся в карточке."}
               </p>
             </article>
             <article>
@@ -2761,8 +3218,8 @@ export function OrderStand() {
               <strong>Каталог, цена и остаток сходятся</strong>
               <p>
                 {bridgeOnline
-                  ? "Перед готовым ответом программа подтверждает товар по каталогу, цену по таблице поставщиков и объём по живому складу. Модель выбирает: ответить, уточнить или передать решение руководителю."
-                  : "При каждом расчёте программа подтверждает товар по каталогу, цену по таблице поставщиков и объём по живому складу. Готовые правила определяют следующий шаг."}
+                  ? "Перед готовым ответом программа подтверждает товар по каталогу, цену по таблице поставщиков и объём по живому складу. Модель выбирает: дать оценку, задать один вопрос о цели или передать решение руководителю."
+                  : "Новая заявка ждёт live-agent в очереди. Записанный демонстрационный режим запускается только по явному выбору для готового примера."}
               </p>
               <button
                 type="button"
@@ -2836,7 +3293,7 @@ export function OrderStand() {
             <article>
               <span>Ждут клиента</span>
               <strong>{stats.awaitingCustomer}</strong>
-              <small>вопросы уже готовы или отправлены</small>
+              <small>один вопрос о цели уже готов или отправлен</small>
             </article>
             <article>
               <span>Записано отправок</span>
@@ -2850,7 +3307,7 @@ export function OrderStand() {
               {stats.zones.green}
             </span>
             <span>
-              <i className="zone-yellow" /> Жёлтый · нужны детали:{" "}
+              <i className="zone-yellow" /> Жёлтый · оценка или выбор цели:{" "}
               {stats.zones.yellow}
             </span>
             <span>
@@ -2896,6 +3353,7 @@ export function OrderStand() {
 function ResultPanel({
   result,
   order,
+  events,
   approving,
   reserving,
   sending,
@@ -2918,6 +3376,7 @@ function ResultPanel({
 }: {
   result: AgentResult;
   order: OrderRecord;
+  events: EventRow[];
   approving: string;
   reserving: boolean;
   sending: boolean;
@@ -2976,23 +3435,24 @@ function ResultPanel({
   const actionableInventoryChange = inventoryChanged && !sent;
   const actionableSupplierRefresh =
     supplierRefreshNeeded && !inventoryChanged && !sent;
+  const isEstimate = result.commitment === "estimate";
+  const isCommercialOffer = result.commitment === "commercial_offer";
   const canClarify =
     canManageOrder &&
     result.route === "needs_info" &&
     order.status === "clarification_ready";
   const waitingForCustomer = order.status === "awaiting_customer";
-  const showFloorReplyPresets =
-    waitingForCustomer &&
-    /ПРОТЕК/iu.test(order.company) &&
-    /краск\p{L}*\s+для\s+пол\p{L}*|покрасить\s+пол/iu.test(
-      `${order.subject} ${order.body}`,
-    );
   const canReserve =
     canManageOrder &&
     order.status === "ready_to_send" &&
     result.route !== "needs_info" &&
+    isCommercialOffer &&
     !inventoryChanged;
-  const canSend = canManageOrder && reserved && !inventoryChanged;
+  const canSend =
+    canManageOrder &&
+    !inventoryChanged &&
+    ((reserved && isCommercialOffer) ||
+      (order.status === "ready_to_send" && isEstimate));
   const supplierPlan = result.supplierPlan ?? null;
   const comparedSupplierOffers = Array.isArray(supplierPlan?.comparedOffers)
     ? supplierPlan.comparedOffers
@@ -3018,13 +3478,15 @@ function ResultPanel({
       : canClarify
         ? {
             href: "#reply-card",
-            label: "Перейти к вопросам клиенту",
+            label: "Перейти к вопросу о цели",
           }
         : canReserve || canSend
           ? {
               href: "#reply-card",
               label: canSend
-                ? "Перейти к записи отправки"
+                ? isEstimate
+                  ? "Перейти к отправке оценки"
+                  : "Перейти к записи отправки"
                 : "Перейти к резерву товара",
             }
           : null;
@@ -3040,10 +3502,11 @@ function ResultPanel({
   const selectedManagerOption =
     result.options.find((option) => option.id === selectedOptionId) ?? null;
   const checks = positiveChecks(result);
+  const reviewerCopy = reviewerTransportCopy(events, order, result);
   const insights = [
     result.market.checked
       ? result.market.position
-      : "Ответ клиента даст точный подбор и расчёт",
+      : "Неизвестное отмечено допущениями до точного предложения",
     result.market.profitOpportunity,
     ...checks,
   ]
@@ -3267,6 +3730,16 @@ function ResultPanel({
               </p>
               <span className="option-label">Что учесть</span>
               <small>{humanizeText(option.tradeoff)}</small>
+              <small>
+                Следующий исполнитель:{" "}
+                {option.followUpActor === "customer"
+                  ? "клиент"
+                  : option.followUpActor === "supplier"
+                    ? "поставщик"
+                    : option.followUpActor === "internal"
+                      ? "команда «Колера»"
+                      : "действие не требуется"}
+              </small>
             </label>
           ))}
         </fieldset>
@@ -3437,7 +3910,11 @@ function ResultPanel({
 
       <div className="result-summary">
         <div className={`decision-poster zone-${result.zone}`}>
-          <span>{zone.name}</span>
+          <span>
+            {isEstimate && result.route === "ready"
+              ? "Предварительная оценка готова"
+              : zone.name}
+          </span>
           <strong>{humanizeText(result.zoneReason)}</strong>
           {primaryAction && (
             <a className="decision-next-link" href={primaryAction.href}>
@@ -3481,8 +3958,10 @@ function ResultPanel({
                         ? "Резерв товара подготовлен. Запишите отправку согласованного письма."
                         : "Решение подтверждено. Подготовьте резерв товара."
                     : "Выберите один вариант ниже. Агент покажет готовое письмо и последствия для клиента и завода."
-                  : result.route === "ready" && !result.research?.checked
-                    ? "Проверьте готовое письмо и подготовьте резерв товара."
+                  : isEstimate
+                    ? "Отправьте полезную предварительную оценку. Точный замер потребуется только перед резервом или производством."
+                    : result.route === "ready" && !result.research?.checked
+                      ? "Проверьте готовое письмо и подготовьте резерв товара."
                     : result.managerNote,
               )}
             </p>
@@ -3497,8 +3976,13 @@ function ResultPanel({
           </article>
           <article>
             <span>Проверка перед действием</span>
-            <strong>{humanizeText(result.review.verdict)}</strong>
-            <p>{result.review.notes.map(humanizeText).join(" · ")}</p>
+            <strong>{humanizeText(reviewerCopy.label)}</strong>
+            <p>
+              {humanizeText(reviewerCopy.detail)}
+              {reviewerCopy.state === "checked" && result.review.notes.length > 0
+                ? ` ${result.review.notes.map(humanizeText).join(" · ")}`
+                : ""}
+            </p>
           </article>
           {!result.research?.checked && (
             <article className="facts-wide">
@@ -3508,6 +3992,98 @@ function ResultPanel({
           )}
         </div>
       </div>
+
+      <section className="research-card" aria-label="Понимание задачи агентом">
+        <div className="research-confirmed">
+          <span>Цель и доказательства</span>
+          <p>{humanizeText(result.resolvedIntent.goal)}</p>
+          <strong>
+            {result.resolvedIntent.target.state === "resolved"
+              ? `Объект: ${humanizeText(result.resolvedIntent.target.label)}`
+              : `Нужно выбрать объект: ${result.resolvedIntent.target.candidates
+                  .map((candidate) => humanizeText(candidate.label))
+                  .join(" или ")}`}
+          </strong>
+          <small>
+            {result.resolvedIntent.evidence.length}{" "}
+            {countNoun(
+              result.resolvedIntent.evidence.length,
+              "основание",
+              "основания",
+              "оснований",
+            )}
+            . Известное не превращается в повторный вопрос.
+          </small>
+        </div>
+
+        {result.resolvedIntent.assumptions.length > 0 && (
+          <div className="research-links">
+            {result.resolvedIntent.assumptions.map((assumption) => (
+              <article key={assumption.id}>
+                <strong>{humanizeText(assumption.claim)}</strong>
+                <small>
+                  Уверенность {Math.round(assumption.confidence * 100)}%
+                  {assumption.range
+                    ? ` · ${formatMoney(assumption.range.min)}–${formatMoney(
+                        assumption.range.max,
+                      )} ${assumption.range.unit}`
+                    : ""}
+                  {assumption.confirmBefore === "never"
+                    ? ""
+                    : ` · подтвердить перед ${
+                        assumption.confirmBefore === "commercial_offer"
+                          ? "точным предложением"
+                          : assumption.confirmBefore === "reserve"
+                            ? "резервом"
+                            : "производством"
+                      }`}
+                </small>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {result.estimates.length > 0 && (
+          <div className="calculation-steps" aria-label="Диапазонные оценки">
+            {result.estimates.map((estimate) => (
+              <span key={`${estimate.metric}-${estimate.range.unit}`}>
+                <strong>
+                  {estimate.metric === "surface_area"
+                    ? "Площадь"
+                    : estimate.metric === "paint_quantity"
+                      ? "Количество краски"
+                      : "Бюджет"}
+                  : {formatMoney(estimate.range.min)}–
+                  {formatMoney(estimate.range.max)} {estimate.range.unit}
+                </strong>
+                <small>{humanizeText(estimate.method)}</small>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {result.supplierLeads.length > 0 && (
+          <div className="research-links">
+            {result.supplierLeads.map((lead) => (
+              <a
+                href={lead.url}
+                target="_blank"
+                rel="noreferrer"
+                key={`${lead.supplier}-${lead.url}`}
+              >
+                <strong>{humanizeText(lead.supplier)}</strong>
+                <small>
+                  {lead.observedClaims.map(humanizeText).join(" · ")}
+                </small>
+                <small>
+                  Требует подтверждения:{" "}
+                  {lead.confirmationNeeded.map(humanizeText).join(", ")}
+                </small>
+              </a>
+            ))}
+          </div>
+        )}
+      </section>
 
       {managerDecisionBlock}
 
@@ -3668,7 +4244,7 @@ function ResultPanel({
             </small>
           </div>
           <div>
-            <span>Наша цена</span>
+            <span>Учебная цена «Колера»</span>
             <strong>{formatMoney(result.product.pricePerKg)} ₽/кг</strong>
           </div>
           <div>
@@ -3768,7 +4344,7 @@ function ResultPanel({
               </article>
             </div>
             <p className="supplier-price-copy">
-              Предварительный расчёт: {formatMoney(supplierPlan.ourKg)} кг
+              Предварительный учебный расчёт: {formatMoney(supplierPlan.ourKg)} кг
               «Колера» по{" "}
               {formatMoney(supplierPlan.ourPricePerKg)} ₽/кг, «
               {humanizeText(supplierPlan.supplierName)}» —{" "}
@@ -3863,9 +4439,11 @@ function ResultPanel({
           <small className="supplier-source-note">
             В строке таблицы поставщиков от {supplierPlan.stockCheckedAt}{" "}
             указано {formatMoney(supplierPlan.supplierStockKg)} кг. Данные
-            таблицы подготовлены для показа на вебинаре. Рабочая система
-            получит их из подключённого прайса, кабинета поставщика или
-            открытой страницы.
+            таблицы и цены синтетические и подготовлены для показа на
+            вебинаре. В рабочей системе точный расчёт получает цену, остаток и
+            срок только из подтверждённого API, прайса или котировки
+            поставщика. Открытая веб-страница даёт лишь контакт для проверки и
+            не меняет точный расчёт.
           </small>
         </section>
       )}
@@ -3941,17 +4519,19 @@ function ResultPanel({
               : reserved
                 ? "Резерв товара подготовлен"
               : waitingForCustomer
-                ? "Вопросы записаны · ждём ответ клиента"
+                ? "Вопрос записан · ждём выбор клиента"
                 : order.status === "clarification_ready"
-                  ? "Вопросы готовы"
+                  ? "Нужно выбрать объект"
                 : order.status === "awaiting_approval"
                 ? "Руководитель выбирает вариант"
+                : isEstimate
+                  ? "Предварительная оценка готова · резерв не открыт"
                 : order.managerDecision
                   ? "Вариант подтверждён · подготовьте резерв товара"
                   : "Ответ проверен · подготовьте резерв товара"}
           </div>
         </div>
-        {responsePrepared && (
+        {responsePrepared && isCommercialOffer && (
           <ol className="reply-steps" aria-label="Путь ответа клиенту">
             <li
               className={responsePrepared ? "is-done" : "is-current"}
@@ -3984,6 +4564,12 @@ function ResultPanel({
             </li>
           </ol>
         )}
+        {responsePrepared && isEstimate && (
+          <div className="sent-note">
+            Это диапазонная оценка с явными допущениями. Её можно отправить
+            клиенту; резерв товара откроется после подтверждения точных данных.
+          </div>
+        )}
         <strong className="reply-subject">
           {humanizeText(result.reply.subject)}
         </strong>
@@ -3996,11 +4582,11 @@ function ResultPanel({
               disabled={clarifying}
             >
               {clarifying
-                ? "Записываем вопросы…"
-                : "Записать отправку вопросов"}
+                ? "Записываем вопрос…"
+                : "Записать отправку вопроса"}
             </button>
             <small>
-              Кнопка добавляет вопросы в общий журнал. В рабочей системе письмо
+              Кнопка добавляет вопрос в общий журнал. В рабочей системе письмо
               уйдёт через почту компании.
             </small>
           </div>
@@ -4023,7 +4609,9 @@ function ResultPanel({
             <button type="button" onClick={onSend} disabled={sending}>
               {sending
                 ? "Записываем отправку ответа…"
-                : "Записать отправку ответа"}
+                : isEstimate
+                  ? "Записать отправку оценки"
+                  : "Записать отправку ответа"}
             </button>
             <small>
               Кнопка добавляет письмо в общий журнал. В рабочей системе оно
@@ -4048,34 +4636,13 @@ function ResultPanel({
         >
           <div className="customer-reply-intro">
             <span>Ответ клиента</span>
-            <h3>Добавьте детали и продолжите тот же заказ</h3>
+            <h3>Выберите объект и продолжите тот же заказ</h3>
             <p>
-              Агент объединит письмо, фото и ответ, рассчитает расход и снова
-              проверит живой склад.
+              Агент переиспользует письмо, фото и найденные референсы, затем
+              рассчитает расход и снова проверит живой склад.
             </p>
           </div>
           <div className="customer-reply-editor">
-            {showFloorReplyPresets && (
-              <div className="customer-reply-presets">
-                <span>Как используют помещение?</span>
-                <div>
-                  {floorReplyPresets.map((preset) => (
-                    <button
-                      type="button"
-                      key={preset.label}
-                      aria-pressed={customerAnswer === preset.answer}
-                      onClick={() => onCustomerAnswerChange(preset.answer)}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-                <small>
-                  Текст появится ниже. Его можно дополнить перед продолжением
-                  заказа.
-                </small>
-              </div>
-            )}
             <label>
               <span className="sr-only">Текст ответа клиента</span>
               <textarea
@@ -4113,8 +4680,14 @@ function ResultPanel({
         ))}
         <small>
           {usesOpenCode(order.mode)
-            ? `Заявку обрабатывает: ${modelLabel(order.agentModel)} · проверяет: ${modelLabel(order.reviewerModel)}`
-            : "Автоматическая обработка по правилам и живому складу"}
+            ? reviewerCopy.state === "checked"
+              ? `Заявку обрабатывает: ${modelLabel(order.agentModel)} · проверяет: ${modelLabel(order.reviewerModel)}`
+              : reviewerCopy.state === "skipped"
+                ? "Заявку обрабатывает live-agent · reviewer не запускался"
+                : reviewerCopy.state === "unavailable"
+                  ? "Заявку обрабатывает live-agent · reviewer недоступен · manager path"
+                  : "Заявку обрабатывает live-agent · проверка reviewer не подтверждена"
+            : executionLabel(order.mode)}
         </small>
       </div>
     </div>
@@ -4420,62 +4993,6 @@ function LiveInventoryPanel({
                     required
                   />
                 </label>
-                {selectedSku === floorStockDemoSku && (
-                  <div className="inventory-presets">
-                    <span>После расчёта заказа ПРОТЕК нужно 620 кг</span>
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onStockChange("420");
-                          onReasonChange(
-                            "Стартовый остаток для сценария ПРОТЕК",
-                          );
-                        }}
-                      >
-                        420 кг · агент принесёт варианты
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onStockChange("700");
-                          onReasonChange(
-                            "Поступила партия для большого заказа",
-                          );
-                        }}
-                      >
-                        700 кг · агент подготовит письмо
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {selectedSku === liveStockDemoSku && (
-                  <div className="inventory-presets">
-                    <span>Для первой заявки нужно 100 кг</span>
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onStockChange("40");
-                          onReasonChange(
-                            "40 кг осталось после других заказов",
-                          );
-                        }}
-                      >
-                        40 кг · агент принесёт варианты
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onStockChange("180");
-                          onReasonChange("Поступила новая партия");
-                        }}
-                      >
-                        180 кг · агент подготовит письмо
-                      </button>
-                    </div>
-                  </div>
-                )}
                 <label className="inventory-reason">
                   <span>Что произошло</span>
                   <input
@@ -4559,25 +5076,6 @@ function LiveInventoryPanel({
                       ? "Пересчитываем заказ…"
                       : "Обновить партнёра"}
                   </button>
-                  <div className="market-presets">
-                    <span>
-                      Для заказа ПРОТЕК партнёр добавляет 200 кг
-                    </span>
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => onMarketStockChange("150")}
-                      >
-                        150 кг · объёма мало
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onMarketStockChange("260")}
-                      >
-                        260 кг · объёма хватает
-                      </button>
-                    </div>
-                  </div>
                 </form>
                 {market.length === 0 && (
                   <div className="market-loading" role="status">
@@ -4673,13 +5171,14 @@ function LedgerTable({
       if (["vision", "vision-result"].includes(stage)) {
         return "Модель для фотографий";
       }
-      if (stage === "review-result") return "Модель проверки";
+       if (stage === "review-result") return "Модель проверки";
+       if (stage === "review-fallback") return "Модель проверки недоступна";
+       if (stage === "review-skipped") return "Проверка не запускалась";
       if (stage === "review") {
         return /модел/iu.test(title)
           ? "Модель проверки"
           : "Программа проверки";
       }
-      if (stage === "review-fallback") return "Программа проверки";
       if (
         [
           "received",
@@ -4719,9 +5218,10 @@ function LedgerTable({
         return "Осмотр фотографии";
       }
       if (stage === "vision-fallback") return "Вопросы по фотографии";
-      if (["review", "review-result", "review-fallback"].includes(stage)) {
-        return "Проверка ответа";
-      }
+       if (stage === "review") return "Проверка ответа";
+       if (stage === "review-result") return "Проверка ответа завершена";
+       if (stage === "review-fallback") return "Проверка недоступна · manager path";
+       if (stage === "review-skipped") return "Проверка не запускалась";
       if (["research-fallback", "primary-retry"].includes(stage)) {
         return "Продолжение работы";
       }
@@ -4769,7 +5269,7 @@ function LedgerTable({
           item.route === "manager"
             ? "Решает руководитель"
             : item.route === "needs_info"
-              ? "Нужны детали"
+              ? "Нужно выбрать объект"
               : "Готов ответить",
       })),
       ...events.map((item) => ({
@@ -5058,7 +5558,8 @@ function Modal({
         {name === "catalog" && (
           <>
             <p className="modal-lead">
-              Агент читает живые остатки перед каждым новым расчётом.
+              Здесь показаны синтетические учебные цены и живые остатки
+              демонстрационного стенда. Агент читает остатки перед каждым новым расчётом.
               Администратор может изменить их во время показа. Страница заказа
               сохраняет краску, остаток и время расчёта, поэтому всегда видно,
               какой остаток учёл агент и почему выбрал этот шаг.
@@ -5199,9 +5700,9 @@ function Modal({
             <p className="modal-lead">
               GPT-5.6 Sol подготовила правила и критерии проверки. Она
               участвует только в создании и улучшении инструкций. DeepSeek V4
-              Flash обрабатывает ежедневные заказы, DeepSeek V4 Pro отдельно
-              проверяет ответы. Автоматический режим применяет те же правила к
-              живому складу.
+              Flash через официальный DeepSeek API выполняет ежедневные заказы.
+              DeepSeek V4 Pro отдельным запуском проверяет результат. Записанный
+              режим доступен только для явно выбранного демонстрационного примера.
             </p>
             <ol className="plain-rules">
               <li>
@@ -5278,7 +5779,11 @@ function Modal({
               </article>
               <article>
                 <span>Состояние заявки</span>
-                <strong>{statusLabel(order.status)}</strong>
+                <strong>
+                  {["queued", "processing", "error"].includes(order.status)
+                    ? orderProcessingCopy(orderProcessingState(order)).badge
+                    : statusLabel(order.status)}
+                </strong>
               </article>
               <article>
                 <span>Кто выполнил шаг</span>
@@ -5287,9 +5792,7 @@ function Modal({
               <article>
                 <span>Как обработано</span>
                 <strong>
-                  {usesOpenCode(order.mode)
-                    ? "Подключённая модель для заказов"
-                    : "Автоматическая обработка по правилам и живому складу"}
+                  {executionLabel(order.mode)}
                 </strong>
               </article>
             </div>
@@ -5316,8 +5819,8 @@ function Modal({
                   <strong>{attachmentFromOrder(order)?.name}</strong>
                   <span>
                     {usesOpenCode(order.mode)
-                      ? "Модель для фото описала видимые детали. Агент использует это наблюдение и просит подтвердить материал и размеры."
-                      : "Фото сохранено на странице заказа. Агент просит подтвердить материал и размеры."}
+                      ? "Модель для фото описала видимые детали. Агент использует наблюдение, диапазоны и явно отмеченные допущения."
+                      : "Фото и наблюдение сохранены в записанном прогоне."}
                   </span>
                 </figcaption>
               </figure>
@@ -5325,13 +5828,21 @@ function Modal({
             {order.result && (
               <div className="agent-facts">
                 <article>
-                  <span>Что понял агент</span>
+                  <span>
+                    {["queued", "processing", "error"].includes(order.status)
+                      ? "Предыдущее понимание · история"
+                      : "Что понял агент"}
+                  </span>
                   {order.result.understood.map((item) => (
                     <strong key={item}>{humanizeText(item)}</strong>
                   ))}
                 </article>
                 <article>
-                  <span>Что делать дальше</span>
+                  <span>
+                    {["queued", "processing", "error"].includes(order.status)
+                      ? "Предыдущее решение · история"
+                      : "Что делать дальше"}
+                  </span>
                   <strong>{zoneCopy[order.result.zone].name}</strong>
                   <p>{humanizeText(order.result.zoneReason)}</p>
                 </article>

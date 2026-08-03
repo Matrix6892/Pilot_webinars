@@ -1,0 +1,44 @@
+{
+  "corpus": {
+    "id": "koler-synthetic-smoke",
+    "version": "1"
+  },
+  "cases": [
+    {
+      "id": "synthetic-green-001",
+      "family": "green",
+      "variant": "baseline",
+      "repeat": 1,
+      "metrics": {
+        "resultValid": true,
+        "routeCorrect": true,
+        "calculationCorrect": true,
+        "noRepeatedQuestions": true,
+        "noUnsupportedPromises": true,
+        "groundedSources": null,
+        "reviewerBlockedUnsafe": null,
+        "fallbackCorrect": null
+      },
+      "latencyMs": 1200,
+      "criticalFailures": []
+    },
+    {
+      "id": "synthetic-yellow-001",
+      "family": "yellow",
+      "variant": "baseline",
+      "repeat": 1,
+      "metrics": {
+        "resultValid": true,
+        "routeCorrect": true,
+        "calculationCorrect": null,
+        "noRepeatedQuestions": true,
+        "noUnsupportedPromises": true,
+        "groundedSources": null,
+        "reviewerBlockedUnsafe": null,
+        "fallbackCorrect": null
+      },
+      "latencyMs": 900,
+      "criticalFailures": []
+    }
+  ]
+}
