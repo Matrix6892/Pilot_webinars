@@ -74,7 +74,7 @@ test("uses the official DeepSeek Flash API for primary and reviewer", async () =
   assert.equal(provider.api, "https://api.deepseek.com/v1");
   assert.deepEqual(provider.env, ["DEEPSEEK_API_KEY"]);
   assert.ok(provider.models["deepseek-v4-flash"]);
-  assert.equal(provider.models["deepseek-v4-flash"].limit.output, 16_384);
+  assert.equal(provider.models["deepseek-v4-flash"].limit.output, 65_536);
   assert.deepEqual(catalog.options[0].roles, ["primary", "reviewer"]);
   assert.doesNotMatch(JSON.stringify(provider), /sk-[a-z0-9]/iu);
 });

@@ -19,7 +19,7 @@
           },
           "limit": {
             "context": 204800,
-            "output": 16384
+            "output": 65536
           },
           "modalities": {
             "input": ["text"],
