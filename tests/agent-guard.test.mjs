@@ -4165,6 +4165,23 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     [],
   );
 
+  const sharedIntroColorAdvice = structuredClone(result);
+  sharedIntroColorAdvice.reply.body =
+    "По забору и Кремлю отвечаю отдельно. Цвет: рекомендую коричневый из палитры.";
+  assert.deepEqual(compoundReplyCoverageGaps(job, sharedIntroColorAdvice), [
+    "какой цвет выбрать лучше",
+  ]);
+
+  const approvedAppearanceAdvice = structuredClone(result);
+  approvedAppearanceAdvice.reply.body =
+    "Цвет для забора: рекомендую коричневый. " +
+    "По Кремлю: его облик утверждён исторически — красный кирпич, " +
+    "поэтому перекраска в другой цвет не согласуется.";
+  assert.deepEqual(
+    compoundReplyCoverageGaps(job, approvedAppearanceAdvice),
+    [],
+  );
+
   const headedColorAdvice = structuredClone(result);
   headedColorAdvice.reply.body =
     "Цвет для дачного забора. Советую коричневый из подтверждённой палитры. " +
