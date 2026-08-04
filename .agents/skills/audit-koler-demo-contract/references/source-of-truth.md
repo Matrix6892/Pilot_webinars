@@ -21,11 +21,10 @@ runtime surfaces расходятся между собой, это миниму
 <claim_catalog>
 <claim name="model_roles">
 - MiMo V2.5 наблюдает только фотографию.
-- Официальный DeepSeek API `deepseek/deepseek-v4-flash`/max — default
-  исполнитель заказа; `opencode-go/deepseek-v4-pro`/max остаётся baseline и
-  отдельным reviewer. Датированный номер Flash не утверждается без
+- Официальный DeepSeek API `deepseek/deepseek-v4-flash`/max — исполнитель
+  заказа и отдельный reviewer. Датированный номер Flash не утверждается без
   доказательства provider catalog/runtime.
-- DeepSeek V4 Pro всегда выполняет отдельную reviewer-проверку live-цепочки.
+- Reviewer всегда выполняется отдельным вторым Flash/max-вызовом без tools.
 - GPT-5.6 Sol подготовила инструкции и запускается вручную для их новой
   редакции, но не обрабатывает повседневный заказ.
 </claim>

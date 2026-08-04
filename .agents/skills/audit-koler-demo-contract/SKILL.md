@@ -66,7 +66,7 @@ Markdown — формат по умолчанию. Для компактного
 </validation>
 
 <success_criteria>
-- Отчёт охватывает роли MiMo, Flash, Pro и Sol.
+- Отчёт охватывает MiMo, отдельные Flash primary/reviewer и Sol.
 - `AgentResult` сопоставлен между type, prompt, guard, bridge, API, UI и ledger.
 - Проверены search/open-page contract, timeout, offline fallback и processing
   lease.

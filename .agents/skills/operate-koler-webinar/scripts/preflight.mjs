@@ -233,15 +233,17 @@ async function staticChecks(checks) {
   const deepseekProvider = providerConfig?.provider?.deepseek;
   const rolesPresent =
     flashPresent &&
-    modelIds.has("opencode-go/deepseek-v4-pro") &&
+    modelIds.size === 1 &&
     models.default === "deepseek/deepseek-v4-flash" &&
     defaultModel?.variant === "max" &&
+    defaultModel?.roles?.includes("primary") &&
+    defaultModel?.roles?.includes("reviewer") &&
     deepseekProvider?.api === "https://api.deepseek.com/v1" &&
     deepseekProvider?.env?.includes("DEEPSEEK_API_KEY") &&
     deepseekProvider?.models?.["deepseek-v4-flash"] &&
     bridgeSource.includes('const visionModel = "opencode-go/mimo-v2.5"') &&
     bridgeSource.includes(
-      'const strongReviewer = "opencode-go/deepseek-v4-pro"',
+      'const strongReviewer = "deepseek/deepseek-v4-flash"',
     ) &&
     /GPT-5\.6 Sol[\s\S]{0,180}(?:инструкц|не запуска)/u.test(readme);
   add(
@@ -249,7 +251,7 @@ async function staticChecks(checks) {
     rolesPresent ? "PASS" : "FAIL",
     "Роли моделей",
     rolesPresent
-      ? "Direct Flash-default, отдельный Pro-reviewer, MiMo и подготовительная роль Sol подтверждены локально"
+      ? "Отдельные direct Flash primary/reviewer, MiMo и подготовительная роль Sol подтверждены локально"
       : "Не подтверждены все канонические роли моделей",
   );
 

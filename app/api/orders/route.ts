@@ -745,7 +745,7 @@ export async function GET(request: Request) {
       provider: "DeepSeek API",
       agent: "Колер",
       runner: "OpenCode",
-      reviewerProvider: "OpenCode Go",
+      reviewerProvider: "DeepSeek API",
       models: modelCatalog.options.filter((model) =>
         model.roles.includes("primary"),
       ),

@@ -108,9 +108,9 @@ requirePattern(
 );
 requirePattern(
   files.bridge,
-  /const strongReviewer = "opencode-go\/deepseek-v4-pro"/u,
+  /const strongReviewer = "deepseek\/deepseek-v4-flash"/u,
   "reviewer-role",
-  "DeepSeek V4 Pro remains the separate reviewer",
+  "DeepSeek V4 Flash remains a separate reviewer run",
   paths.bridge,
 );
 requirePattern(
@@ -199,15 +199,17 @@ try {
   const primary = catalog.options?.find((item) => item.id === catalog.default);
   if (
     hasFlash &&
-    ids.includes("opencode-go/deepseek-v4-pro") &&
+    ids.length === 1 &&
     catalog.default === "deepseek/deepseek-v4-flash" &&
     primary?.variant === "max" &&
+    primary?.roles?.includes("primary") &&
+    primary?.roles?.includes("reviewer") &&
     provider?.api === "https://api.deepseek.com/v1" &&
     provider?.env?.includes("DEEPSEEK_API_KEY") &&
     provider?.models?.["deepseek-v4-flash"] &&
     !ids.some((id) => /gpt-5\.6|sol/iu.test(id))
   ) {
-    record("PASS", "model-catalog", "Runtime uses direct DeepSeek Flash primary, separate Pro reviewer, and excludes Sol", paths.models);
+    record("PASS", "model-catalog", "Runtime uses separate direct DeepSeek Flash primary and reviewer runs, and excludes Sol", paths.models);
   } else {
     record("FAIL", "model-catalog", "Runtime model catalog role boundary changed", paths.models);
   }

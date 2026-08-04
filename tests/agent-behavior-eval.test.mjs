@@ -493,7 +493,7 @@ function guardedResultFor(item, variant) {
   return applyReviewerResult(
     normalized,
     review,
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
     demoData,
     job,
   );
@@ -1099,7 +1099,7 @@ test("synthetic quality and incomplete live runs never certify webinar readiness
         status: "completed",
       }],
       reviewerAttempts: [{
-        model: "opencode-go/deepseek-v4-pro",
+        model: "deepseek/deepseek-v4-flash",
         variant: "max",
         status: "completed",
         validationStatus: "valid",
@@ -1134,7 +1134,7 @@ test("synthetic quality and incomplete live runs never certify webinar readiness
     repeatCount: 3,
     model: "deepseek/deepseek-v4-flash",
     variant: "max",
-    reviewerModel: "opencode-go/deepseek-v4-pro",
+    reviewerModel: "deepseek/deepseek-v4-flash",
     reviewerVariant: "max",
     modelPolicyPassed: true,
     hardInvariantsPassed: true,

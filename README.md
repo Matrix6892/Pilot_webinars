@@ -254,7 +254,7 @@ OpenCode содержит до 100 карточек.
 - Выбранный исполнитель разбирает заявку, берёт данные из разрешённых
   источников и готовит следующий ход по открытой инструкции, используя
   короткое наблюдение по фото.
-- DeepSeek V4 Pro отдельным запуском проверяет обещания, особые условия и
+- DeepSeek V4 Flash отдельным вторым запуском проверяет обещания, особые условия и
   границы полномочий.
 - GPT-5.6 Sol подготовила инструкции и критерии. Рабочая цепочка заказов её
   не запускает.
@@ -266,9 +266,9 @@ OpenCode содержит до 100 карточек.
 `deepseek/deepseek-v4-flash`, variant `max`. Проектный `opencode.json`
 направляет этот provider на `https://api.deepseek.com/v1`; OpenCode остаётся
 локальным tool-runner. После primary он отдельно запускает reviewer
-`opencode-go/deepseek-v4-pro` с variant `max`. API публикует rolling id Flash,
-но не доказывает датированный build `0731`. MiMo запускается с
-id `opencode-go/mimo-v2.5` без variant.
+`deepseek/deepseek-v4-flash` с variant `max`. Runtime и heartbeat фиксируют
+rolling id `deepseek-v4-flash`; MiMo запускается с id
+`opencode-go/mimo-v2.5` без variant.
 Свободная заявка всегда идёт в live-очередь и не
 подменяется программным расчётом при потере связи. Записанный прогон доступен
 только явной кнопкой у поддержанного демонстрационного примера и помечается в
@@ -309,7 +309,7 @@ direct URL и JSON не завершён, один раз запускается
 поставщика, подтверждение, подготовка резерва и запись отправки ждут свежего
 расчёта. Встроенный пульт запускает его автоматически; изменение из другого
 окна оставляет явную кнопку. Карточка показывает выбранного исполнителя и
-отдельный проверочный запуск DeepSeek V4 Pro; результат использует открытую
+отдельный проверочный запуск DeepSeek V4 Flash; результат использует открытую
 инструкцию и общий сохранённый снимок.
 Когда OpenCode отключён, карточка остаётся в очереди и показывает состояние
 восстановления. GET не запускает скрытый fallback: восстановите live bridge или
@@ -384,7 +384,7 @@ OPENCODE_ENABLE_EXA=1
 5. Запустите bridge. Убедитесь, что верхняя строка показывает подключённого
    агента, primary использует официальный API
    `deepseek/deepseek-v4-flash` с variant `max`, а отдельный reviewer —
-   `opencode-go/deepseek-v4-pro`/max.
+   `deepseek/deepseek-v4-flash`/max.
 6. Отправьте фото стены с человеком и текст «Покрасить стену как Красную
    комнату из Twin Peaks». Проверьте `ready/yellow/estimate`, диапазоны площади
    и килограммов, открытый URL референса, отсутствие RAL и вопросов.
@@ -420,7 +420,7 @@ OPENCODE_ENABLE_EXA=1
 gate, build, `check-change-contract`, `check-eval-readiness`, contract audit,
 local-only preflight и main-scenario check. Затем нужен отдельный live gate:
 четыре webinar families по три последовательных Flash/max запуска с отдельным
-Pro/max reviewer, всего 12
+Flash/max reviewer, всего 12
 записей. Каждый запуск должен иметь отдельный hard pass, unique `callId`,
 latency не более 700 секунд, шесть quality dimensions JTBD не ниже 90%,
 attribution `raw-primary` → `guarded` → `reviewer` → `final` и отсутствие

@@ -949,7 +949,7 @@ test("gives every model step a specific Russian presentation", () => {
     [
       "review-result",
       "Результат проверки",
-      "Проверка DeepSeek V4 Pro завершена",
+      "Проверка ответа завершена",
       "Модель проверки",
       "Агент отдела продаж",
       "Система завершила шаг",

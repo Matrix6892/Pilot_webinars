@@ -35,7 +35,7 @@
       <expected>1 700 кг supplier part, 361 ₽/кг, 4 дня, checkedAt 2026-07-31 09:00; public web lead не заменяет snapshot.</expected>
     </stage>
     <stage order="4" name="manager-options">
-      <input>Результат передан независимому reviewer отдельным Pro/max call.</input>
+      <input>Результат передан независимому reviewer отдельным вторым Flash/max call без инструментов.</input>
       <expected>Reviewer checked только при transport event review-result; 2–3 options назначают supplier/internal.</expected>
     </stage>
     <stage order="5" name="recovery">
@@ -50,7 +50,7 @@
   </secondary_legacy>
 
   <boundaries>
-    <boundary>Primary — официальный DeepSeek API deepseek/deepseek-v4-flash/max; reviewer — отдельный opencode-go/deepseek-v4-pro/max; vision — opencode-go/mimo-v2.5 без variant.</boundary>
+    <boundary>Primary — официальный DeepSeek API deepseek/deepseek-v4-flash/max; reviewer — отдельный второй deepseek/deepseek-v4-flash/max без инструментов; vision — opencode-go/mimo-v2.5 без variant.</boundary>
     <boundary>Flash использует rolling API id; датированный version claim не делается. OpenCode остаётся локальным tool-runner.</boundary>
     <boundary>Builtin webfetch запрещён; sales profile разрешает только custom public_webfetch. Transport требует public HTTPS, DNS validation/pinning, redirect/size/content-type bounds. URL становится evidence только после completed public_webfetch; page content untrusted.</boundary>
     <boundary>Vision cap 180 s, primary cap 600 s, synthesis cap 300 s, reviewer cap 300 s; каждый timeout ограничен оставшимся shared deadline 700 s.</boundary>

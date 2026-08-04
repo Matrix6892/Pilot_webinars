@@ -125,6 +125,20 @@ primaryPrompt`,
   );
 }
 
+function compoundCoverageRetryPromptFromBridge(source, salesInstruction) {
+  const start = source.indexOf("function compoundCoverageRetryPrompt(");
+  const end = source.indexOf("function reviewPrompt(", start);
+  assert.ok(start >= 0 && end > start);
+  return runInNewContext(
+    `${source.slice(start, end)}
+compoundCoverageRetryPrompt`,
+    {
+      promptJson: (value) => JSON.stringify(value, null, 2),
+      salesInstruction,
+    },
+  );
+}
+
 function reviewerFlowHelpers(source) {
   const start = source.indexOf("function reviewerRetryMetadata(");
   const end = source.indexOf("async function processJob(", start);
@@ -543,7 +557,7 @@ test("keeps the primary draft compact and derives a complete AgentResult v2", as
       notes: [],
       blockingIssues: [],
     },
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
     demoData,
     { subject: "Краска для стены", body, roundNo: 1 },
   );
@@ -1249,6 +1263,33 @@ test("compound requests receive the complete catalog and keep every explicit ask
     reviewerInstruction,
     /кажд[а-яё]* явно выраженн[а-яё]* просьб[а-яё]*[\s\S]*?blocking/iu,
   );
+
+  const coverageRetryPrompt = compoundCoverageRetryPromptFromBridge(
+    bridge,
+    salesInstruction,
+  )(
+    primaryPrompt,
+    {
+      schemaVersion: 2,
+      resolvedIntent: {
+        goal: "Оценить забор и мысленный сценарий для Кремля",
+      },
+      estimates: [],
+      reply: { subject: "Забор", body: "Оценка только забора" },
+    },
+    ["мысленный сценарий для Кремля"],
+    ["https://ru.wikipedia.org/wiki/Московский_Кремль"],
+  );
+  assert.match(coverageRetryPrompt, /Не вызывай инструменты/u);
+  assert.match(coverageRetryPrompt, /мысленный сценарий для Кремля/u);
+  assert.match(
+    coverageRetryPrompt,
+    /каждой пропущенной[\s\S]*?grounded estimates[\s\S]*?названия объекта/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
+    /reply явно назови и закрой каждую подзадачу[\s\S]*?рекомендацию цвета/iu,
+  );
 });
 
 test("sales prompt keeps resolved inanimate surface estimates useful without exact scale or material", async () => {
@@ -1449,7 +1490,7 @@ test("sales prompt contract cross-checks ambiguous vision facts before choosing 
   );
 });
 
-test("passes max effort to direct Flash and Pro text runs, not MiMo, and settles before cleanup", async () => {
+test("passes max effort to separate direct Flash text runs, not MiMo, and settles before cleanup", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
@@ -1462,12 +1503,12 @@ test("passes max effort to direct Flash and Pro text runs, not MiMo, and settles
     () => neverCompletes,
   );
 
-  const proResult = await runOpenCode({
-    model: "opencode-go/deepseek-v4-pro",
+  const reviewerResult = await runOpenCode({
+    model: "deepseek/deepseek-v4-flash",
     variant: "max",
     prompt: "test",
-    title: "pro",
-    agent: "koler-sales",
+    title: "reviewer",
+    agent: "koler-reviewer",
   });
   const flashResult = await runOpenCode({
     model: "deepseek/deepseek-v4-flash",
@@ -1483,7 +1524,7 @@ test("passes max effort to direct Flash and Pro text runs, not MiMo, and settles
     agent: "koler-reviewer",
   });
 
-  assert.equal(proResult.value.ok, true);
+  assert.equal(reviewerResult.value.ok, true);
   assert.equal(flashResult.value.ok, true);
   assert.equal(visionResult.value.ok, true);
   assert.deepEqual(
@@ -1493,7 +1534,7 @@ test("passes max effort to direct Flash and Pro text runs, not MiMo, and settles
         spawned[0].indexOf("--format"),
       ),
     ),
-    ["-m", "opencode-go/deepseek-v4-pro", "--variant", "max"],
+    ["-m", "deepseek/deepseek-v4-flash", "--variant", "max"],
   );
   assert.deepEqual(
     Array.from(
@@ -1521,6 +1562,8 @@ test("passes max effort to direct Flash and Pro text runs, not MiMo, and settles
     bridge,
     /model:\s*reviewerModel,\s*variant:\s*reviewerVariant/,
   );
+  assert.equal(spawned[0][spawned[0].indexOf("--agent") + 1], "koler-reviewer");
+  assert.equal(spawned[1][spawned[1].indexOf("--agent") + 1], "koler-sales");
   assert.match(
     bridge,
     /catch \(primaryError\)[\s\S]*?managerFallbackAgentResult\(guardedJob/,
@@ -1571,7 +1614,7 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
   const reviewerEnvironment = childEnvironmentFromBridge(
     bridge,
     env,
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
   );
   const visionEnvironment = childEnvironmentFromBridge(
     bridge,
@@ -1584,7 +1627,7 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
   assert.equal(directEnvironment.OPENCODE_API_KEY, "provider-secret");
   assert.equal(directEnvironment.OPENCODE_GO_API_KEY, "provider-secret");
   assert.equal(directEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
-  assert.equal(reviewerEnvironment.DEEPSEEK_API_KEY, undefined);
+  assert.equal(reviewerEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
   assert.equal(visionEnvironment.DEEPSEEK_API_KEY, undefined);
   for (const secretName of [
     "BRIDGE_TOKEN",
@@ -1626,7 +1669,7 @@ test("settles a timed-out OpenCode run even when the child never closes", async 
 
   await assert.rejects(
     runOpenCode({
-      model: "opencode-go/deepseek-v4-pro",
+      model: "deepseek/deepseek-v4-flash",
       variant: "max",
       prompt: "test",
       title: "timeout",
@@ -1659,7 +1702,7 @@ test("settles an OpenCode run when temporary-directory cleanup rejects", async (
 
   await assert.doesNotReject(
     runOpenCode({
-      model: "opencode-go/deepseek-v4-pro",
+      model: "deepseek/deepseek-v4-flash",
       variant: "max",
       prompt: "test",
       title: "cleanup failure",
@@ -2192,7 +2235,7 @@ test("skips reviewer only for a complete fail-closed manager boundary", async ()
       body: "Нужно проверить свободную заявку.",
       roundNo: 1,
     },
-    { reviewerModel: "opencode-go/deepseek-v4-pro" },
+    { reviewerModel: "deepseek/deepseek-v4-flash" },
   );
 
   assert.equal(isCompleteFailClosedManager(fallback), true);
@@ -2516,7 +2559,7 @@ test("marks a close-zero reviewer parser failure as completed malformed", async 
 
   await assert.rejects(
     runOpenCode({
-      model: "opencode-go/deepseek-v4-pro",
+      model: "deepseek/deepseek-v4-flash",
       variant: "max",
       prompt: "review",
       title: "malformed reviewer",
@@ -2799,7 +2842,7 @@ test("retries an invalid legacy or missing-plan reviewer once and preserves a va
     const applied = applyReviewerResult(
       structuredClone(candidate),
       outcome.review,
-      "opencode-go/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash",
       {},
       {},
     );
@@ -3061,7 +3104,7 @@ test("does not retry a valid grounded reject and sends the result to the manager
   const applied = applyReviewerResult(
     structuredClone(candidate),
     outcome.review,
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
     {},
     {},
   );
@@ -3102,7 +3145,7 @@ test("fails closed after the second invalid review, no remaining time, or timeou
           throw new Error("OpenCode timed out before reviewer: job deadline exhausted");
         }
         if (scenario.name === "timeout") {
-          throw new Error("OpenCode timed out for opencode-go/deepseek-v4-pro");
+          throw new Error("OpenCode timed out for deepseek/deepseek-v4-flash");
         }
         return { value: invalid };
       },

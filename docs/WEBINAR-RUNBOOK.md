@@ -39,7 +39,7 @@
 1. Убедись, что на странице показана связь с bridge: primary — официальный
    DeepSeek V4 Flash API с variant `max`, exact id
    `deepseek/deepseek-v4-flash`; reviewer — отдельный
-   `opencode-go/deepseek-v4-pro`/max.
+   `deepseek/deepseek-v4-flash`/max.
 2. Установи для КР-001 собственный остаток 300 кг. Проверь учебное предложение
    «ПромКолор Опт»: 2 000 кг по 361 ₽/кг, срок 4 дня.
 3. Отправь синтетическое фото стены с человеком и текст «Покрасить стену как
@@ -84,7 +84,7 @@
 Веб-форма → API заказа → D1 и R2 → защищённая очередь → OpenCode
           → MiMo V2.5 при наличии фото
           → DeepSeek V4 Flash · официальный API · max
-          → отдельный DeepSeek V4 Pro · max
+          → отдельный второй DeepSeek V4 Flash · max
           → программная сверка фактов
           → D1 → страница заказа и CSV → Google Таблицы
 ```
@@ -117,11 +117,11 @@ vision-наблюдение переиспользуется.
   DeepSeek API с variant `max` ведёт повседневную обработку заказа:
   разбирает свободную заявку, сам выбирает открытые источники и готовит
   оценку, единственный допустимый вопрос либо варианты.
-- **DeepSeek V4 Pro** с variant `max` независимым запуском проверяет готовое
+- **DeepSeek V4 Flash** с variant `max` независимым вторым запуском проверяет готовое
   решение: факты, числа, источники, обещания клиенту и полномочия агента.
-- Официальный API публикует rolling id `deepseek-v4-flash`; датированный build
-  `0731` этим каталогом не подтверждён. OpenCode здесь только запускает профиль
-  и инструменты, а inference primary идёт в `api.deepseek.com`.
+- Runtime и heartbeat публикуют rolling id `deepseek-v4-flash`. OpenCode здесь
+  только запускает профиль и инструменты, а inference primary идёт в
+  `api.deepseek.com`.
 - **GPT-5.6 Sol** один раз подготовила подробные инструкции и критерии
   проверки. Sol запускают вручную только для новой редакции инструкции.
 
@@ -193,7 +193,7 @@ key или admin, полный ledger — admin-only. D1 остаётся ист
 NO-GO остаётся до зелёных `lint`, `typecheck`, полного test gate, build,
 contract audit, read-only preflight и main-scenario check. Финальный live gate —
 12 запусков: четыре webinar families × три последовательных Flash/max запуска
-с отдельным Pro/max reviewer.
+с отдельным Flash/max reviewer.
 Каждый run должен иметь отдельный hard pass, JTBD не ниже 90%, unique `callId`,
 latency не выше 700 секунд и raw/guard/reviewer/final attribution. Recorded
 пример не заменяет live gate.

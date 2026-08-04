@@ -6,8 +6,8 @@
 | Роль | Модель/компонент | Разрешено | Не разрешено |
 |---|---|---|---|
 | Vision observation | MiMo V2.5 | кратко описать непосредственно видимое и неопределённости | выбирать краску, материал, площадь, расход, цену или срок |
-| Primary sales | официальный DeepSeek API `deepseek/deepseek-v4-flash`/max по умолчанию; `opencode-go/deepseek-v4-pro`/max — baseline/rollback | разобрать заявку и вернуть draft по заданному JSON-контракту | обходить deterministic guard, использовать builtin webfetch или неоткрытые sources |
-| Independent review | `opencode-go/deepseek-v4-pro`/max отдельным call | проверить draft, источники, числа и полномочия | молча исправлять unsafe promise и одобрять blocking issue |
+| Primary sales | официальный DeepSeek API `deepseek/deepseek-v4-flash`/max | разобрать заявку и вернуть draft по заданному JSON-контракту | обходить deterministic guard, использовать builtin webfetch или неоткрытые sources |
+| Independent review | `deepseek/deepseek-v4-flash`/max отдельным вторым call без tools | проверить неизменяемый draft, источники, числа и полномочия | молча исправлять unsafe promise и одобрять blocking issue |
 | Program guard | код «Колера» | нормализовать, пересчитать и fail closed | доверять model output как ground truth |
 | Rule improvement | GPT-5.6 Sol вручную вне order runtime | анализировать выбранные наблюдаемые результаты и предлагать правила | обрабатывать рабочие заявки или становиться скрытым runtime stage |
 </roles>

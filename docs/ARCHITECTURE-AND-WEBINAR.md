@@ -111,7 +111,7 @@ flowchart LR
     INPUT["Свободное письмо + фото"] --> VISION["MiMo V2.5<br/>структурированное наблюдение"]
     VISION --> PRIMARY["DeepSeek V4 Flash · API DeepSeek · max<br/>web discovery + direct fetch"]
     PRIMARY --> GUARD["Program guard<br/>контракт, SKU, арифметика, snapshots, URLs"]
-    GUARD -->|"валидный черновик"| REVIEW["DeepSeek V4 Pro · max<br/>независимая проверка"]
+    GUARD -->|"валидный черновик"| REVIEW["DeepSeek V4 Flash · max<br/>независимый второй запуск"]
     GUARD -->|"fail-closed"| RESULT["AgentResult v2"]
     REVIEW --> RESULT
     RESULT --> UI["Карточка, история и CSV"]
@@ -121,9 +121,8 @@ flowchart LR
   `deepseek/deepseek-v4-flash`, variant `max`. Проектный `opencode.json`
   использует `https://api.deepseek.com/v1`; OpenCode выполняет только локальную
   orchestration/tool-loop роль. Output cap primary — 16 384 tokens.
-- API подтверждает rolling alias `deepseek-v4-flash`, но не датированный build
-  `0731`.
-- Reviewer: отдельный `opencode-go/deepseek-v4-pro`, variant `max`.
+- Runtime и heartbeat подтверждают rolling alias `deepseek-v4-flash`.
+- Reviewer: отдельный второй `deepseek/deepseek-v4-flash`, variant `max`.
 - Vision: `opencode-go/mimo-v2.5`, без variant.
 - GPT-5.6 Sol остаётся вне runtime заказов.
 - UI, API и bridge читают `data/models.json`.
@@ -339,7 +338,7 @@ node .agents/skills/manage-koler-changes/scripts/check-change-contract.mjs
 
 Live eval — отдельный платный шаг. Для финального webinar gate четыре главных
 webinar families должны пройти по три последовательных Flash/max запуска с
-отдельным Pro/max reviewer, всего 12 записей. Каждый run обязан пройти hard
+отдельным Flash/max reviewer, всего 12 записей. Каждый run обязан пройти hard
 invariants отдельно (100%), а его
 JTBD-score — быть не ниже 90%. `callId` уникален для каждого run; artifact
 сохраняет `raw-primary`, `guarded`, `reviewer` и `final` attribution. Каждый case
@@ -412,7 +411,7 @@ vision-наблюдении и записывает final attribution. Загр�
 GO не объявляется по намерению или по зелёному recorded replay. Нужны зелёные
 `lint`, `typecheck`, полный test gate, build, read-only contract audit,
 read-only preflight и main-scenario check. Затем нужны все 12 live runs: четыре
-family × три последовательных запуска Flash/max с отдельным Pro/max reviewer,
+family × три последовательных запуска Flash/max с отдельным Flash/max reviewer,
 отдельным hard pass каждого,
 JTBD не ниже 90%, уникальным `callId`, attribution raw/guard/reviewer/final и
 latency не выше 700 секунд. До этого статус — NO-GO.
@@ -437,7 +436,7 @@ KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \
 1. Запустить сайт и bridge.
 2. Проверить, что UI показывает подключённого агента, default
    `deepseek/deepseek-v4-flash`/max через официальный API и отдельный reviewer
-   `opencode-go/deepseek-v4-pro`/max.
+   `deepseek/deepseek-v4-flash`/max.
 3. Отправить свободный запрос про стену с synthetic фото и косвенным
    референсом Красной комнаты.
 4. Показать `blocker=null`, диапазоны площади/кг, opened URL и отсутствие RAL.

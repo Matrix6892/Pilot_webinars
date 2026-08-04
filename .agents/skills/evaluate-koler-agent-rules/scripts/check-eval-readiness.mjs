@@ -151,7 +151,7 @@ read environment values, query production services, or modify files.`);
     "model-role-chain",
     "scripts/agent-bridge.mjs",
     [
-      /const strongReviewer\s*=\s*"opencode-go\/deepseek-v4-pro"/u,
+      /const strongReviewer\s*=\s*"deepseek\/deepseek-v4-flash"/u,
       /const visionModel\s*=\s*"opencode-go\/mimo-v2\.5"/u,
       /runPrimaryWithRetry/u,
       /applyReviewerResult/u,
@@ -163,9 +163,9 @@ read environment values, query production services, or modify files.`);
     "data/models.json",
     [
       /deepseek\/deepseek-v4-flash/u,
-      /opencode-go\/deepseek-v4-pro/u,
+      /"roles":\s*\["primary",\s*"reviewer"\]/u,
     ],
-    "Primary choices are explicit and do not depend on eval tooling.",
+    "Primary and reviewer use the explicit Flash catalog entry.",
   );
   await check(
     "runtime-model-variants",
@@ -173,9 +173,8 @@ read environment values, query production services, or modify files.`);
     [
       /"default":\s*"deepseek\/deepseek-v4-flash"/u,
       /"id":\s*"deepseek\/deepseek-v4-flash"[\s\S]{0,220}"variant":\s*"max"/u,
-      /"id":\s*"opencode-go\/deepseek-v4-pro"[\s\S]{0,180}"variant":\s*"max"/u,
     ],
-    "Direct Flash default and Pro reviewer variants are exact and explicit.",
+    "Direct Flash primary and reviewer variant is exact and explicit.",
   );
   await check(
     "direct-deepseek-provider",
@@ -289,9 +288,9 @@ read environment values, query production services, or modify files.`);
     "role-honesty-regressions",
     "tests/model-role-honesty.test.mjs",
     [
-      /uses the official DeepSeek Flash API by default and keeps Pro as reviewer fallback/u,
+      /uses the official DeepSeek Flash API for primary and reviewer/u,
+      /uses DeepSeek V4 Flash in a separate review run/u,
       /keeps sales-agent web evidence direct, bounded, and purposeful/iu,
-      /DeepSeek V4 Pro/u,
     ],
     "Model roles and source-opening contract have executable coverage.",
   );

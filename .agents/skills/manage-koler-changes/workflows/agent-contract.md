@@ -16,7 +16,7 @@
 2. Найти поле/правило во всех звеньях: TypeScript type, sales/reviewer/vision prompts, completeness check, normalizer, bridge prompt/result, agent API, order route, UI, result history, ledger и docs.
 3. Зафиксировать backward behavior для отсутствующего/лишнего/неверного поля.
 4. Обновить deterministic fallback и live guard одним контрактом.
-5. Проверить роли: MiMo только наблюдает, primary готовит заказ, Pro отдельно review, Sol вне runtime.
+5. Проверить роли: MiMo только наблюдает, Flash primary готовит заказ, Flash reviewer выполняется отдельным вызовом без инструментов, Sol вне runtime.
 6. Добавить recorded valid, malformed, contradictory и reviewer-rejected cases.
 7. Выполнить targeted и полный gate.
 </process>

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   applyReviewerResult,
+  compoundReplyCoverageGaps,
   isCompleteAgentResult,
   managerFallbackAgentResult,
   normalizeV2AgentResult,
@@ -86,7 +87,7 @@ const requestedPrimary =
 const fallbackPrimary = allowedPrimaryModels.has(requestedPrimary)
   ? requestedPrimary
   : modelCatalog.default;
-const strongReviewer = "opencode-go/deepseek-v4-pro";
+const strongReviewer = "deepseek/deepseek-v4-flash";
 const visionModel = "opencode-go/mimo-v2.5";
 const bridgeWorkerId = `bridge-${crypto.randomUUID()}`;
 const agentApiTimeoutMs = 12_000;
@@ -1568,6 +1569,7 @@ ${visionBlock}
 - Не обещай ГОСТ, GMP, ISO, СанПиН, санитарную обработку, дезинфекцию или химическую стойкость без точного подтверждения в карточке товара с документом и источником.
 - При реальном домене исследуй компанию, когда масштаб, профиль или надёжность могут изменить жёлтое или красное решение.
 - Каждый использованный внешний факт свяжи с web evidence внутри resolvedIntent; отдельный research не возвращай.
+- В составном запросе перечисли каждую подзадачу в goal и reply. Для каждого отдельного вопроса о стоимости верни свой набор estimates; начни method с названия объекта и расположи основной target первым. Если клиент просит выбрать цвет, дай конкретную рекомендацию из подтверждённой палитры и честную границу для остальных объектов.
 - Пиши активным русским языком без оправданий и риторических противопоставлений.`;
 }
 
@@ -1614,6 +1616,46 @@ ${
   направление либо честную границу знания; не продолжай поиск точности.
 - Не используй внешнее утверждение, которое нельзя связать с одной из ссылок
   выше.`;
+}
+
+function compoundCoverageRetryPrompt(
+  prompt,
+  draft,
+  coverageGaps,
+  openedSourceUrls,
+) {
+  const contextStart = prompt.indexOf("## Текущий заказ");
+  const compactContext =
+    contextStart >= 0 ? prompt.slice(contextStart) : prompt.slice(-24_000);
+  const contractStart = salesInstruction.indexOf("## Компактный JSON-draft");
+  const compactContract =
+    contractStart >= 0
+      ? salesInstruction.slice(contractStart)
+      : salesInstruction.slice(-12_000);
+  return `# Дополнение составного primary draft
+
+${compactContract}
+
+${compactContext}
+
+## Черновик, который потерял часть запроса
+
+${promptJson(draft)}
+
+## Что обязательно восстановить
+
+${promptJson(coverageGaps)}
+
+Уже открытые прямые страницы:
+${promptJson(openedSourceUrls)}
+
+- Не вызывай инструменты и не начинай новый поиск.
+- Верни заново один полный компактный primary draft, а не патч.
+- Сохрани подтверждённые evidence и assumptions. Для каждой пропущенной
+  числовой подзадачи добавь отдельные grounded estimates; начни method с
+  названия объекта. Не выдумывай точность сверх открытых фактов.
+- В reply явно назови и закрой каждую подзадачу, включая рекомендацию цвета,
+  если её просил клиент. Не задавай вопрос вместо безопасной широкой оценки.`;
 }
 
 function reviewPrompt(
@@ -2022,6 +2064,48 @@ async function processJob(job) {
         liveDemoData,
         guardedJob,
       );
+      const coverageGaps = compoundReplyCoverageGaps(guardedJob, result);
+      if (coverageGaps.length) {
+        await addEvent(
+          job,
+          "primary-retry",
+          "Агент дополняет составной ответ",
+          "Одна из частей запроса не попала в письмо; повтор использует уже собранные факты без нового поиска.",
+          "active",
+        );
+        const coverageTimeoutMs = stageTimeoutForDeadline(
+          jobStartedAtMs,
+          performance.now(),
+          openCodeTimeoutMs,
+          jobDeadlineMs,
+          terminalPublicationReserveMs,
+          openCodeTerminationGraceMs,
+        );
+        if (coverageTimeoutMs <= 0) {
+          throw new Error(
+            "OpenCode timed out before compound coverage repair: job deadline exhausted",
+          );
+        }
+        const coverageRun = await runPrimary({
+          agent: "koler-sales-local",
+          timeoutMs: coverageTimeoutMs,
+          runPrompt: compoundCoverageRetryPrompt(
+            prompt,
+            primaryRun.value,
+            coverageGaps,
+            verifiedOpenedSourceUrls,
+          ),
+        });
+        const repairedResult = normalizeV2AgentResult(
+          coverageRun.value,
+          liveDemoData,
+          guardedJob,
+        );
+        if (compoundReplyCoverageGaps(guardedJob, repairedResult).length) {
+          throw new Error("Primary draft omitted a compound request part");
+        }
+        result = repairedResult;
+      }
     } catch (primaryError) {
       if (Array.isArray(primaryError?.partialRun?.tools)) {
         attemptOpenedSourceUrls = openedSourceUrlsFromTools(

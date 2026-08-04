@@ -11,14 +11,14 @@ function sourceBetween(source, start, end) {
   return source.slice(startIndex, endIndex);
 }
 
-test("uses DeepSeek V4 Pro in its own review run", async () => {
+test("uses DeepSeek V4 Flash in a separate review run", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
   );
   assert.match(
     bridge,
-    /const strongReviewer = "opencode-go\/deepseek-v4-pro"/,
+    /const strongReviewer = "deepseek\/deepseek-v4-flash"/,
   );
   assert.doesNotMatch(bridge, /OPENCODE_REVIEWER_MODEL/u);
   const reviewerForSource = sourceBetween(
@@ -27,18 +27,18 @@ test("uses DeepSeek V4 Pro in its own review run", async () => {
     "function demoDataForJob",
   );
   const reviewerFor = runInNewContext(
-    `const strongReviewer = "opencode-go/deepseek-v4-pro";
+    `const strongReviewer = "deepseek/deepseek-v4-flash";
 ${reviewerForSource}
 reviewerFor;`,
   );
 
   assert.equal(
     reviewerFor("deepseek/deepseek-v4-flash"),
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
   );
   assert.equal(
     reviewerFor("opencode-go/deepseek-v4-pro"),
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
   );
 
   const processJob = sourceBetween(
@@ -56,7 +56,7 @@ reviewerFor;`,
   );
 });
 
-test("uses the official DeepSeek Flash API by default and keeps Pro as reviewer fallback", async () => {
+test("uses the official DeepSeek Flash API for primary and reviewer", async () => {
   const catalog = JSON.parse(
     await readFile(new URL("../data/models.json", import.meta.url), "utf8"),
   );
@@ -65,10 +65,7 @@ test("uses the official DeepSeek Flash API by default and keeps Pro as reviewer 
   ).provider.deepseek;
   const ids = catalog.options.map((model) => model.id);
 
-  assert.deepEqual(ids, [
-    "deepseek/deepseek-v4-flash",
-    "opencode-go/deepseek-v4-pro",
-  ]);
+  assert.deepEqual(ids, ["deepseek/deepseek-v4-flash"]);
   assert.equal(catalog.default, "deepseek/deepseek-v4-flash");
   assert.equal(
     catalog.options.find((model) => model.id === catalog.default).variant,
@@ -78,8 +75,7 @@ test("uses the official DeepSeek Flash API by default and keeps Pro as reviewer 
   assert.deepEqual(provider.env, ["DEEPSEEK_API_KEY"]);
   assert.ok(provider.models["deepseek-v4-flash"]);
   assert.equal(provider.models["deepseek-v4-flash"].limit.output, 16_384);
-  assert.deepEqual(catalog.options[0].roles, ["primary"]);
-  assert.deepEqual(catalog.options[1].roles, ["reviewer"]);
+  assert.deepEqual(catalog.options[0].roles, ["primary", "reviewer"]);
   assert.doesNotMatch(JSON.stringify(provider), /sk-[a-z0-9]/iu);
 });
 
@@ -97,7 +93,7 @@ test("labels the system endpoint primary, runner, and reviewer roles separately"
   assert.match(systemEndpoint, /provider:\s*"DeepSeek API"/u);
   assert.match(systemEndpoint, /agent:\s*"Колер"/u);
   assert.match(systemEndpoint, /runner:\s*"OpenCode"/u);
-  assert.match(systemEndpoint, /reviewerProvider:\s*"OpenCode Go"/u);
+  assert.match(systemEndpoint, /reviewerProvider:\s*"DeepSeek API"/u);
   assert.match(
     systemEndpoint,
     /models:\s*modelCatalog\.options\.filter\(\(model\) =>\s*model\.roles\.includes\("primary"\)/u,
@@ -106,7 +102,7 @@ test("labels the system endpoint primary, runner, and reviewer roles separately"
   assert.doesNotMatch(systemEndpoint, /agent:\s*"OpenCode"/u);
 });
 
-test("keeps operator setup on direct Flash primary and independent Pro max review", async () => {
+test("keeps operator setup on two independent direct Flash max runs", async () => {
   const [readme, architecture, handoff, envExample] = await Promise.all(
     [
       "../README.md",
@@ -118,9 +114,8 @@ test("keeps operator setup on direct Flash primary and independent Pro max revie
 
   for (const document of [readme, architecture, handoff]) {
     assert.match(document, /DeepSeek V4 Flash|deepseek-v4-flash/iu);
-    assert.match(document, /DeepSeek V4 Pro/u);
-    assert.match(document, /opencode-go\/deepseek-v4-pro/u);
-    assert.match(document, /variant `max`|Pro\/max|Pro · max/u);
+    assert.doesNotMatch(document, /DeepSeek V4 Pro|opencode-go\/deepseek-v4-pro/u);
+    assert.match(document, /variant `max`|Flash\/max|Flash · max/u);
     assert.match(document, /Flash/u);
     assert.match(document, /официальн|direct API|API DeepSeek/iu);
   }
@@ -274,7 +269,7 @@ test("explains the selected model role next to the selector", async () => {
 
   assert.match(
     modelSelector,
-    /modelLabel\(selectedModel\)\} обрабатывает ежедневный заказ\. DeepSeek V4 Pro отдельно проверяет факты, числа и условия\./,
+    /modelLabel\(selectedModel\)\} обрабатывает ежедневный заказ\. Отдельный второй запуск DeepSeek V4 Flash проверяет факты, числа и условия\./,
   );
   assert.doesNotMatch(modelSelector, /GPT-5\.6 Sol/u);
   assert.match(
@@ -303,7 +298,7 @@ test("explains the instruction, worker, and reviewer roles separately", async ()
     "обрабатывает заказ по готовым правилам",
     "Ежедневная работа",
     "modelLabel\\(selectedModel\\)",
-    "DeepSeek V4 Pro отдельно проверяет факты и обещания",
+    "Второй запуск DeepSeek V4 Flash отдельно проверяет факты и обещания",
     "GPT-5.6 Sol подготовила правила и критерии",
   ]) {
     assert.match(controlStory, new RegExp(dailyModelCopy));
@@ -352,7 +347,7 @@ test("keeps the top model role and offline executor honest", async () => {
   );
   assert.match(heroRoles, /Проверка продолжится после восстановления/);
   assert.match(heroRoles, /Непроверенное решение не отправляется клиенту/);
-  assert.match(heroRoles, /DeepSeek V4 Pro отдельным запуском проверяет/u);
+  assert.match(heroRoles, /DeepSeek V4 Flash отдельным вторым запуском проверяет/u);
   assert.doesNotMatch(
     heroRoles,
     /После показа модель изучит журнал|проверяет решения и улучшает правила/,
@@ -384,7 +379,7 @@ test("uses actual reviewer transport events in the order result", async () => {
   );
 });
 
-test("keeps the order modal honest about Flash primary and Pro reviewer roles", async () => {
+test("keeps the order modal honest about two separate Flash roles", async () => {
   const stand = await readFile(
     new URL("../app/order-stand.tsx", import.meta.url),
     "utf8",
@@ -396,17 +391,14 @@ test("keeps the order modal honest about Flash primary and Pro reviewer roles", 
 
   assert.match(
     modal,
-    /DeepSeek V4\s+Flash\s+через официальный DeepSeek API\s+выполняет ежедневные заказы\.[\s\S]*?DeepSeek V4\s+Pro\s+отдельным запуском\s+проверяет результат\./u,
+    /DeepSeek V4\s+Flash\s+через официальный DeepSeek API\s+выполняет ежедневные заказы\.[\s\S]*?DeepSeek V4\s+Flash\s+отдельным вторым запуском\s+проверяет результат\./u,
   );
   assert.doesNotMatch(
     modal,
-    /DeepSeek V4 Pro[^.]*обрабатывает ежедневные заказы/iu,
+    /DeepSeek V4 Pro|opencode-go\/deepseek-v4-pro/iu,
   );
   assert.deepEqual(
     catalog.options.map(({ id, roles }) => ({ id, roles })),
-    [
-      { id: "deepseek/deepseek-v4-flash", roles: ["primary"] },
-      { id: "opencode-go/deepseek-v4-pro", roles: ["reviewer"] },
-    ],
+    [{ id: "deepseek/deepseek-v4-flash", roles: ["primary", "reviewer"] }],
   );
 });

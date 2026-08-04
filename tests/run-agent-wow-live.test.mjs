@@ -1833,7 +1833,7 @@ test("repeat gate requires all twelve individual runs and unique call ids", () =
   assert.match(missing.failures.join(" "), /missing callId/u);
 });
 
-test("live model policy requires direct Flash max and a separate Pro max reviewer", () => {
+test("live model policy requires Flash max for separate primary and reviewer calls", () => {
   const canonical = {
     primaryModel: "deepseek/deepseek-v4-flash",
     primaryVariant: REQUIRED_LIVE_PRIMARY_VARIANT,
@@ -1845,7 +1845,7 @@ test("live model policy requires direct Flash max and a separate Pro max reviewe
   assert.equal(
     liveModelPolicyMatches({
       ...canonical,
-      reviewerModel: canonical.primaryModel,
+      reviewerModel: "opencode-go/deepseek-v4-pro",
     }),
     false,
   );
@@ -2472,10 +2472,10 @@ test("runner child environment is allowlisted and run ids are unique", () => {
   );
   const reviewer = childEnvironment(
     { PATH: "/bin", DEEPSEEK_API_KEY: "deepseek-secret" },
-    "opencode-go/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
   );
   assert.equal(direct.DEEPSEEK_API_KEY, "deepseek-secret");
-  assert.equal(reviewer.DEEPSEEK_API_KEY, undefined);
+  assert.equal(reviewer.DEEPSEEK_API_KEY, "deepseek-secret");
   const date = new Date("2026-07-31T12:00:00.000Z");
   assert.notEqual(createRunId(date, "aaaaaaaa"), createRunId(date, "bbbbbbbb"));
 });
@@ -3334,7 +3334,7 @@ test("first reviewer transport error or timeout fails closed without reconciliat
   }
 });
 
-test("completed malformed reviewer output reconciles once with the required Pro/max reviewer", async () => {
+test("completed malformed reviewer output reconciles once with the required Flash/max reviewer", async () => {
   const item = holdout.cases.find(
     ({ id }) => id === "wow-02-washer-sports-car",
   );

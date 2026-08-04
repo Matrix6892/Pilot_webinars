@@ -24,7 +24,7 @@ export const DEFAULT_LIVE_VISION_TIMEOUT_MS = 180_000;
 export const REQUIRED_LIVE_REPEAT_COUNT = 3;
 export const REQUIRED_LIVE_PRIMARY_VARIANT = "max";
 export const REQUIRED_LIVE_REVIEWER_MODEL =
-  "opencode-go/deepseek-v4-pro";
+  "deepseek/deepseek-v4-flash";
 export const REQUIRED_LIVE_REVIEWER_VARIANT = "max";
 export const PUBLIC_VISION_MODE = "public-synthetic-observation";
 export const PUBLIC_VISION_RUNTIME = "not-run-by-live-eval";
@@ -3037,7 +3037,7 @@ export function evaluateLiveReadiness(
       defaultPrimaryModel: modelCatalog.default,
     })
   ) {
-    failures.push("readiness requires direct Flash/max and separate Pro/max reviewer");
+    failures.push("readiness requires separate direct Flash/max primary and reviewer calls");
   }
   if (
     manifestValue("hardInvariantsPassed") !== true ||

@@ -54,7 +54,7 @@ Skill может быть вызван двумя способами:
 | Найти повторные вопросы, правки, unsafe promises и маршруты в выбранных событиях | `workflows/analyze-ledger.md` |
 | Превратить инциденты и canonical cases в фиксированный обезличенный набор | `workflows/build-regression-corpus.md` |
 | Доказать пользу изменения sales/reviewer/vision rule или deterministic guard | `workflows/compare-rule-change.md` |
-| Сравнить Flash/Pro или другую явно выбранную модель на одном контракте | `workflows/compare-models.md` |
+| Сравнить две явно выбранные модели на одном контракте | `workflows/compare-models.md` |
 
 Если задача включает и поиск дефектов, и проверку исправления, сначала выполнить анализ журнала, затем построение корпуса, затем comparison. Не менять корпус после просмотра результатов кандидата без новой версии manifest.
 </routing>
@@ -76,7 +76,7 @@ Skill может быть вызван двумя способами:
 
 <reference_index>
 - `references/result-contract.md` — наблюдаемый `AgentResult` и владельцы ground truth.
-- `references/model-roles.md` — допустимые роли MiMo, Flash, Pro и GPT-5.6 Sol.
+- `references/model-roles.md` — допустимые роли MiMo, двух отдельных Flash-вызовов и GPT-5.6 Sol.
 - `references/eval-rubric.md` — метрики, critical failures и правила сравнения.
 - `references/data-and-privacy.md` — допустимые данные, обезличивание и запрет скрытых рассуждений.
 - `templates/eval-case.md` — manifest одного воспроизводимого случая.

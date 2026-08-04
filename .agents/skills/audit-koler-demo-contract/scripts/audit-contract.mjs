@@ -214,7 +214,7 @@ const hosting = parseJson(".openai/hosting.json");
 
 const modelContract = {
   primary: "deepseek/deepseek-v4-flash",
-  reviewer: "opencode-go/deepseek-v4-pro",
+  reviewer: "deepseek/deepseek-v4-flash",
   vision: "opencode-go/mimo-v2.5",
 };
 
@@ -224,17 +224,23 @@ if (modelCatalog) {
       ? modelCatalog.options.map((option) => option?.id)
       : [],
   );
+  const flashModel = modelCatalog.options?.find(
+    (option) => option?.id === modelContract.primary,
+  );
   if (
     modelCatalog.default !== modelContract.primary ||
+    ids.size !== 1 ||
     !ids.has(modelContract.primary) ||
-    !ids.has(modelContract.reviewer)
+    !ids.has(modelContract.reviewer) ||
+    !flashModel?.roles?.includes("primary") ||
+    !flashModel?.roles?.includes("reviewer")
   ) {
     addFinding({
       severity: "P1",
-      claim: "Каталог моделей сохраняет direct Flash как default и Pro как reviewer/baseline",
+      claim: "Каталог моделей использует direct Flash для отдельных primary и reviewer запусков",
       canonical: [
         location("scripts/agent-bridge.mjs", /const strongReviewer\s*=/u),
-        location("README.md", /Канонический исполнитель — DeepSeek V4 Pro/u),
+        location("data/models.json", /"roles"/u),
       ],
       conflicts: [location("data/models.json", /"default"/u)],
       detail:
@@ -262,9 +268,9 @@ if (
 const roleChecks = [
   {
     file: "scripts/agent-bridge.mjs",
-    pattern: /const strongReviewer\s*=\s*"opencode-go\/deepseek-v4-pro"/u,
-    claim: "DeepSeek V4 Pro выполняет отдельную reviewer-проверку",
-    canonical: [location("public/prompts/reviewer.md", /DeepSeek V4\s+Pro/u)],
+    pattern: /const strongReviewer\s*=\s*"deepseek\/deepseek-v4-flash"/u,
+    claim: "DeepSeek V4 Flash выполняет отдельную reviewer-проверку",
+    canonical: [location("data/models.json", /"roles"/u)],
   },
   {
     file: "scripts/agent-bridge.mjs",
@@ -312,13 +318,13 @@ for (const file of [
   const absent = [
     ["MiMo V2.5", /MiMo V2\.5/u],
     ["DeepSeek V4 Flash", /DeepSeek V4 Flash|deepseek-v4-flash/u],
-    ["DeepSeek V4 Pro", /DeepSeek V4 Pro/u],
+    ["отдельный Flash reviewer", /(?:(?:отдельн|независим)\p{L}*[\s\S]{0,100}DeepSeek V4 Flash|DeepSeek V4 Flash[\s\S]{0,100}(?:отдельн|независим)\p{L}*)/iu],
     ["GPT-5.6 Sol", /GPT-5\.6 Sol/u],
   ].filter(([, pattern]) => !matches(file, pattern));
   if (absent.length) {
     addFinding({
       severity: "P1",
-      claim: `${file} согласованно объясняет четыре роли моделей`,
+      claim: `${file} согласованно объясняет четыре runtime-роли`,
       canonical: [location("docs/WEBINAR-RUNBOOK.md", /Роли моделей разделены/u)],
       conflicts: [`${file}:1`],
       detail: `Не найдены роли: ${absent.map(([name]) => name).join(", ")}.`,
@@ -1310,7 +1316,6 @@ const modelDependencies = {
   "DeepSeek V4 Flash": dependencyLocations(
     /DeepSeek V4 Flash|deepseek-v4-flash/iu,
   ),
-  "DeepSeek V4 Pro": dependencyLocations(/DeepSeek V4 Pro|deepseek-v4-pro/iu),
   "GPT-5.6 Sol": dependencyLocations(/GPT-5\.6 Sol/iu),
 };
 

@@ -6,6 +6,7 @@ import { runInNewContext } from "node:vm";
 import {
   applyReviewerResult,
   ambiguityReply,
+  compoundReplyCoverageGaps,
   isCompleteAgentResult,
   normalizeAgentResult,
   normalizeV2AgentResult,
@@ -3839,7 +3840,6 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
         evidenceIds: ["request"],
         assumptionIds: [],
         confidence: 0.5,
-        candidateSku: "КР-005",
       },
       {
         metric: "budget",
@@ -3848,7 +3848,6 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
         evidenceIds: ["request"],
         assumptionIds: [],
         confidence: 0.5,
-        candidateSku: "КР-005",
       },
       {
         metric: "surface_area",
@@ -3904,7 +3903,57 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.match(result.reply.body, /0,14 кг\/м²/iu);
   assert.match(result.reply.body, /296 ₽\/кг/iu);
   assert.match(result.reply.body, /белый, коричневый, зелёный/iu);
+  assert.match(result.reply.body, /я бы выбрал коричневый/iu);
+  assert.deepEqual(compoundReplyCoverageGaps(job, result), []);
   assert.equal(isCompleteAgentResult(result), true);
+});
+
+test("flags a compound reply that silently drops a second paint task", () => {
+  const job = {
+    subject: "Вопросики",
+    body: "Добрый день! Хочу покрасить забор деревянный, на даче и еще скажите сколько будет стоить покрасить кремль в москве и какой цвет выбрать лучше?",
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "деревянный забор на даче",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 30, max: 80, unit: "м²" },
+        method: "Дачный забор: широкий диапазон площади",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 8.4, max: 22.4, unit: "кг" },
+        method: "Дачный забор: площадь × расход × два слоя",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+      {
+        metric: "budget",
+        range: { min: 2_500, max: 6_700, unit: "₽" },
+        method: "Дачный забор: количество × цена каталога",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+    ],
+    reply: {
+      subject: "Оценка забора",
+      body: "Для дачного забора подготовил диапазон и рекомендую коричневый цвет.",
+    },
+  });
+  draft.resolvedIntent.goal = "Оценить покраску деревянного забора";
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.deepEqual(compoundReplyCoverageGaps(job, result), [
+    "покрасить кремль в москве и какой цвет выбрать лучше?",
+  ]);
 });
 
 test("does not turn a substrate claim into an exact offer for unknown application targets", () => {
