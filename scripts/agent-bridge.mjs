@@ -1155,7 +1155,14 @@ function toolSummary(event) {
     host = "";
   }
   const evidenceText = typeof output.text === "string"
-    ? output.text.replace(/\s+/gu, " ").trim().slice(0, 12_000)
+    ? output.text
+        .replace(
+          /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}]/gu,
+          " ",
+        )
+        .replace(/\s+/gu, " ")
+        .trim()
+        .slice(0, 12_000)
     : "";
   const sha256 = evidenceText
     ? createHash("sha256").update(evidenceText, "utf8").digest("hex")

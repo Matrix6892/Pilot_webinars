@@ -1839,7 +1839,8 @@ test("fingerprints the bounded public excerpt that crosses the guard boundary", 
   );
   const { createOpenCodeEventStream } = bridgeStreamHelpers(bridge);
   const stream = createOpenCodeEventStream();
-  const fullText = "Кремлёвская стена: 2235 метров. ".repeat(500);
+  const fullText =
+    `中文 日本語 ${"Кремлёвская стена: 2235 метров. ".repeat(500)}`;
   stream.push(
     `${JSON.stringify({
       type: "tool_use",
@@ -1862,6 +1863,8 @@ test("fingerprints the bounded public excerpt that crosses the guard boundary", 
   const captured = await stream.complete();
   const [tool] = captured.tools;
   assert.equal(tool.excerpt.length, 12_000);
+  assert.doesNotMatch(tool.excerpt, /[\p{Script=Han}\p{Script=Hiragana}]/u);
+  assert.match(tool.excerpt, /Кремлёвская стена: 2235 метров/u);
   assert.equal(
     tool.sha256,
     createHash("sha256").update(tool.excerpt).digest("hex"),
