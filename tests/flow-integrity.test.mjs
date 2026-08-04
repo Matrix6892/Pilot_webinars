@@ -18,6 +18,7 @@ import {
   CONTRACT_REVISION,
   FIRST_STAGE_LIMIT_MS,
   FLASH_MODEL,
+  KREMLIN_COLOR_GUIDANCE_PATTERN,
   OPERATIONAL_LIMIT_MS,
   P50_TARGET_MS,
   WEBINAR_PROBES,
@@ -552,6 +553,14 @@ test("deployed probe runner covers nine routes plus the ten-order capacity gate"
   assert.equal(FIRST_STAGE_LIMIT_MS, 10_000);
   assert.equal(P50_TARGET_MS, 180_000);
   assert.equal(OPERATIONAL_LIMIT_MS, 660_000);
+  assert.match(
+    "Рекомендую сохранить утверждённый исторический облик — красно-кирпичные стены.",
+    KREMLIN_COLOR_GUIDANCE_PATTERN,
+  );
+  assert.doesNotMatch(
+    "У Кремля исторический облик.",
+    KREMLIN_COLOR_GUIDANCE_PATTERN,
+  );
   assert.deepEqual(
     WEBINAR_PROBES.map((probe) => probe.id),
     [

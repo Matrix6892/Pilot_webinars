@@ -4165,6 +4165,24 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     [],
   );
 
+  const singleRecommendationDraft = structuredClone(draft);
+  singleRecommendationDraft.reply.body =
+    "Цвет для забора: рекомендую коричневый. " +
+    "Цвет для Кремля выбирают не по каталогу: рекомендация одна — сохранять утверждённый исторический облик ансамбля.";
+  const singleRecommendationResult = normalizeV2AgentResult(
+    singleRecommendationDraft,
+    demoData,
+    job,
+  );
+  assert.match(
+    singleRecommendationResult.reply.body,
+    /рекомендация одна[^.]+сохранять утверждённый исторический облик/iu,
+  );
+  assert.deepEqual(
+    compoundReplyCoverageGaps(job, singleRecommendationResult),
+    [],
+  );
+
   const sharedIntroColorAdvice = structuredClone(result);
   sharedIntroColorAdvice.reply.body =
     "По забору и Кремлю отвечаю отдельно. Цвет: рекомендую коричневый из палитры.";
