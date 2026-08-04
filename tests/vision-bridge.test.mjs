@@ -1253,6 +1253,14 @@ test("compound requests receive the complete catalog and keep every explicit ask
     primaryPrompt,
     /кажд[а-яё]* явно выраженн[а-яё]* просьб[а-яё]*[\s\S]*?клиентск[а-яё]* ответ/iu,
   );
+  assert.match(
+    primaryPrompt,
+    /несколько объектов покраски[\s\S]*?отдельный budget для каждого/iu,
+  );
+  assert.match(
+    primaryPrompt,
+    /asks\[\]\.evidenceIds[\s\S]*?только[\s\S]*?source\.kind="message"[\s\S]*?никогда/iu,
+  );
 
   const reviewPrompt = reviewPromptFromBridge(
     bridge,
@@ -1334,6 +1342,10 @@ test("compound requests receive the complete catalog and keep every explicit ask
   assert.match(
     coverageRetryPrompt,
     /вопрос о стоимости[\s\S]*?не закрыт[\s\S]*?budget estimate/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
+    /asks\[\]\.evidenceIds[\s\S]*?только ID evidence[\s\S]*?source\.kind="message"/iu,
   );
   assert.match(
     coverageRetryPrompt,

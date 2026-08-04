@@ -56,8 +56,8 @@ export const WEBINAR_PROBES = [
     id: "ambiguous-photo",
     subject: "Что красить на фото",
     body: "Хочу покрасить это на фотографии. Подберите краску и оцените расход.",
-    image: "wall-hair-equal-v2.png",
-    clarification: "Нужно покрасить стену, не волосы.",
+    image: "washer-and-car.png",
+    clarification: "Нужно покрасить автомобиль, не стиральную машину.",
   },
   {
     id: "follow-up-after-ready",
@@ -391,6 +391,16 @@ function assertVisionStages(probe, state, roundNo = 1) {
   assert.ok(stages.includes("vision-result"), `${probe.id}: persisted vision-result missing`);
 }
 
+function assertNoPrimaryFallback(probe, state, roundNo = 1) {
+  assert.equal(
+    (state.events ?? []).some(
+      (event) => event.roundNo === roundNo && event.stage === "primary-fallback",
+    ),
+    false,
+    `${probe.id}: successful probe used primary-fallback`,
+  );
+}
+
 async function runProbe(origin, probe, log) {
   const context = await createOrder(origin, probe, log);
   if (probe.reload) {
@@ -403,6 +413,7 @@ async function runProbe(origin, probe, log) {
 
   let state = await waitForTerminal(context);
   assert.notEqual(state.order.status, "error", `${probe.id}: ${state.events.at(-1)?.detail ?? "error"}`);
+  assertNoPrimaryFallback(probe, state);
   assert.ok(context.firstStageMs !== null, `${probe.id}: no processing stage`);
   assert.ok(context.firstStageMs <= FIRST_STAGE_LIMIT_MS, `${probe.id}: first stage ${context.firstStageMs} ms`);
 
@@ -417,6 +428,7 @@ async function runProbe(origin, probe, log) {
     await patchOrder(context, { action: "send_clarification" });
     await patchOrder(context, { action: "customer_reply", answer: probe.clarification });
     state = await waitForTerminal(context, 2);
+    assertNoPrimaryFallback(probe, state, 2);
     state = await finishForClient(context, state);
     const reused = state.events.find(
       (event) => event.roundNo === 2 && event.stage === "vision-result",
@@ -439,6 +451,7 @@ async function runProbe(origin, probe, log) {
     const priorHistory = state.resultHistory?.length ?? 0;
     await patchOrder(context, { action: "customer_reply", answer: probe.followUp });
     state = await waitForTerminal(context, priorRound + 1);
+    assertNoPrimaryFallback(probe, state, priorRound + 1);
     state = await finishForClient(context, state);
     assert.equal(state.order.roundNo, priorRound + 1);
     assert.ok((state.resultHistory?.length ?? 0) > priorHistory, `${probe.id}: history not preserved`);
@@ -480,6 +493,7 @@ async function runConcurrent(origin, log) {
     contexts.map(async (context) => {
       let state = await waitForTerminal(context);
       assert.notEqual(state.order.status, "error", `${context.probe.id}: terminal error`);
+      assertNoPrimaryFallback(context.probe, state);
       state = await finishForClient(context, state);
       assertModelIdentity(context, state);
       assert.ok(context.firstStageMs !== null && context.firstStageMs <= FIRST_STAGE_LIMIT_MS);
@@ -504,6 +518,7 @@ async function runConcurrent(origin, log) {
   );
   assert.equal(duplicate.find(({ response }) => response.status === 409)?.data?.code, "order_busy");
   let followed = await waitForTerminal(context, beforeRound + 1);
+  assertNoPrimaryFallback(context.probe, followed, beforeRound + 1);
   followed = await finishForClient(context, followed);
   assert.equal(followed.order.roundNo, beforeRound + 1);
   assert.equal(

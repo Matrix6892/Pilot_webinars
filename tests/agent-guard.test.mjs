@@ -3122,6 +3122,92 @@ test("does not duplicate neutral evidence when an exact authored web claim survi
   assert.equal(isCompleteAgentResult(result), true);
 });
 
+test("keeps the live Kremlin evidence and all compound estimates", () => {
+  const sourceUrl = "https://reference.example/kremlin-scale";
+  const claim =
+    "Московский Кремль — крепость в центре Москвы, объект Всемирного наследия ЮНЕСКО и объект культурного наследия России; стены кирпичного Кремля Ивана III (1482–1495), протяжённость стен 2235 м, высота стен от 5 до 19 м, толщина от 3,5 до 6,5 м, 20 башен";
+  const source = openedWeb(
+    sourceUrl,
+    claim,
+  );
+  const job = {
+    subject: "Покраска и стоимость",
+    body: "Покрасьте забор. Во сколько обойдётся окраска Кремля?",
+    requireResolvedAsks: true,
+    openedSourceUrls: [sourceUrl],
+    openedSources: [source],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "Забор",
+    commitment: "estimate",
+    estimates: [
+      ["surface_area", 30, 90, "м²", "Забор: отдельная оценка площади", "msg-fence"],
+      ["paint_quantity", 8, 33, "кг", "Забор: отдельная оценка расхода", "msg-fence"],
+      ["budget", 2_500, 11_300, "₽", "Забор: отдельный бюджет", "msg-fence"],
+      ["surface_area", 45_000, 60_000, "м²", "Кремль: отдельная оценка площади", "kremlin-scale"],
+      ["paint_quantity", 18_000, 30_000, "кг", "Кремль: отдельная оценка расхода", "kremlin-scale"],
+      ["budget", 4_500_000, 12_000_000, "₽", "Кремль: широкий мысленный порядок бюджета", "kremlin-scale"],
+    ].map(([metric, min, max, unit, method, evidenceId], index) => ({
+      metric,
+      range: { min, max, unit },
+      method,
+      evidenceIds: [evidenceId],
+      assumptionIds: [],
+      confidence: index < 3 ? 0.5 : 0.3,
+    })),
+    reply: {
+      subject: "Забор и Кремль: оценки готовы",
+      body:
+        "Для забора подготовлены отдельные площадь, расход и бюджет. Для Кремля даю отдельную мысленную оценку площади, расхода и широкого бюджета с опорой на открытый источник.",
+    },
+  });
+  draft.resolvedIntent.asks = [
+    { id: "paint-fence", request: "Покрасьте забор.", evidenceIds: ["msg-fence"] },
+    { id: "kremlin-cost", request: "Во сколько обойдётся окраска Кремля?", evidenceIds: ["msg-kremlin"] },
+  ];
+  draft.resolvedIntent.target.evidenceIds = ["msg-fence"];
+  draft.resolvedIntent.evidence = [
+    {
+      id: "msg-fence",
+      claim: "Клиент просит покрасить забор",
+      confidence: 1,
+      source: { kind: "message", roundNo: 1, quote: "Покрасьте забор" },
+    },
+    {
+      id: "msg-kremlin",
+      claim: "Клиент спрашивает стоимость окраски Кремля",
+      confidence: 1,
+      source: { kind: "message", roundNo: 1, quote: "Во сколько обойдётся окраска Кремля?" },
+    },
+    {
+      id: "kremlin-scale",
+      claim,
+      confidence: 0.8,
+      source: {
+        kind: "web",
+        url: sourceUrl,
+        title: "Справка о Московском Кремле",
+        openedAt: source.openedAt,
+      },
+    },
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(
+    result.resolvedIntent.evidence.find((item) => item.id === "kremlin-scale")?.claim,
+    claim,
+  );
+  assert.equal(result.estimates.length, 6);
+  assert.deepEqual(
+    result.estimates
+      .filter((estimate) => estimate.metric === "budget")
+      .map((estimate) => estimate.method.match(/(?:Забор|Кремль)/u)?.[0]),
+    ["Забор", "Кремль"],
+  );
+  assert.deepEqual(askCoverageGaps(job, result), []);
+});
+
 test("drops supplier leads and evidence for invalid, unopened, or snippet-only pages", () => {
   const firstUrl = "https://supplier.example/overview";
   const secondUrl = "https://supplier.example/catalog";
@@ -4019,7 +4105,10 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
     {
       body: "Покрасьте забор. Во сколько обойдётся окраска Кремля?",
       reply: "Для забора подойдёт КР-005. Кремль оцениваю только как мысленный сценарий.",
-      estimates: [{ metric: "budget", method: "Кремль: широкий порядок бюджета" }],
+      estimates: [
+        { metric: "budget", method: "Забор: ориентировочный бюджет" },
+        { metric: "budget", method: "Кремль: широкий порядок бюджета" },
+      ],
     },
     {
       body: "По фото подберите краску, а сколько стоит покрасить гараж?",
@@ -4094,6 +4183,125 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
     ),
     ["хочу покрасить забор", "хочу покрасить беседку"],
   );
+
+  const priceBody = "Покрасьте забор. Во сколько обойдётся окраска Кремля?";
+  const priceAsks = askCoverageGaps(
+    { body: priceBody },
+    { resolvedIntent: { asks: [] }, reply: { body: "" } },
+  );
+  const priceGaps = askCoverageGaps(
+    { body: priceBody },
+    {
+      resolvedIntent: {
+        asks: priceAsks.map((request, index) => ({
+          id: `price-request-${index + 1}`,
+          request,
+          evidenceIds: ["request"],
+        })),
+      },
+      reply: { body: "Для забора и Кремля подготовлены отдельные ориентиры." },
+      options: [],
+      estimates: [
+        { metric: "budget", method: "Кремль: широкий порядок бюджета" },
+      ],
+    },
+  );
+  assert.equal(priceGaps.length, 1);
+  assert.match(priceGaps[0], /забор/iu);
+
+  const splitAuthored = {
+    resolvedIntent: {
+      asks: [
+        {
+          id: "choose-fence-paint",
+          request: "Подберите краску для деревянного забора",
+          evidenceIds: ["request"],
+        },
+        {
+          id: "estimate-fence-consumption",
+          request: "Дайте диапазон расхода для деревянного забора без размеров",
+          evidenceIds: ["request"],
+        },
+      ],
+    },
+    reply: { body: "Для деревянного забора подобрал краску и диапазон расхода." },
+    options: [],
+    estimates: [],
+  };
+  assert.deepEqual(
+    askCoverageGaps(
+      { body: "Подберите краску и дайте диапазон расхода для деревянного забора без размеров." },
+      splitAuthored,
+    ),
+    [],
+  );
+
+  const ambiguousBody =
+    "Хочу покрасить это на фотографии. Подберите краску и оцените расход.";
+  const ambiguousAsks = askCoverageGaps(
+    { body: ambiguousBody },
+    { resolvedIntent: { asks: [] }, reply: { body: "" } },
+  );
+  assert.deepEqual(
+    askCoverageGaps(
+      { body: ambiguousBody },
+      {
+        resolvedIntent: {
+          asks: ambiguousAsks.map((request, index) => ({
+            id: `ambiguous-request-${index + 1}`,
+            request,
+            evidenceIds: ["request"],
+          })),
+          target: { state: "ambiguous", candidates: [] },
+          blocker: { kind: "target_ambiguity" },
+        },
+        reply: { body: "Что красим: автомобиль или стиральную машину?" },
+        options: [],
+        estimates: [],
+      },
+    ),
+    [],
+  );
+});
+
+test("accepts close ask fragments without accepting unknown evidence", () => {
+  const job = {
+    body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
+  };
+  const draft = v2ResolvedDraft(job, { targetLabel: "Деревянная беседка" });
+  draft.resolvedIntent.asks = [
+    {
+      id: "choose-paint",
+      request: "Подберите краску для деревянной беседки без размеров",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "choose-color",
+      request: "Подберите цвет для деревянной беседки",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "estimate-budget",
+      request: "Дайте диапазон бюджета для деревянной беседки без размеров",
+      evidenceIds: ["request"],
+    },
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, {
+    ...job,
+    requireResolvedAsks: true,
+  });
+
+  assert.equal(result.resolvedIntent.asks.length, 3);
+  assert.equal(result.resolvedIntent.target.label, "Деревянная беседка");
+
+  const invalid = structuredClone(draft);
+  invalid.resolvedIntent.asks[2].evidenceIds = ["unknown-evidence"];
+  const rejected = normalizeV2AgentResult(invalid, demoData, {
+    ...job,
+    requireResolvedAsks: true,
+  });
+  assert.equal(rejected.resolvedIntent.target.label, "задача из письма клиента");
 });
 
 test("does not turn a substrate claim into an exact offer for unknown application targets", () => {
