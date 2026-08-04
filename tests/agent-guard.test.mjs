@@ -4302,6 +4302,56 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
   );
 });
 
+test("a target clarification reuses the original ask without hiding new requests", () => {
+  const job = {
+    body: "Хочу покрасить это на фотографии. Подберите краску и оцените расход.",
+    roundNo: 2,
+    conversation: [
+      { role: "customer", body: "Нужно покрасить автомобиль, не стиральную машину." },
+    ],
+    resultJson: JSON.stringify({
+      resolvedIntent: {
+        target: {
+          state: "ambiguous",
+          candidates: [
+            { label: "автомобиль" },
+            { label: "стиральная машина" },
+          ],
+        },
+        blocker: {
+          kind: "target_ambiguity",
+          choices: ["автомобиль", "стиральная машина"],
+        },
+      },
+    }),
+  };
+  const result = {
+    resolvedIntent: {
+      asks: [{
+        id: "paint-photo-object",
+        request: job.body,
+        evidenceIds: ["message-1"],
+      }],
+      target: { state: "resolved", label: "маленький автомобиль" },
+      blocker: null,
+    },
+    reply: {
+      body: "Принято: красим автомобиль с фото, а не стиральную машину. Подобрал краску и оценил расход.",
+    },
+    options: [],
+    estimates: [],
+  };
+
+  assert.deepEqual(askCoverageGaps(job, result), []);
+
+  const withColorRequest = structuredClone(job);
+  withColorRequest.conversation[0].body =
+    "Нужно покрасить автомобиль, не стиральную машину. И какой цвет выбрать?";
+  assert.deepEqual(askCoverageGaps(withColorRequest, result), [
+    "какой цвет выбрать",
+  ]);
+});
+
 test("accepts close ask fragments without accepting unknown evidence", () => {
   const job = {
     body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
