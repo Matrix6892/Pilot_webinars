@@ -3206,6 +3206,44 @@ test("keeps the live Kremlin evidence and all compound estimates", () => {
     ["Забор", "Кремль"],
   );
   assert.deepEqual(askCoverageGaps(job, result), []);
+
+  const englishUrl = "https://reference.example/moscow-kremlin-wall";
+  const englishClaim =
+    "Кремль — Kremlin; стены — wall: внешний периметр 2 235 м — outer perimeter of 2,235 metres; высота 5–19 м — height from 5 to 19 metres; 20 башен — twenty towers; стены кирпичные.";
+  const englishSource = openedWeb(
+    englishUrl,
+    "The Moscow Kremlin Wall has an outer perimeter of 2,235 metres, ranges in height from 5 to 19 metres and includes twenty towers.",
+  );
+  const englishDraft = structuredClone(draft);
+  const englishEvidence = englishDraft.resolvedIntent.evidence.find(
+    (item) => item.id === "kremlin-scale",
+  );
+  englishEvidence.claim = englishClaim;
+  englishEvidence.source = {
+    kind: "web",
+    url: englishUrl,
+    title: "Moscow Kremlin Wall reference",
+    openedAt: englishSource.openedAt,
+  };
+  const englishJob = {
+    ...job,
+    openedSourceUrls: [englishUrl],
+    openedSources: [englishSource],
+  };
+  const englishResult = normalizeV2AgentResult(
+    englishDraft,
+    demoData,
+    englishJob,
+  );
+
+  assert.equal(
+    englishResult.resolvedIntent.evidence.find(
+      (item) => item.id === "kremlin-scale",
+    )?.claim,
+    englishClaim,
+  );
+  assert.equal(englishResult.estimates.length, 6);
+  assert.deepEqual(askCoverageGaps(englishJob, englishResult), []);
 });
 
 test("drops supplier leads and evidence for invalid, unopened, or snippet-only pages", () => {
