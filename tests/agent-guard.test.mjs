@@ -4344,6 +4344,17 @@ test("a target clarification reuses the original ask without hiding new requests
 
   assert.deepEqual(askCoverageGaps(job, result), []);
 
+  const safeBoundary = structuredClone(result);
+  safeBoundary.reply.body =
+    "Для автомобиля строительное покрытие нельзя рекомендовать без проверки совместимости; сверим каталог и подготовим альтернативу.";
+  assert.deepEqual(askCoverageGaps(job, safeBoundary), []);
+
+  safeBoundary.reply.body =
+    "Строительное покрытие нельзя рекомендовать без проверки совместимости.";
+  const missingTargetGaps = askCoverageGaps(job, safeBoundary);
+  assert.equal(missingTargetGaps.length, 2);
+  assert.ok(missingTargetGaps.includes(job.body));
+
   const withColorRequest = structuredClone(job);
   withColorRequest.conversation[0].body =
     "Нужно покрасить автомобиль, не стиральную машину. И какой цвет выбрать?";
