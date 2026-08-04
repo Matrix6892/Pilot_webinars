@@ -4064,7 +4064,10 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.match(result.reply.body, /296 ₽\/кг/iu);
   assert.match(result.reply.body, /белый, коричневый, зелёный/iu);
   assert.match(result.reply.body, /(?:выбрал бы|я бы выбрал) коричневый/iu);
-  assert.match(result.reply.body, /историческ[^.]{0,80}палитр/iu);
+  assert.match(
+    result.reply.body,
+    /(?:историческ[^.]{0,80}(?:палитр|красн|кирпич)|каноническ[^.]{0,80}(?:красн|кирпич))/iu,
+  );
   assert.match(
     result.reply.body,
     /Дачный забор: площадь — 20–60 м², краска — 6–19 кг, бюджет — 2\s*960–5\s*920 ₽/iu,
@@ -4104,6 +4107,35 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     /цвет стен утверждают реставрационные регламенты/iu,
   );
   assert.deepEqual(compoundReplyCoverageGaps(job, liveCoverageResult), []);
+
+  const protectedAppearanceDraft = structuredClone(draft);
+  protectedAppearanceDraft.reply.body = [
+    "Добрый день! Понял: красим деревянный забор на даче, заодно прикидываем, во сколько обошлась бы покраска Московского Кремля, и выбираем цвет. По порядку.",
+    "Забор — это наша тема. Под него есть краска для дерева для улицы (КР-005): защищает от дождя и помогает уберечь дерево от грибка. Для типичного дачного забора 20–60 м² (примерно 20–40 метров длины при высоте 1,5–2 метра, красим одну сторону) нужно 6–17 кг — это 1–2 ведра по 10 кг, около 3–6 тыс. ₽ по складской цене. Цвет рекомендую коричневый: на дереве он смотрится естественно, пыль и потёки не так заметны. Зелёный — если забор вписан в сад; белый — красивее, но обновлять придётся чаще. При заказе пришлите длину и высоту забора — соберу точное предложение и проверю наличие на складе.",
+    "Кремль — честно, как мысленный эксперимент, а не коммерческое обещание: это объект Всемирного наследия ЮНЕСКО и резиденция президента России, покраска там не оказывается как услуга, а в нашем каталоге нет фасадной краски для кирпича. Если чисто гипотетически: фасады стен с башнями — порядка 25–35 тыс. м², одной краски по рыночным ценам на 6–21 млн ₽, а с работами, лесами и согласованиями — от 15 до 80 млн ₽ и не один год. Любопытная деталь: в XVIII–XIX веках стены Кремля традиционно красили в белый цвет — «белый Кремль» уже был в истории. Но цвет выбирать не нужно: нынешний облик памятника охраняется государством, его сохраняют, а не перекрашивают.",
+  ].join("\n\n");
+  const protectedAppearanceResult = normalizeV2AgentResult(
+    protectedAppearanceDraft,
+    demoData,
+    job,
+  );
+  assert.match(
+    protectedAppearanceResult.reply.body,
+    /нынешний облик памятника[^.]+сохраняют/iu,
+  );
+  assert.deepEqual(
+    compoundReplyCoverageGaps(job, protectedAppearanceResult),
+    [],
+  );
+
+  const historicalAsideOnly = structuredClone(protectedAppearanceResult);
+  historicalAsideOnly.reply.body = historicalAsideOnly.reply.body.replace(
+    /Но цвет выбирать не нужно:[^.]+\./iu,
+    "",
+  );
+  assert.deepEqual(compoundReplyCoverageGaps(job, historicalAsideOnly), [
+    "какой цвет выбрать лучше",
+  ]);
 
   const headedColorAdvice = structuredClone(result);
   headedColorAdvice.reply.body =
