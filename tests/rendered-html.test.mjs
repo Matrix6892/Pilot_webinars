@@ -378,6 +378,11 @@ test("labels live processing states and does not promise offline fallback", asyn
   assert.match(stand, /Агент работает · связь подтверждена/);
   assert.match(stand, /formatEventTime\(order\.updatedAt\)/);
   assert.match(stand, /Последний подтверждённый сигнал этого запуска/);
+  assert.match(stand, /Режим: проверяем подключение агента/);
+  assert.match(
+    stand,
+    /useState<boolean \| "checking">\([\s\S]*?"checking",[\s\S]*?\)/,
+  );
   assert.match(stand, /Время агента истекло · карточка сохранена/);
   assert.match(stand, /Ошибка обработки · можно повторить/);
   assert.match(stand, /Повторите этот же заказ/);

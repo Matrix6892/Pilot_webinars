@@ -917,7 +917,9 @@ export function OrderStand() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [market, setMarket] = useState<MarketOffer[]>([]);
   const [ledger, setLedger] = useState<LedgerResponse>({});
-  const [bridgeOnline, setBridgeOnline] = useState(false);
+  const [bridgeOnline, setBridgeOnline] = useState<boolean | "checking">(
+    "checking",
+  );
   const [expiredLeaseKey, setExpiredLeaseKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [approving, setApproving] = useState("");
@@ -2321,6 +2323,12 @@ export function OrderStand() {
   const processingCopy = orderProcessingCopy(
     leaseExpired ? "processing-expired" : processingState,
   );
+  const bridgeStatusLabel =
+    bridgeOnline === "checking"
+      ? "Режим: проверяем подключение агента"
+      : bridgeOnline
+        ? "Режим: агент подключён"
+        : "Режим: агент временно недоступен";
   const currentRunEvents = order
     ? events.filter((event) => isCurrentOrderEvent(event, order))
     : [];
@@ -2364,21 +2372,13 @@ export function OrderStand() {
           </span>
         </a>
         <div
-          className={`connection ${bridgeOnline ? "is-live" : ""}`}
+          className={`connection ${bridgeOnline === true ? "is-live" : ""}`}
           role="status"
           aria-live="polite"
-          aria-label={
-            bridgeOnline
-              ? "Режим: агент подключён"
-              : "Режим: агент временно недоступен"
-          }
+          aria-label={bridgeStatusLabel}
         >
           <span className="connection-dot" aria-hidden="true" />
-          <span aria-hidden="true">
-            {bridgeOnline
-              ? "Режим: агент подключён"
-              : "Режим: агент временно недоступен"}
-          </span>
+          <span aria-hidden="true">{bridgeStatusLabel}</span>
         </div>
         <a
           className="topbar-link"
