@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
@@ -39,7 +40,7 @@ function bridgeStreamHelpers(source) {
   stageTimeoutForDeadline,
   isCompleteFailClosedManager,
 })`,
-    { URL, isIP, isCompleteAgentResult, isSearchResultUrl },
+    { URL, createHash, isIP, isCompleteAgentResult, isSearchResultUrl },
   );
 }
 
@@ -245,6 +246,22 @@ function visionObservationForJobFromBridge(source, overrides = {}) {
       terminalPublicationReserveMs: 12_000,
       visionInstruction: "Опиши только видимые признаки.",
       visionModel: "opencode-go/mimo-v2.5",
+      ...overrides,
+    },
+  );
+}
+
+function agentRequestRetryHelpers(source, overrides = {}) {
+  const start = source.indexOf("function isRetryableAgentRequestError(");
+  const end = source.indexOf("function claimPayload(", start);
+  assert.ok(start >= 0 && end > start);
+  return runInNewContext(
+    `${source.slice(start, end)}\n({ isRetryableAgentRequestError, agentRequestWithRetry })`,
+    {
+      agentApiTimeoutMs: 12_000,
+      agentRequest: async () => ({ ok: true }),
+      performance,
+      sleep: async () => {},
       ...overrides,
     },
   );
@@ -1280,7 +1297,13 @@ test("compound requests receive the complete catalog and keep every explicit ask
     ["мысленный сценарий для Кремля"],
     ["https://ru.wikipedia.org/wiki/Московский_Кремль"],
   );
-  assert.match(coverageRetryPrompt, /Не вызывай инструменты/u);
+  assert.match(
+    coverageRetryPrompt,
+    /если пропущенная часть требует внешнего факта/iu,
+  );
+  assert.match(coverageRetryPrompt, /один целевой discovery-поиск/iu);
+  assert.match(coverageRetryPrompt, /одну прямую\s+страницу/iu);
+  assert.doesNotMatch(coverageRetryPrompt, /Не вызывай инструменты/u);
   assert.match(coverageRetryPrompt, /мысленный сценарий для Кремля/u);
   assert.match(
     coverageRetryPrompt,
@@ -1289,6 +1312,34 @@ test("compound requests receive the complete catalog and keep every explicit ask
   assert.match(
     coverageRetryPrompt,
     /reply явно назови и закрой каждую подзадачу[\s\S]*?рекомендацию цвета/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
+    /необычн[а-яё]*, защищённ[а-яё]* или некоммерческ[а-яё]* неодушевлённ[а-яё]* объект[\s\S]*?surface_area[\s\S]*?paint_quantity[\s\S]*?budget/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
+    /вопрос о стоимости[\s\S]*?не закрыт[\s\S]*?budget estimate/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
+    /правовую и коммерческую границу[\s\S]*?отдельно/iu,
+  );
+  const coverageBlockStart = bridge.indexOf("const coverageRun =");
+  const coverageBlock = bridge.slice(
+    coverageBlockStart,
+    bridge.indexOf("const repairedResult", coverageBlockStart),
+  );
+  assert.ok(coverageBlockStart >= 0);
+  assert.match(coverageBlock, /agent: "koler-sales"/u);
+  assert.match(coverageBlock, /publishResearch: true/u);
+  assert.match(
+    coverageBlock,
+    /openedSourceUrlsFromTools\(\s*coverageRun\.tools/iu,
+  );
+  assert.match(
+    coverageBlock,
+    /openedSourcesFromTools\(coverageRun\.tools\)/iu,
   );
 });
 
@@ -1781,6 +1832,42 @@ test("uses the final public_webfetch URL after a safe redirect", async () => {
   assert.match(captured.tools[0].detail, /final\.example/u);
 });
 
+test("fingerprints the bounded public excerpt that crosses the guard boundary", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { createOpenCodeEventStream } = bridgeStreamHelpers(bridge);
+  const stream = createOpenCodeEventStream();
+  const fullText = "Кремлёвская стена: 2235 метров. ".repeat(500);
+  stream.push(
+    `${JSON.stringify({
+      type: "tool_use",
+      part: {
+        tool: "public_webfetch",
+        callID: "long-public-source",
+        state: {
+          status: "completed",
+          input: { url: "https://public.example/kremlin" },
+          output: JSON.stringify({
+            url: "https://public.example/kremlin",
+            text: fullText,
+            sha256: createHash("sha256").update(fullText).digest("hex"),
+          }),
+        },
+      },
+    })}\n`,
+  );
+
+  const captured = await stream.complete();
+  const [tool] = captured.tools;
+  assert.equal(tool.excerpt.length, 12_000);
+  assert.equal(
+    tool.sha256,
+    createHash("sha256").update(tool.excerpt).digest("hex"),
+  );
+});
+
 test("does not wait for a never-resolving telemetry publisher", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
@@ -2141,6 +2228,14 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
   assert.match(bridge, /const terminalPublicationReserveMs = agentApiTimeoutMs/u);
   assert.match(
     processJob,
+    /await agentRequestWithRetry\(\s*resultPayload\(/u,
+  );
+  assert.match(
+    processJob,
+    /await agentRequestWithRetry\(\s*\{\s*action:\s*"error"/u,
+  );
+  assert.match(
+    processJob,
     /const jobStartedAtMs = performance\.now\(\);[\s\S]*?visionObservationForJob\(\s*job,\s*jobStartedAtMs,\s*\)/u,
   );
   assert.match(
@@ -2222,6 +2317,37 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
     timeout(688_000, 300_000, 12_000, 5_000),
     0,
   );
+});
+
+test("retries transient terminal publication failures inside one API budget", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  let calls = 0;
+  const { agentRequestWithRetry, isRetryableAgentRequestError } =
+    agentRequestRetryHelpers(bridge, {
+      agentRequest: async () => {
+        calls += 1;
+        if (calls < 3) throw new TypeError("fetch failed");
+        return { ok: true };
+      },
+    });
+
+  assert.equal(isRetryableAgentRequestError(new TypeError("fetch failed")), true);
+  assert.equal(
+    isRetryableAgentRequestError(new Error("Agent API 503: unavailable")),
+    true,
+  );
+  assert.equal(
+    isRetryableAgentRequestError(new Error("Agent API 400: invalid result")),
+    false,
+  );
+  assert.deepEqual(
+    await agentRequestWithRetry({ action: "result" }),
+    { ok: true },
+  );
+  assert.equal(calls, 3);
 });
 
 test("skips reviewer only for a complete fail-closed manager boundary", async () => {
@@ -3200,7 +3326,11 @@ test("publishes one review-retry event and one terminal result after reconciliat
     "active",
   ]);
   assert.equal((processJob.match(/resultPayload\(/gu) ?? []).length, 1);
-  assert.equal((processJob.match(/agentRequest\(\s*resultPayload/gu) ?? []).length, 1);
+  assert.equal(
+    (processJob.match(/agentRequestWithRetry\(\s*resultPayload/gu) ?? [])
+      .length,
+    1,
+  );
   assert.doesNotMatch(processJob, /reviewRun\.value/u);
   assert.doesNotMatch(processJob, /reviewerRetryReason/u);
 });

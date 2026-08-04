@@ -2465,7 +2465,7 @@ test("logs final context after review without blocking result persistence", asyn
   const reviewIndex = source.lastIndexOf("result = applyReviewerResult(");
   const contextIndex = source.indexOf('"research-result"');
   const resultIndex = source.indexOf(
-    "await agentRequest(\n      resultPayload(",
+    "await agentRequestWithRetry(\n      resultPayload(",
     contextIndex,
   );
 
@@ -3943,7 +3943,7 @@ test("flags a compound reply that silently drops a second paint task", () => {
       },
     ],
     reply: {
-      subject: "Оценка забора",
+      subject: "Оценка забора и ответ про Кремль",
       body: "Для дачного забора подготовил диапазон и рекомендую коричневый цвет.",
     },
   });
@@ -3952,6 +3952,13 @@ test("flags a compound reply that silently drops a second paint task", () => {
   const result = normalizeV2AgentResult(draft, demoData, job);
 
   assert.deepEqual(compoundReplyCoverageGaps(job, result), [
+    "покрасить кремль в москве и какой цвет выбрать лучше?",
+  ]);
+
+  draft.reply.body =
+    "Для дачного забора рекомендую коричневый цвет. Для Кремля сохранил бы краснокирпичный цвет.";
+  const colorOnlyResult = normalizeV2AgentResult(draft, demoData, job);
+  assert.deepEqual(compoundReplyCoverageGaps(job, colorOnlyResult), [
     "покрасить кремль в москве и какой цвет выбрать лучше?",
   ]);
 });

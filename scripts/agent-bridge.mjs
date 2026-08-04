@@ -647,6 +647,42 @@ async function agentRequest(
   return response.json();
 }
 
+function isRetryableAgentRequestError(error) {
+  return /fetch failed|aborted due to timeout|Agent API (?:408|425|429|5\d\d):/iu.test(
+    String(error instanceof Error ? error.message : error ?? ""),
+  );
+}
+
+async function agentRequestWithRetry(
+  payload,
+  method = "POST",
+  totalTimeoutMs = agentApiTimeoutMs,
+  maxAttempts = 3,
+) {
+  const startedAtMs = performance.now();
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const remainingMs = Math.floor(
+      totalTimeoutMs - (performance.now() - startedAtMs),
+    );
+    if (remainingMs <= 0) break;
+    try {
+      return await agentRequest(payload, method, remainingMs);
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts || !isRetryableAgentRequestError(error)) {
+        throw error;
+      }
+      const delayMs = Math.min(
+        attempt * 200,
+        Math.max(0, remainingMs - 1),
+      );
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+  throw lastError ?? new Error("Agent API retry budget exhausted");
+}
+
 function claimPayload(job) {
   return {
     orderId: job.id,
@@ -1121,7 +1157,9 @@ function toolSummary(event) {
   const evidenceText = typeof output.text === "string"
     ? output.text.replace(/\s+/gu, " ").trim().slice(0, 12_000)
     : "";
-  const sha256 = typeof output.sha256 === "string" ? output.sha256 : "";
+  const sha256 = evidenceText
+    ? createHash("sha256").update(evidenceText, "utf8").digest("hex")
+    : "";
   return {
     tool,
     urls,
@@ -1649,11 +1687,19 @@ ${promptJson(coverageGaps)}
 Уже открытые прямые страницы:
 ${promptJson(openedSourceUrls)}
 
-- Не вызывай инструменты и не начинай новый поиск.
+- Если пропущенная часть требует внешнего факта, которого нет среди уже
+  открытых страниц, выполни один целевой discovery-поиск и открой одну прямую
+  страницу. Если подходящая страница уже открыта, не ищи повторно.
 - Верни заново один полный компактный primary draft, а не патч.
 - Сохрани подтверждённые evidence и assumptions. Для каждой пропущенной
   числовой подзадачи добавь отдельные grounded estimates; начни method с
   названия объекта. Не выдумывай точность сверх открытых фактов.
+- Необычный, защищённый или некоммерческий неодушевлённый объект не отменяет
+  мысленную оценку: по открытому масштабу и явным assumptions дай широкие
+  surface_area, paint_quantity и budget; правовую и коммерческую границу укажи
+  отдельно.
+- Вопрос о стоимости не закрыт без отдельного budget estimate, method которого
+  начинается с названия соответствующего объекта.
 - В reply явно назови и закрой каждую подзадачу, включая рекомендацию цвета,
   если её просил клиент. Не задавай вопрос вместо безопасной широкой оценки.`;
 }
@@ -2070,7 +2116,7 @@ async function processJob(job) {
           job,
           "primary-retry",
           "Агент дополняет составной ответ",
-          "Одна из частей запроса не попала в письмо; повтор использует уже собранные факты без нового поиска.",
+          "Одна из частей запроса не попала в письмо; повтор сохраняет собранные факты и при необходимости открывает один источник для пропущенной части.",
           "active",
         );
         const coverageTimeoutMs = stageTimeoutForDeadline(
@@ -2087,7 +2133,7 @@ async function processJob(job) {
           );
         }
         const coverageRun = await runPrimary({
-          agent: "koler-sales-local",
+          agent: "koler-sales",
           timeoutMs: coverageTimeoutMs,
           runPrompt: compoundCoverageRetryPrompt(
             prompt,
@@ -2095,7 +2141,31 @@ async function processJob(job) {
             coverageGaps,
             verifiedOpenedSourceUrls,
           ),
+          publishResearch: true,
         });
+        const coverageOpenedSourceUrls = openedSourceUrlsFromTools(
+          coverageRun.tools,
+        );
+        attemptOpenedSourceUrls = [
+          ...new Set([
+            ...attemptOpenedSourceUrls,
+            ...coverageOpenedSourceUrls,
+          ]),
+        ];
+        verifiedOpenedSourceUrls = [
+          ...new Set([
+            ...continuationOpenedSourceUrls,
+            ...attemptOpenedSourceUrls,
+          ]),
+        ];
+        guardedJob = {
+          ...guardedJob,
+          openedSourceUrls: verifiedOpenedSourceUrls,
+          openedSources: [
+            ...guardedJob.openedSources,
+            ...openedSourcesFromTools(coverageRun.tools),
+          ],
+        };
         const repairedResult = normalizeV2AgentResult(
           coverageRun.value,
           liveDemoData,
@@ -2281,7 +2351,7 @@ async function processJob(job) {
         "Agent API timed out before result: job deadline exhausted",
       );
     }
-    await agentRequest(
+    await agentRequestWithRetry(
       resultPayload(
         job,
         result,
@@ -2308,7 +2378,7 @@ async function processJob(job) {
       0,
     );
     if (errorPublicationTimeoutMs > 0) {
-      await agentRequest(
+      await agentRequestWithRetry(
         {
           action: "error",
           ...claimPayload(job),
