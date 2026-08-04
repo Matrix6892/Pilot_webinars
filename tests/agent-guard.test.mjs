@@ -3903,7 +3903,15 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.match(result.reply.body, /0,14 кг\/м²/iu);
   assert.match(result.reply.body, /296 ₽\/кг/iu);
   assert.match(result.reply.body, /белый, коричневый, зелёный/iu);
-  assert.match(result.reply.body, /я бы выбрал коричневый/iu);
+  assert.match(result.reply.body, /(?:выбрал бы|я бы выбрал) коричневый/iu);
+  assert.match(
+    result.reply.body,
+    /Дачный забор: площадь — 20–60 м², краска — 6–19 кг, бюджет — 2\s*960–5\s*920 ₽/iu,
+  );
+  assert.doesNotMatch(
+    result.reply.body,
+    /широкий диапазон площади по описанию клиента: площадь/iu,
+  );
   assert.deepEqual(compoundReplyCoverageGaps(job, result), []);
   assert.equal(isCompleteAgentResult(result), true);
 });

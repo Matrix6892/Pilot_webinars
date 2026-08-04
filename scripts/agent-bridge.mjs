@@ -788,15 +788,68 @@ function extractJson(text) {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "");
   try {
-    return JSON.parse(cleaned);
+    return parseJsonOrCompleteDraft(cleaned);
   } catch {
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
     if (start < 0 || end <= start) {
       throw new Error("Model returned no JSON object");
     }
-    return JSON.parse(cleaned.slice(start, end + 1));
+    return parseJsonOrCompleteDraft(cleaned.slice(start, end + 1));
   }
+}
+
+function parseJsonOrCompleteDraft(source) {
+  try {
+    return JSON.parse(source);
+  } catch (error) {
+    const repaired = completeCompactDraftAtEof(source);
+    if (repaired) return repaired;
+    throw error;
+  }
+}
+
+function completeCompactDraftAtEof(source) {
+  // ponytail: only close a finished v2 object; every other malformed result retries.
+  for (const suffix of ["}", "}}"]) {
+    let draft;
+    try {
+      draft = JSON.parse(`${source}${suffix}`);
+    } catch {
+      continue;
+    }
+    const intent = draft?.resolvedIntent;
+    if (!intent || typeof intent !== "object" || Array.isArray(intent)) {
+      continue;
+    }
+    for (const key of [
+      "commitment",
+      "reply",
+      "estimates",
+      "product",
+      "supplierLeads",
+      "route",
+      "options",
+    ]) {
+      if (draft[key] === undefined && intent[key] !== undefined) {
+        draft[key] = intent[key];
+        delete intent[key];
+      }
+    }
+    if (
+      draft.schemaVersion === 2 &&
+      typeof draft.commitment === "string" &&
+      typeof draft.reply?.subject === "string" &&
+      typeof draft.reply?.body === "string" &&
+      typeof intent.goal === "string" &&
+      intent.target &&
+      Array.isArray(intent.evidence) &&
+      Array.isArray(intent.assumptions)
+    ) {
+      return draft;
+    }
+  }
+  return null;
 }
 
 function telemetryWarning(scope) {

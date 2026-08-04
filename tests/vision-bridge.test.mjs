@@ -2574,6 +2574,35 @@ test("does not retry a primary failure unrelated to time", async () => {
   assert.equal(retryStarted, false);
 });
 
+test("repairs a complete v2 draft when root keys slip into resolvedIntent", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { runPrimaryWithRetry } = bridgeStreamHelpers(bridge);
+  const malformed =
+    '{"schemaVersion":2,"resolvedIntent":{"goal":"Оценить два объекта","target":{"state":"resolved","label":"Забор","evidenceIds":["ev-msg"]},"evidence":[{"id":"ev-msg","claim":"Клиент назвал забор","confidence":1,"source":{"kind":"message","roundNo":1,"quote":"забор"}}],"assumptions":[],"commitment":"estimate","estimates":[],"reply":{"subject":"Расчёт","body":"Готовый ответ"}}';
+  let retries = 0;
+
+  const completed = await runPrimaryWithRetry({
+    run: async () => {
+      throw Object.assign(new Error("Model returned malformed JSON"), {
+        completedMalformed: true,
+        partialRun: { textParts: [malformed], tools: [] },
+      });
+    },
+    retry: async () => {
+      retries += 1;
+      return { value: null, tools: [] };
+    },
+  });
+
+  assert.equal(retries, 0);
+  assert.equal(completed.value.commitment, "estimate");
+  assert.equal(completed.value.reply.body, "Готовый ответ");
+  assert.equal(completed.value.resolvedIntent.commitment, undefined);
+});
+
 test("retries one malformed or empty transport primary result", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
