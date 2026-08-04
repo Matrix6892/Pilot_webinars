@@ -3438,6 +3438,10 @@ test("publishes one review-retry event and one terminal result after reconciliat
       .length,
     1,
   );
+  assert.match(
+    processJob,
+    /result\.route === "ready" && askCoverageGaps\(guardedJob, result\)\.length[\s\S]*?Final draft omitted an explicit request part[\s\S]*?agentRequestWithRetry\(\s*resultPayload/u,
+  );
   assert.doesNotMatch(processJob, /reviewRun\.value/u);
   assert.doesNotMatch(processJob, /reviewerRetryReason/u);
 });

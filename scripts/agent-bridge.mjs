@@ -2431,6 +2431,11 @@ async function processJob(job) {
       }
     }
 
+    // ponytail: never publish a ready reply after a later transform reopened a gap.
+    if (result.route === "ready" && askCoverageGaps(guardedJob, result).length) {
+      throw new Error("Final draft omitted an explicit request part");
+    }
+
     const terminalTimeoutMs = stageTimeoutForDeadline(
       jobStartedAtMs,
       performance.now(),
