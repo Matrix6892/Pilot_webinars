@@ -470,9 +470,11 @@ test("prepares a contract reserve before the stand send", async () => {
   assert.match(reserveAction, /setReserving\(false\)/);
   assert.match(
     stand,
-    /canSend =[\s\S]*?canManageOrder[\s\S]*?reserved && isCommercialOffer[\s\S]*?order\.status === "ready_to_send" && isEstimate/,
+    /canSend =[\s\S]*?canManageOrder[\s\S]*?reserved && isCommercialOffer[\s\S]*?order\.status === "ready_to_send" && \(isEstimate \|\| isManagerReply\)/,
   );
   assert.match(stand, /Записать отправку оценки/);
+  assert.match(stand, /Ответ руководителя готов · резерв не нужен/);
+  assert.match(stand, /Текущий фокус · в работе/);
   assert.match(stand, /Резерв товара подготовлен/);
   assert.match(stand, /Подготовить резерв товара/);
   assert.match(

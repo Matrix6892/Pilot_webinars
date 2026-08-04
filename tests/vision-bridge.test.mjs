@@ -95,6 +95,7 @@ function reviewPromptFromBridge(
     `${source.slice(start, end)}
 reviewPrompt`,
     {
+      promptJson: (value) => JSON.stringify(value, null, 2),
       reviewerInstruction: "Проверь заказ.",
       reviewerOrderView,
       reviewerResultView,
@@ -116,6 +117,7 @@ function primaryPromptFromBridge(
 primaryPrompt`,
     {
       continuationContextForJob: () => null,
+      promptJson: (value) => JSON.stringify(value, null, 2),
       reviewerOrderView,
       salesInstruction,
       visionPromptBlock: () => "",
@@ -1158,6 +1160,94 @@ test("primary prompt turns ordinary unknowns into assumptions and requires publi
   assert.doesNotMatch(
     prompt,
     /задай один вопрос о материале, назначении, уборке и нагрузке/iu,
+  );
+});
+
+test("compound requests receive the complete catalog and keep every explicit ask", async () => {
+  const [bridge, salesInstruction, reviewerInstruction, demoData] =
+    await Promise.all([
+      readFile(new URL("../scripts/agent-bridge.mjs", import.meta.url), "utf8"),
+      readFile(new URL("../public/prompts/sales-agent.md", import.meta.url), "utf8"),
+      readFile(new URL("../public/prompts/reviewer.md", import.meta.url), "utf8"),
+      readFile(new URL("../data/paint-demo.json", import.meta.url), "utf8").then(
+        JSON.parse,
+      ),
+    ]);
+  const { reviewerOrderView, reviewerResultView } = bridgePromptHelpers(bridge);
+  const job = {
+    subject: "Вопросики",
+    body: "Добрый день! Хочу покрасить забор деревянный, на даче и еще скажите сколько будет стоить покрасить кремль в москве и какой цвет выбрать лучше?",
+    company: "",
+    website: "",
+    roundNo: 1,
+    attachmentJson: "null",
+    conversationJson: "[]",
+  };
+  const liveData = {
+    products: demoData.products,
+    market: demoData.market,
+    rules: demoData.rules,
+    inventorySnapshot: { version: 5, capturedAt: "2026-08-04T06:18:33Z" },
+  };
+  const primaryPrompt = primaryPromptFromBridge(
+    bridge,
+    reviewerOrderView,
+    salesInstruction,
+  )(job, liveData, null, null);
+  const sourceHeading = "## Демонстрационные источники истины\n";
+  const primarySources = primaryPrompt
+    .slice(primaryPrompt.indexOf(sourceHeading) + sourceHeading.length)
+    .split("\n## ", 1)[0];
+
+  assert.match(primarySources, /"sku":\s*"КР-005"/u);
+  assert.ok(
+    Math.max(...primarySources.split("\n").map((line) => line.length)) < 2_000,
+    "OpenCode must not truncate the catalog before the final product",
+  );
+  assert.match(
+    primaryPrompt,
+    /кажд[а-яё]* явно выраженн[а-яё]* просьб[а-яё]*[\s\S]*?клиентск[а-яё]* ответ/iu,
+  );
+
+  const reviewPrompt = reviewPromptFromBridge(
+    bridge,
+    reviewerOrderView,
+    reviewerResultView,
+  )(
+    job,
+    {},
+    liveData,
+    {
+      order: reviewerOrderView(job),
+      result: {
+        schemaVersion: 2,
+        zone: "yellow",
+        route: "ready",
+        commitment: "estimate",
+        resolvedIntent: {
+          target: { state: "resolved", label: "Деревянный забор" },
+          blocker: null,
+        },
+        estimates: [],
+        supplierLeads: [],
+        options: [],
+        reply: { subject: "Ответ", body: "Черновик" },
+      },
+    },
+  );
+  const reviewHeading = "## Каталог, склад, прайс и правила\n";
+  const reviewSources = reviewPrompt
+    .slice(reviewPrompt.indexOf(reviewHeading) + reviewHeading.length)
+    .split("\n## ", 1)[0];
+
+  assert.match(reviewSources, /"sku":\s*"КР-005"/u);
+  assert.ok(
+    Math.max(...reviewSources.split("\n").map((line) => line.length)) < 2_000,
+    "reviewer must see the same complete catalog as primary",
+  );
+  assert.match(
+    reviewerInstruction,
+    /кажд[а-яё]* явно выраженн[а-яё]* просьб[а-яё]*[\s\S]*?blocking/iu,
   );
 });
 

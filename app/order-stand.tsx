@@ -21,6 +21,7 @@ import {
   resultInventorySkus,
 } from "@/lib/inventory-freshness.mjs";
 import {
+  activeOrderProgress,
   apiTimeoutMs,
   createLatestRequestGate,
   createSerialPoller,
@@ -2320,6 +2321,16 @@ export function OrderStand() {
   const processingCopy = orderProcessingCopy(
     leaseExpired ? "processing-expired" : processingState,
   );
+  const currentRunEvents = order
+    ? events.filter((event) => isCurrentOrderEvent(event, order))
+    : [];
+  const activeProgress =
+    processingState === "processing-active"
+      ? activeOrderProgress(
+          currentRunEvents,
+          currentRunEvents[0]?.createdAt ?? order?.updatedAt ?? order?.createdAt,
+        )
+      : null;
   const showResult =
     Boolean(result) && Boolean(order) && !orderIsActive && processingState !== "error";
   const hint = useMemo(() => inferZone(draft), [draft]);
@@ -3045,11 +3056,17 @@ export function OrderStand() {
                     <article className="event-item is-active">
                       <div className="event-index">··</div>
                       <div>
-                        <h3>{processingCopy.title}</h3>
+                        {activeProgress && (
+                          <small>Текущий фокус · в работе</small>
+                        )}
+                        <h3>{activeProgress?.title ?? processingCopy.title}</h3>
                         <p>
-                          {processingState === "processing-active" &&
-                          order?.updatedAt
-                            ? `Последний подтверждённый сигнал этого запуска: ${formatEventTime(order.updatedAt)}. Страница обновляется автоматически каждые 3 секунды.`
+                          {activeProgress
+                            ? `${activeProgress.elapsed} · ${
+                                order?.updatedAt
+                                  ? `Последний подтверждённый сигнал этого запуска: ${formatEventTime(order.updatedAt)}`
+                                  : "соединение с запуском активно"
+                              }. Страница обновляется автоматически каждые 3 секунды.`
                             : processingCopy.detail}
                         </p>
                       </div>
@@ -3442,6 +3459,8 @@ function ResultPanel({
     supplierRefreshNeeded && !inventoryChanged && !sent;
   const isEstimate = result.commitment === "estimate";
   const isCommercialOffer = result.commitment === "commercial_offer";
+  const isManagerReply =
+    result.commitment === "none" && Boolean(order.managerDecision);
   const canClarify =
     canManageOrder &&
     result.route === "needs_info" &&
@@ -3457,7 +3476,7 @@ function ResultPanel({
     canManageOrder &&
     !inventoryChanged &&
     ((reserved && isCommercialOffer) ||
-      (order.status === "ready_to_send" && isEstimate));
+      (order.status === "ready_to_send" && (isEstimate || isManagerReply)));
   const supplierPlan = result.supplierPlan ?? null;
   const comparedSupplierOffers = Array.isArray(supplierPlan?.comparedOffers)
     ? supplierPlan.comparedOffers
@@ -4531,6 +4550,8 @@ function ResultPanel({
                 ? "Руководитель выбирает вариант"
                 : isEstimate
                   ? "Предварительная оценка готова · резерв не открыт"
+                : isManagerReply
+                  ? "Ответ руководителя готов · резерв не нужен"
                 : order.managerDecision
                   ? "Вариант подтверждён · подготовьте резерв товара"
                   : "Ответ проверен · подготовьте резерв товара"}
@@ -4573,6 +4594,12 @@ function ResultPanel({
           <div className="sent-note">
             Это диапазонная оценка с явными допущениями. Её можно отправить
             клиенту; резерв товара откроется после подтверждения точных данных.
+          </div>
+        )}
+        {responsePrepared && isManagerReply && (
+          <div className="sent-note">
+            Ответ руководителя готов · резерв не нужен. Его можно сразу
+            записать как отправленный клиенту.
           </div>
         )}
         <strong className="reply-subject">

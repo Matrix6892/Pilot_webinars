@@ -193,6 +193,11 @@ function promptText(value, max) {
     : "";
 }
 
+function promptJson(value) {
+  // ponytail: pretty JSON prevents OpenCode from truncating one giant line.
+  return JSON.stringify(value, null, 2);
+}
+
 function promptStringList(value, limit, max) {
   return Array.isArray(value)
     ? value
@@ -1523,7 +1528,7 @@ function primaryPrompt(
   const continuationBlock = promptContext
     ? `## Сохранённый контекст прошлого раунда
 
-${JSON.stringify(promptContext)}
+${promptJson(promptContext)}
 
 - Свежий ответ клиента разрешает прежний blocker и имеет приоритет.
 - Переиспользуй прежние intent, evidence, assumptions, vision-наблюдение и открытые публичные источники; не задавай тот же вопрос повторно.
@@ -1533,13 +1538,13 @@ ${JSON.stringify(promptContext)}
 
 ## Текущий заказ
 
-${JSON.stringify(reviewerOrderView(job))}
+${promptJson(reviewerOrderView(job))}
 
 ${continuationBlock}
 
 ## Демонстрационные источники истины
 
-${JSON.stringify({
+${promptJson({
     products: liveDemoData.products,
     supplierSnapshot: liveDemoData.market,
     rules: liveDemoData.rules,
@@ -1590,11 +1595,11 @@ ${compactContext}
 ## Завершение незаконченного исследования
 
 Первый запуск уже открыл эти прямые страницы:
-${JSON.stringify(openedSourceUrls)}
+${promptJson(openedSourceUrls)}
 
 ${
   partialDraft
-    ? `Незавершённый видимый черновик первого запуска:\n${JSON.stringify(partialDraft)}`
+    ? `Незавершённый видимый черновик первого запуска:\n${promptJson(partialDraft)}`
     : ""
 }
 
@@ -1644,15 +1649,15 @@ function reviewPrompt(
 
 ## Заказ
 
-${JSON.stringify({ ...order, attachment: undefined })}
+${promptJson({ ...order, attachment: undefined })}
 
 ## Последнее сообщение клиента целиком
 
-${JSON.stringify(latestCustomerMessage.slice(0, 2_000))}
+${promptJson(latestCustomerMessage.slice(0, 2_000))}
 
 ## Каталог, склад, прайс и правила
 
-${JSON.stringify({
+${promptJson({
     products: liveDemoData.products,
     market: liveDemoData.market,
     rules: liveDemoData.rules,
@@ -1675,7 +1680,7 @@ ${JSON.stringify({
 
 ## Машинная граница неоднозначной цели
 
-${JSON.stringify({
+${promptJson({
     targetAmbiguityBoundary,
     candidateIsNotRecommendation: targetAmbiguityBoundary,
   })}
@@ -1696,7 +1701,7 @@ ${JSON.stringify(allowedPathPrefixes)}
 
 ## Черновик агента
 
-${JSON.stringify(packet.result)}
+${promptJson(packet.result)}
 
 Верни только JSON по схеме инструкции.`;
 }

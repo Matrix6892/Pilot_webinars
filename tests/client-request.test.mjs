@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  activeOrderProgress,
   apiTimeoutMs,
   createLatestRequestGate,
   createSerialPoller,
@@ -235,6 +236,40 @@ test("distinguishes queued, active lease, expired lease and error states", () =>
     "processing-expired",
   );
   assert.equal(orderProcessingState({ status: "error" }, now), "error");
+});
+
+test("shows safe rotating progress summaries without exposing reasoning", () => {
+  const startedAt = "2026-08-04T06:18:30Z";
+  const events = [
+    { stage: "understanding", createdAt: "2026-08-04T06:18:31Z" },
+    { stage: "model", createdAt: "2026-08-04T06:18:35Z" },
+  ];
+
+  assert.deepEqual(
+    activeOrderProgress(events, startedAt, Date.parse("2026-08-04T06:18:40Z")),
+    {
+      title: "Разбираю все части запроса",
+      elapsed: "10 сек",
+    },
+  );
+  assert.deepEqual(
+    activeOrderProgress(events, startedAt, Date.parse("2026-08-04T06:19:05Z")),
+    {
+      title: "Сверяю каталог, цены и доступные данные",
+      elapsed: "35 сек",
+    },
+  );
+  assert.deepEqual(
+    activeOrderProgress(
+      [...events, { stage: "review", createdAt: "2026-08-04T06:20:00Z" }],
+      startedAt,
+      Date.parse("2026-08-04T06:20:10Z"),
+    ),
+    {
+      title: "Проверяю, что ответ охватывает все просьбы",
+      elapsed: "1 мин 40 сек",
+    },
+  );
 });
 
 test("a committed PATCH clears its lost-response error after reconciliation", () => {

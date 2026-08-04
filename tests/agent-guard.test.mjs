@@ -3808,6 +3808,105 @@ test("target fit survives a trusted substrate only when the target itself matche
   assert.equal(result.estimates[0].candidateSku, "КР-004");
 });
 
+test("compound estimates keep each ask distinct and surface grounded catalog guidance", () => {
+  const sourceUrl = "https://reference.example/kremlin-scale";
+  const source = openedWeb(
+    sourceUrl,
+    "Справочная страница описывает Московский Кремль как крупный архитектурный комплекс.",
+  );
+  const job = {
+    subject: "Вопросики",
+    body: "Добрый день! Хочу покрасить забор деревянный, на даче и еще скажите сколько будет стоить покрасить кремль в москве и какой цвет выбрать лучше?",
+    openedSourceUrls: [sourceUrl],
+    openedSources: [source],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "деревянный забор на даче",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 20, max: 60, unit: "м²" },
+        method: "Дачный забор: широкий диапазон площади по описанию клиента",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 6, max: 19, unit: "кг" },
+        method: "Дачный забор: площадь × расход каталога × два слоя с запасом",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+        candidateSku: "КР-005",
+      },
+      {
+        metric: "budget",
+        range: { min: 2_960, max: 5_920, unit: "₽" },
+        method: "Дачный забор: количество краски × цена каталога",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+        candidateSku: "КР-005",
+      },
+      {
+        metric: "surface_area",
+        range: { min: 20_000, max: 80_000, unit: "м²" },
+        method: "Кремль: порядок площади по открытому масштабу комплекса",
+        evidenceIds: ["kremlin-source"],
+        assumptionIds: [],
+        confidence: 0.25,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 5_600, max: 22_400, unit: "кг" },
+        method: "Кремль: условный расход для мысленного сценария",
+        evidenceIds: ["kremlin-source"],
+        assumptionIds: [],
+        confidence: 0.2,
+      },
+      {
+        metric: "budget",
+        range: { min: 500_000_000, max: 3_000_000_000, unit: "₽" },
+        method: "Кремль: широкий порядок бюджета с работами и доступом",
+        evidenceIds: ["kremlin-source"],
+        assumptionIds: [],
+        confidence: 0.15,
+      },
+    ],
+    reply: {
+      subject: "Два цветовых решения",
+      body: "Для дачного забора выбрал бы коричневый: он спокойно стареет рядом с деревом и землёй. Для Кремля сохранил бы узнаваемую историческую палитру и сначала сделал пробный выкрас.",
+    },
+  });
+  draft.resolvedIntent.goal =
+    "Оценить покраску деревянного забора и мысленный сценарий для Кремля";
+  draft.resolvedIntent.evidence.push({
+    id: "kremlin-source",
+    claim: source.excerpt,
+    confidence: 0.7,
+    source: {
+      kind: "web",
+      url: sourceUrl,
+      title: "Справка о масштабе комплекса",
+      openedAt: source.openedAt,
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.commitment, "estimate");
+  assert.equal(result.estimates.length, 6);
+  assert.match(result.reply.body, /Дачный забор/iu);
+  assert.match(result.reply.body, /Кремл/iu);
+  assert.match(result.reply.body, /КР-005[^.]*Краска для дерева на улице/iu);
+  assert.match(result.reply.body, /0,14 кг\/м²/iu);
+  assert.match(result.reply.body, /296 ₽\/кг/iu);
+  assert.match(result.reply.body, /белый, коричневый, зелёный/iu);
+  assert.equal(isCompleteAgentResult(result), true);
+});
+
 test("does not turn a substrate claim into an exact offer for unknown application targets", () => {
   const cases = [
     "металлическая ладонь",

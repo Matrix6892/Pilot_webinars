@@ -358,7 +358,8 @@ export function approvalStatus(
   commitment: AgentResult["commitment"],
 ) {
   if (needsCustomerReply) return "clarification_ready" as const;
-  return commitment === "none" ? ("error" as const) : ("ready_to_send" as const);
+  void commitment; // ponytail: every approved client reply uses one ready state.
+  return "ready_to_send" as const;
 }
 
 function routeLabel(result: AgentResult) {
@@ -2021,10 +2022,17 @@ export async function PATCH(request: Request) {
     const sendsEstimate =
       order.status === "ready_to_send" &&
       result?.commitment === "estimate";
+    const sendsManagerReply =
+      order.status === "ready_to_send" &&
+      result?.commitment === "none" &&
+      Boolean(order.managerDecision);
     const sendsCommercialOffer =
       order.status === "reserved" &&
       result?.commitment === "commercial_offer";
-    if ((!sendsEstimate && !sendsCommercialOffer) || order.sentAt) {
+    if (
+      (!sendsEstimate && !sendsManagerReply && !sendsCommercialOffer) ||
+      order.sentAt
+    ) {
       return Response.json(
         {
           error:
@@ -2080,12 +2088,13 @@ export async function PATCH(request: Request) {
     }
 
     const now = new Date().toISOString();
+    const priorSendStatus = sendsEstimate ? "ready_to_send" : "reserved";
+    const guardedSendStatus = sendsManagerReply
+      ? "ready_to_send"
+      : priorSendStatus;
     const transitionGuard = and(
       eq(orders.id, id),
-      eq(
-        orders.status,
-        sendsEstimate ? "ready_to_send" : "reserved",
-      ),
+      eq(orders.status, guardedSendStatus),
       sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
       sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
         order.inventorySnapshotJson ?? ""
@@ -2100,6 +2109,8 @@ export async function PATCH(request: Request) {
         title: "Отправка ответа записана",
         detail: sendsEstimate
           ? "Диапазонная оценка отправлена без резерва товара. Письмо и время сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом."
+          : sendsManagerReply
+          ? "Одобренный руководителем некоммерческий ответ отправлен без резерва товара. Письмо и время сохранены в общем журнале. Рабочая почта компании подключается отдельным шагом."
           : confirmedSupplierPlan
           ? `Перед записью отправки повторно проверены цена, объём, срок и дата поставщика. ${supplierPlanEventDetail(
               confirmedSupplierPlan,
@@ -2378,16 +2389,23 @@ export async function PATCH(request: Request) {
   if (supplierPlan) result.supplierPlan = supplierPlan;
   else delete result.supplierPlan;
 
+  const needsCustomerReply =
+    result.resolvedIntent.target.state === "ambiguous" &&
+    optionNeedsCustomerReply(option);
+  const preparedReply = result.reply.body.trim();
+  const selectedReply = option.reply.trim();
   result.reply = {
     subject:
       approvedAlternative && result.product
         ? `Предложение по заказу: ${result.product.name}`
         : result.reply.subject,
-    body: option.reply,
+    body: (needsCustomerReply
+      ? [selectedReply]
+      : [preparedReply, selectedReply]
+    )
+      .filter((part, index, parts) => part && parts.indexOf(part) === index)
+      .join("\n\n"),
   };
-  const needsCustomerReply =
-    result.resolvedIntent.target.state === "ambiguous" &&
-    optionNeedsCustomerReply(option);
   if (needsCustomerReply) {
     const blockerQuestion =
       result.resolvedIntent.blocker?.question ??

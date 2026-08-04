@@ -1904,7 +1904,7 @@ test("keeps canonical supplier plans except for approved product alternatives", 
   );
 });
 
-test("does not turn a complete non-clarification approval without commitment into a dead ready order", async () => {
+test("manager approval prepares a safe nonbinding client reply instead of an error", async () => {
   const route = await readFile(
     new URL("../app/api/orders/route.ts", import.meta.url),
     "utf8",
@@ -1917,7 +1917,7 @@ test("does not turn a complete non-clarification approval without commitment int
   assert.equal(approvalStatus(true, "commercial_offer"), "clarification_ready");
   assert.equal(approvalStatus(false, "estimate"), "ready_to_send");
   assert.equal(approvalStatus(false, "commercial_offer"), "ready_to_send");
-  assert.equal(approvalStatus(false, "none"), "error");
+  assert.equal(approvalStatus(false, "none"), "ready_to_send");
   const approval = route.slice(route.indexOf('if (action !== "approve"'));
   assert.match(
     approval,
@@ -1926,5 +1926,13 @@ test("does not turn a complete non-clarification approval without commitment int
   assert.ok(
     approval.indexOf("if (!isCompleteAgentResult(result))") <
       approval.indexOf("const historyQuery"),
+  );
+  assert.match(
+    route,
+    /sendsManagerReply[\s\S]*?result\?\.commitment === "none"[\s\S]*?order\.managerDecision/,
+  );
+  assert.match(
+    route,
+    /preparedReply[\s\S]*?selectedReply[\s\S]*?join\("\\n\\n"\)/,
   );
 });
