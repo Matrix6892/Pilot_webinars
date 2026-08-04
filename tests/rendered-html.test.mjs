@@ -375,7 +375,9 @@ test("labels live processing states and does not promise offline fallback", asyn
 
   assert.match(stand, /function orderProcessingCopy\(state: string\)/);
   assert.match(stand, /В очереди · ждёт live-агента/);
-  assert.match(stand, /Агент разбирает заявку · lease действует/);
+  assert.match(stand, /Агент работает · связь подтверждена/);
+  assert.match(stand, /formatEventTime\(order\.updatedAt\)/);
+  assert.match(stand, /Последний подтверждённый сигнал этого запуска/);
   assert.match(stand, /Время агента истекло · карточка сохранена/);
   assert.match(stand, /Ошибка обработки · можно повторить/);
   assert.match(stand, /Повторите этот же заказ/);

@@ -804,10 +804,10 @@ function orderProcessingCopy(state: string) {
   }
   if (state === "processing-active") {
     return {
-      badge: "Агент разбирает заявку · lease действует",
-      title: "Агент разбирает заявку",
+      badge: "Агент работает · связь подтверждена",
+      title: "Агент работает над заявкой",
       detail:
-        "Действующая lease сохраняет за агентом этот запуск. Новый результат появится на этой странице.",
+        "Работа продолжается. Новый результат появится на этой странице автоматически.",
     };
   }
   if (state === "processing-expired") {
@@ -3046,7 +3046,12 @@ export function OrderStand() {
                       <div className="event-index">··</div>
                       <div>
                         <h3>{processingCopy.title}</h3>
-                        <p>{processingCopy.detail}</p>
+                        <p>
+                          {processingState === "processing-active" &&
+                          order?.updatedAt
+                            ? `Последний подтверждённый сигнал этого запуска: ${formatEventTime(order.updatedAt)}. Страница обновляется автоматически каждые 3 секунды.`
+                            : processingCopy.detail}
+                        </p>
                       </div>
                       <span className="event-pulse" />
                     </article>
