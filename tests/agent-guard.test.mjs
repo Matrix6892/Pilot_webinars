@@ -4137,6 +4137,24 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     "какой цвет выбрать лучше",
   ]);
 
+  const restorationContrastDraft = structuredClone(draft);
+  restorationContrastDraft.reply.body =
+    "Цвет забора. Рекомендую коричневый из палитры. " +
+    "Цвет Кремля. Исторический вид крепости — красный кирпич, его и стоит сохранять: здесь цвет определяет не палитра, а статус памятника и реставрационные требования.";
+  const restorationContrastResult = normalizeV2AgentResult(
+    restorationContrastDraft,
+    demoData,
+    job,
+  );
+  assert.match(
+    restorationContrastResult.reply.body,
+    /красный кирпич, его и стоит сохранять/iu,
+  );
+  assert.deepEqual(
+    compoundReplyCoverageGaps(job, restorationContrastResult),
+    [],
+  );
+
   const headedColorAdvice = structuredClone(result);
   headedColorAdvice.reply.body =
     "Цвет для дачного забора. Советую коричневый из подтверждённой палитры. " +
