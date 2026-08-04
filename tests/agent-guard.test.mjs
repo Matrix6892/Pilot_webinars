@@ -4155,6 +4155,16 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     [],
   );
 
+  const preservationChoiceAdvice = structuredClone(result);
+  preservationChoiceAdvice.reply.body =
+    "Цвет для дачного забора: рекомендую коричневый. " +
+    "Цвет для Кремля: сегодня стены красно-кирпичные, и это его исторический вид; " +
+    "при гипотетическом выборе правильный вариант — сохранить красно-кирпичный тон.";
+  assert.deepEqual(
+    compoundReplyCoverageGaps(job, preservationChoiceAdvice),
+    [],
+  );
+
   const headedColorAdvice = structuredClone(result);
   headedColorAdvice.reply.body =
     "Цвет для дачного забора. Советую коричневый из подтверждённой палитры. " +
