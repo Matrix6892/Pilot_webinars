@@ -4061,6 +4061,12 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.deepEqual(compoundReplyCoverageGaps(job, result), []);
   assert.equal(isCompleteAgentResult(result), true);
 
+  const headedColorAdvice = structuredClone(result);
+  headedColorAdvice.reply.body =
+    "Цвет для дачного забора. Советую коричневый из подтверждённой палитры. " +
+    "Цвет для Кремля. Здесь выбирать не нужно: красно-кирпичный вид сохраняют реставраторы.";
+  assert.deepEqual(compoundReplyCoverageGaps(job, headedColorAdvice), []);
+
   const missingKremlinColor = structuredClone(result);
   missingKremlinColor.reply.body = missingKremlinColor.reply.body.replace(
     /Для Кремля сохранил бы узнаваемую историческую палитру и сначала сделал пробный выкрас\./iu,
