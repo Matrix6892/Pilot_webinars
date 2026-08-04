@@ -54,6 +54,14 @@ const orderCapabilityMaxAgeSeconds = 24 * 60 * 60;
 const clientOrderIdPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const clientActionKeyPattern = /^[0-9a-f]{64}$/iu;
+export const followUpStatuses = new Set([
+  "clarification_ready",
+  "awaiting_customer",
+  "awaiting_approval",
+  "ready_to_send",
+  "reserved",
+  "sent",
+]);
 const responseJson = globalThis.Response.json.bind(globalThis.Response);
 export function noStoreResponseInit(init: ResponseInit = {}) {
   const headers = new Headers(init.headers);
@@ -742,6 +750,7 @@ export async function GET(request: Request) {
   if (url.searchParams.get("system") === "1") {
     return Response.json({
       bridgeOnline: await bridgeOnline(),
+      contractRevision: "webinar-completion-v1",
       provider: "DeepSeek API",
       agent: "Колер",
       runner: "OpenCode",
@@ -837,6 +846,7 @@ export async function GET(request: Request) {
   return Response.json(
     {
       bridgeOnline: await bridgeOnline(),
+      canManageOrder: true,
       order: {
         ...order,
         result: storedAgentResult(order.resultJson),
@@ -971,7 +981,7 @@ export async function POST(request: Request) {
         { status: 404, headers: noStoreHeaders },
       );
     }
-    if (!(await canChangeOrder(request, failedCapability.actionTokenHash))) {
+    if (!(await canReadOrder(request, failedCapability.actionTokenHash, retryId))) {
       return Response.json(
         {
           error:
@@ -1353,7 +1363,7 @@ export async function PATCH(request: Request) {
       { status: 404, headers: noStoreHeaders },
     );
   }
-  if (!(await canChangeOrder(request, capability.actionTokenHash))) {
+  if (!(await canReadOrder(request, capability.actionTokenHash, id))) {
     return Response.json(
       {
         error:
@@ -1480,9 +1490,22 @@ export async function PATCH(request: Request) {
         { status: 400 },
       );
     }
-    if (order.status !== "awaiting_customer") {
+    if (["queued", "processing"].includes(order.status)) {
       return Response.json(
-        { error: "Этот ответ клиента уже учтён в заказе." },
+        {
+          error:
+            "Агент уже обрабатывает этот заказ. Дождитесь текущего результата перед новым сообщением.",
+          code: "order_busy",
+        },
+        { status: 409 },
+      );
+    }
+    if (!followUpStatuses.has(order.status)) {
+      return Response.json(
+        {
+          error: "Для текущего состояния заказа новое сообщение недоступно.",
+          code: "follow_up_not_allowed",
+        },
         { status: 409 },
       );
     }
@@ -1491,8 +1514,25 @@ export async function PATCH(request: Request) {
       [],
     );
     const customerRepliedAt = new Date().toISOString();
+    const currentReply = storedAgentResult(order.resultJson)?.reply.body.trim() ?? "";
+    const replyAlreadyStored = Boolean(
+      currentReply &&
+        conversation.some(
+          (message) =>
+            message.role === "agent" && message.body.trim() === currentReply,
+        ),
+    );
     const nextConversation = [
       ...conversation,
+      ...(currentReply && !replyAlreadyStored
+        ? [
+            {
+              role: "agent" as const,
+              body: currentReply,
+              createdAt: customerRepliedAt,
+            },
+          ]
+        : []),
       {
         role: "customer" as const,
         body: answer,
@@ -1501,72 +1541,10 @@ export async function PATCH(request: Request) {
     ];
     const liveData = await getDemoDataWithInventory();
     const inventorySnapshot = snapshotFromDemoData(liveData);
-    const recordedMode = order.mode === "recorded-demo";
-
-    if (!recordedMode) {
-      const transitionGuard = and(
-        eq(orders.id, id),
-        eq(orders.status, "awaiting_customer"),
-        sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
-        sql`coalesce(${orders.conversationJson}, '') = ${
-          order.conversationJson ?? ""
-        }`,
-        sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
-          order.inventorySnapshotJson ?? ""
-        }`,
-        sql`${orders.roundNo} = ${order.roundNo}`,
-        sql`${orders.sentAt} is null`,
-      )!;
-      const replyEventQuery = insertOrderEventWhen(
-        db,
-        {
-          orderId: id,
-          stage: "customer-reply",
-          title: "Клиент прислал детали",
-          detail: answer,
-          createdAt: customerRepliedAt,
-          ...eventMetadata(order),
-        },
-        transitionGuard,
-      );
-      const queueOrderQuery = db
-        .update(orders)
-        .set({
-          status: "queued",
-          zone: null,
-          conversationJson: JSON.stringify(nextConversation),
-          roundNo: order.roundNo + 1,
-          inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-          managerDecision: null,
-          managerOptionId: null,
-          managerDecidedAt: null,
-          mode: "opencode-live",
-          updatedAt: customerRepliedAt,
-        })
-        .where(transitionGuard)
-        .returning({ id: orders.id });
-      const [, queuedOrders] = await db.batch([
-        replyEventQuery,
-        queueOrderQuery,
-      ]);
-      const [queued] = queuedOrders;
-      if (!queued) {
-        return Response.json(
-          { error: "Заказ уже обновился. Показываем свежие данные." },
-          { status: 409 },
-        );
-      }
-      return Response.json({ ok: true, status: "queued" });
-    }
-
-    const result = buildDemoResult(
-      inputWithConversation(order, nextConversation),
-      liveData,
-    );
-    const nextStatus = statusForResult(result);
+    const nextRoundNo = order.roundNo + 1;
     const transitionGuard = and(
       eq(orders.id, id),
-      eq(orders.status, "awaiting_customer"),
+      eq(orders.status, order.status),
       sql`coalesce(${orders.resultJson}, '') = ${order.resultJson ?? ""}`,
       sql`coalesce(${orders.conversationJson}, '') = ${
         order.conversationJson ?? ""
@@ -1574,83 +1552,68 @@ export async function PATCH(request: Request) {
       sql`coalesce(${orders.inventorySnapshotJson}, '') = ${
         order.inventorySnapshotJson ?? ""
       }`,
+      sql`${orders.roundNo} = ${order.roundNo}`,
       sql`coalesce(${orders.sentAt}, '') = ${order.sentAt ?? ""}`,
     )!;
-    const historyQuery = insertResultHistoryWhen(
+    const replyEventQuery = insertOrderEventWhen(
       db,
       {
         orderId: id,
-        roundNo: order.roundNo + 1,
-        result,
-        status: nextStatus,
-        reason: "Ответ клиента учтён",
-        sourceKey: `customer:${order.roundNo + 1}`,
-        inventorySnapshot,
-        agentModel: "Записанный демонстрационный прогон",
-        reviewerModel: "Проверка программы",
+        stage: "customer-reply",
+        title: "Клиент продолжил тот же заказ",
+        detail: answer,
+        createdAt: customerRepliedAt,
+        roundNo: nextRoundNo,
+        claimId: null,
+        attemptNo: 0,
       },
       transitionGuard,
     );
-    const transitionEvents = [
-      {
-        orderId: id,
-        stage: "customer-reply",
-        title: "Клиент прислал детали",
-        detail: answer,
-      },
-      ...stagedEvents(id, result, {
-        roundNo: order.roundNo + 1,
-        claimId: order.claimId,
-        attemptNo: order.attemptNo,
-      }).filter(
-        (event) => !["received", "understanding"].includes(event.stage),
-      ),
-    ];
-    const eventQueries = transitionEvents.map((event) =>
-        insertOrderEventWhen(
-          db,
-          {
-            ...event,
-            createdAt: customerRepliedAt,
-            ...eventMetadata({ ...order, roundNo: order.roundNo + 1 }),
-          },
-          transitionGuard,
-        ),
-    );
-    const updateOrderQuery = db
+    const queueOrderQuery = db
       .update(orders)
       .set({
-        status: nextStatus,
-        zone: result.zone,
-        resultJson: JSON.stringify(result),
+        status: "queued",
+        zone: null,
         conversationJson: JSON.stringify(nextConversation),
-        roundNo: order.roundNo + 1,
+        roundNo: nextRoundNo,
         inventorySnapshotJson: JSON.stringify(inventorySnapshot),
-        agentModel: "Записанный демонстрационный прогон",
-        reviewerModel: "Проверка программы",
         managerDecision: null,
         managerOptionId: null,
         managerDecidedAt: null,
+        sentAt: null,
+        claimId: null,
+        claimedBy: null,
+        leaseUntil: null,
+        attemptNo: 0,
+        mode: "opencode-live",
         updatedAt: customerRepliedAt,
       })
       .where(transitionGuard)
-      .returning({ id: orders.id });
-    const batchResults = await db.batch([
-      historyQuery,
-      ...eventQueries,
-      updateOrderQuery,
+      .returning({
+        id: orders.id,
+        status: orders.status,
+        roundNo: orders.roundNo,
+      });
+    const [, queuedOrders] = await db.batch([
+      replyEventQuery,
+      queueOrderQuery,
     ]);
-    const updatedOrders = batchResults.at(-1) as
-      | Array<{ id: string }>
-      | undefined;
-    const [updated] = updatedOrders ?? [];
-    if (!updated) {
+    const [queued] = queuedOrders;
+    if (!queued) {
       return Response.json(
-        { error: "Заказ уже обновился. Показываем свежие данные." },
+        {
+          error:
+            "Агент уже принял это сообщение или заказ перешёл к следующему шагу.",
+          code: "order_busy",
+        },
         { status: 409 },
       );
     }
-    return Response.json({ ok: true, status: nextStatus });
+    return Response.json({
+      ok: true,
+      status: queued.status,
+      roundNo: queued.roundNo,
+    });
   }
 
   if (action === "recalculate") {

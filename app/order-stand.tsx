@@ -908,6 +908,7 @@ export function OrderStand() {
   const [selectedModel, setSelectedModel] = useState(modelCatalog.default);
   const [orderId, setOrderId] = useState("");
   const [orderActionKey, setOrderActionKey] = useState("");
+  const [canManageOrder, setCanManageOrder] = useState(false);
   const [order, setOrder] = useState<OrderRecord | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [orderResultHistory, setOrderResultHistory] = useState<
@@ -961,6 +962,7 @@ export function OrderStand() {
   const orderActionKeysRef = useRef(new Map<string, string>());
   const currentOrderIdRef = useRef("");
   const lastOrderStatusRef = useRef<string | null>(null);
+  const focusedReadyOrdersRef = useRef(new Set<string>());
   const orderLoadControllerRef = useRef<AbortController | null>(null);
   const orderLoadGateRef = useRef(createLatestRequestGate());
   const createOperationRef = useRef<CreateOperation | null>(null);
@@ -982,6 +984,7 @@ export function OrderStand() {
     orderLoadControllerRef.current?.abort();
     lastOrderStatusRef.current = null;
     setOrderActionKey("");
+    setCanManageOrder(false);
     setOrder(null);
     setEvents([]);
     setOrderResultHistory([]);
@@ -1160,6 +1163,7 @@ export function OrderStand() {
           response: Response;
           data: {
             bridgeOnline?: boolean;
+            canManageOrder?: boolean;
             order?: OrderRecord;
             events?: EventRow[];
             resultHistory?: ResultHistoryEntry[];
@@ -1185,6 +1189,7 @@ export function OrderStand() {
         const previousStatus = lastOrderStatusRef.current;
         lastOrderStatusRef.current = data.order.status;
         setBridgeOnline(Boolean(data.bridgeOnline));
+        setCanManageOrder(Boolean(data.canManageOrder));
         setOrder(data.order);
         setEvents(data.events ?? []);
         setOrderResultHistory(data.resultHistory ?? []);
@@ -1350,6 +1355,19 @@ export function OrderStand() {
     );
     return () => window.clearTimeout(timer);
   }, [order?.leaseUntil, order?.status, orderId]);
+
+  useEffect(() => {
+    if (order?.status !== "ready_to_send" || !orderId) return;
+    const key = `${orderId}:${order.roundNo ?? 1}`;
+    if (focusedReadyOrdersRef.current.has(key)) return;
+    focusedReadyOrdersRef.current.add(key);
+    const timer = window.setTimeout(() => {
+      const heading = document.getElementById("client-response-heading");
+      heading?.scrollIntoView({ behavior: "smooth", block: "center" });
+      heading?.focus({ preventScroll: true });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [order?.roundNo, order?.status, orderId]);
 
   const selectScenarioGroup = (zone: ScenarioZone) => {
     const group = scenarioGroups.find((item) => item.id === zone);
@@ -2336,17 +2354,20 @@ export function OrderStand() {
     processingState === "processing-active"
       ? activeOrderProgress(
           currentRunEvents,
-          currentRunEvents[0]?.createdAt ?? order?.updatedAt ?? order?.createdAt,
+          currentRunEvents[0]?.createdAt ?? order?.createdAt,
         )
       : null;
+  const savedErrorEvent = [...currentRunEvents]
+    .reverse()
+    .find((event) => event.stage === "error" || event.state === "error");
   const showResult =
     Boolean(result) && Boolean(order) && !orderIsActive && processingState !== "error";
   const hint = useMemo(() => inferZone(draft), [draft]);
   const progress = useMemo(() => {
     if (!orderId) return 0;
-    if (order?.status === "sent") return 100;
-    if (order?.status === "reserved") return 98;
-    if (order?.status === "ready_to_send") return 94;
+    if (["ready_to_send", "reserved", "sent"].includes(order?.status ?? "")) {
+      return 100;
+    }
     if (order?.status === "awaiting_customer") return 72;
     if (order?.status === "clarification_ready") return 64;
     if (order?.status === "awaiting_approval") return 88;
@@ -2980,7 +3001,9 @@ export function OrderStand() {
                       этап переписки {order?.roundNo ?? 1} ·{" "}
                       {usesOpenCode(order?.mode)
                         ? modelLabel(
-                            order?.agentModel ??
+                            (orderIsActive
+                              ? order?.requestedModel
+                              : order?.agentModel) ??
                               order?.requestedModel ??
                               selectedModel,
                           )
@@ -3062,11 +3085,7 @@ export function OrderStand() {
                         <h3>{activeProgress?.title ?? processingCopy.title}</h3>
                         <p>
                           {activeProgress
-                            ? `${activeProgress.elapsed} · ${
-                                order?.updatedAt
-                                  ? `Последний подтверждённый сигнал этого запуска: ${formatEventTime(order.updatedAt)}`
-                                  : "соединение с запуском активно"
-                              }. Страница обновляется автоматически каждые 3 секунды.`
+                            ? `${activeProgress.elapsed} · ${activeProgress.detail} Последнее подтверждённое событие: ${formatEventTime(activeProgress.lastEventAt)}. Страница обновляется автоматически каждые 3 секунды.`
                             : processingCopy.detail}
                         </p>
                       </div>
@@ -3085,7 +3104,7 @@ export function OrderStand() {
                           onClick={() => void retryOrder()}
                           disabled={
                             retrying ||
-                            (!orderActionKey && !adminAuthenticated)
+                            !canManageOrder
                           }
                         >
                           {retrying
@@ -3121,7 +3140,9 @@ export function OrderStand() {
                     <div>
                       <strong>Работу можно продолжить</strong>
                       <p>
-                        Письмо, номер заказа, переписка и история сохранены.
+                        {savedErrorEvent?.detail
+                          ? humanizeText(savedErrorEvent.detail)
+                          : "Письмо, номер заказа, переписка и история сохранены."}
                       </p>
                     </div>
                     <button
@@ -3129,7 +3150,7 @@ export function OrderStand() {
                       onClick={() => void retryOrder()}
                       disabled={
                         retrying ||
-                        (!orderActionKey && !adminAuthenticated)
+                        !canManageOrder
                       }
                     >
                       {retrying
@@ -3155,9 +3176,7 @@ export function OrderStand() {
                     customerAnswer={customerAnswer}
                     inventory={inventory}
                     resultHistory={orderResultHistory}
-                    canManageOrder={
-                      Boolean(orderActionKey) || adminAuthenticated
-                    }
+                    canManageOrder={canManageOrder || adminAuthenticated}
                     onApprove={approve}
                     onReserve={prepareReserve}
                     onSend={sendReply}
@@ -3466,6 +3485,16 @@ function ResultPanel({
     result.route === "needs_info" &&
     order.status === "clarification_ready";
   const waitingForCustomer = order.status === "awaiting_customer";
+  const canContinue =
+    canManageOrder &&
+    [
+      "clarification_ready",
+      "awaiting_customer",
+      "awaiting_approval",
+      "ready_to_send",
+      "reserved",
+      "sent",
+    ].includes(order.status);
   const canReserve =
     canManageOrder &&
     order.status === "ready_to_send" &&
@@ -3794,6 +3823,22 @@ function ResultPanel({
 
   return (
     <div className="result-panel">
+      {order.status === "ready_to_send" && (
+        <section
+          className="freshness-banner completion-banner"
+          role="status"
+          aria-live="polite"
+        >
+          <div>
+            <span>Клиентское завершение</span>
+            <strong>Решение готово — полный ответ клиенту ниже</strong>
+            <small>
+              Письмо, подбор, расчёты, варианты и источники доступны на этой
+              странице. Отдельная запись отправки для этого не требуется.
+            </small>
+          </div>
+        </section>
+      )}
       {actionableInventoryChange &&
         inventoryChange &&
         changedSavedItem &&
@@ -4386,7 +4431,7 @@ function ResultPanel({
             </p>
           </div>
           {comparedSupplierOffers.length > 0 && (
-            <details className="supplier-comparison">
+            <details className="supplier-comparison" open={responsePrepared}>
               <summary>
                 Агент сравнил {formatMoney(supplierPlan.offersChecked)}{" "}
                 {countNoun(
@@ -4592,17 +4637,23 @@ function ResultPanel({
         )}
         {responsePrepared && isEstimate && (
           <div className="sent-note">
-            Это диапазонная оценка с явными допущениями. Её можно отправить
-            клиенту; резерв товара откроется после подтверждения точных данных.
+            Клиент уже видит диапазонную оценку с явными допущениями. Резерв
+            товара откроется после подтверждения точных данных.
           </div>
         )}
         {responsePrepared && isManagerReply && (
           <div className="sent-note">
-            Ответ руководителя готов · резерв не нужен. Его можно сразу
-            записать как отправленный клиенту.
+            Ответ руководителя готов и уже показан клиенту · резерв не нужен.
+            Операторскую отправку можно отдельно записать в журнал.
           </div>
         )}
-        <strong className="reply-subject">
+        <strong
+          className="reply-subject"
+          id="client-response-heading"
+          role="heading"
+          aria-level={3}
+          tabIndex={-1}
+        >
           {humanizeText(result.reply.subject)}
         </strong>
         <p>{humanizeText(result.reply.body)}</p>
@@ -4641,13 +4692,11 @@ function ResultPanel({
             <button type="button" onClick={onSend} disabled={sending}>
               {sending
                 ? "Записываем отправку ответа…"
-                : isEstimate
-                  ? "Записать отправку оценки"
-                  : "Записать отправку ответа"}
+                : "Записать операторскую отправку"}
             </button>
             <small>
-              Кнопка добавляет письмо в общий журнал. В рабочей системе оно
-              уйдёт через почту компании.
+              Это необязательное событие журнала: полный ответ уже доступен
+              клиенту на странице. Почта компании подключается отдельно.
             </small>
           </div>
         )}
@@ -4658,7 +4707,7 @@ function ResultPanel({
         )}
       </div>
 
-      {waitingForCustomer && canManageOrder && (
+      {canContinue && (
         <form
           className="customer-reply-form"
           onSubmit={(event) => {
@@ -4667,11 +4716,15 @@ function ResultPanel({
           }}
         >
           <div className="customer-reply-intro">
-            <span>Ответ клиента</span>
-            <h3>Выберите объект и продолжите тот же заказ</h3>
+            <span>{waitingForCustomer ? "Ответ клиента" : "Продолжить диалог"}</span>
+            <h3>
+              {waitingForCustomer
+                ? "Ответьте агенту и продолжите тот же заказ"
+                : "Задайте следующий вопрос в том же заказе"}
+            </h3>
             <p>
-              Агент переиспользует письмо, фото и найденные референсы, затем
-              рассчитает расход и снова проверит живой склад.
+              Агент сохранит прежний ответ и историю, учтёт новое сообщение и
+              снова проверит актуальный склад.
             </p>
           </div>
           <div className="customer-reply-editor">
@@ -5819,7 +5872,13 @@ function Modal({
               </article>
               <article>
                 <span>Кто выполнил шаг</span>
-                <strong>{modelLabel(order.agentModel ?? order.requestedModel)}</strong>
+                <strong>
+                  {modelLabel(
+                    (["queued", "processing"].includes(order.status)
+                      ? order.requestedModel
+                      : order.agentModel) ?? order.requestedModel,
+                  )}
+                </strong>
               </article>
               <article>
                 <span>Как обработано</span>

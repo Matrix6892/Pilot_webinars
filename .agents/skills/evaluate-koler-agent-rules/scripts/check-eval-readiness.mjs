@@ -217,12 +217,12 @@ read environment values, query production services, or modify files.`);
       /openCodeTimeoutMs\s*=\s*300_000/u,
       /visionOpenCodeTimeoutMs\s*=\s*180_000/u,
       /reviewerOpenCodeTimeoutMs\s*=\s*300_000/u,
-      /jobDeadlineMs\s*=\s*700_000/u,
+      /jobDeadlineMs\s*=\s*650_000/u,
       /stageTimeoutForDeadline/u,
       /const jobStartedAtMs = performance\.now\(\);/u,
       /terminalPublicationReserveMs\s*=\s*agentApiTimeoutMs/u,
     ],
-    "Primary, synthesis and reviewer are bounded by the shared 700 second deadline.",
+    "Primary, synthesis and reviewer are bounded by the shared 650 second deadline.",
   );
   await check(
     "result-history-surface",

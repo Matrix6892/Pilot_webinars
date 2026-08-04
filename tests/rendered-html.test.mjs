@@ -123,7 +123,7 @@ test("ships the Колер product surface and removes the starter", async () =>
   );
   assert.match(stand, /Что учесть/);
   assert.match(stand, /Письмо по выбранному варианту/);
-  assert.match(stand, /Записать отправку ответа/);
+  assert.match(stand, /Записать операторскую отправку/);
   assert.match(stand, /Записать отправку вопроса/);
   assert.match(stand, /Передать ответ агенту/);
   assert.match(stand, /оценит масштаб диапазоном/);
@@ -376,8 +376,19 @@ test("labels live processing states and does not promise offline fallback", asyn
   assert.match(stand, /function orderProcessingCopy\(state: string\)/);
   assert.match(stand, /В очереди · ждёт live-агента/);
   assert.match(stand, /Агент работает · связь подтверждена/);
-  assert.match(stand, /formatEventTime\(order\.updatedAt\)/);
-  assert.match(stand, /Последний подтверждённый сигнал этого запуска/);
+  assert.match(stand, /formatEventTime\(activeProgress\.lastEventAt\)/);
+  assert.match(stand, /activeProgress\.elapsed/);
+  assert.match(stand, /activeProgress\.detail/);
+  assert.doesNotMatch(stand, /formatEventTime\(order\.updatedAt\)/);
+  assert.doesNotMatch(
+    stand,
+    /activeOrderProgress\([\s\S]{0,300}order\?\.updatedAt/u,
+  );
+  assert.match(stand, /savedErrorEvent\?\.detail/);
+  assert.match(
+    stand,
+    /orderIsActive[\s\S]{0,180}order\?\.requestedModel[\s\S]{0,180}order\?\.agentModel/u,
+  );
   assert.match(stand, /Режим: проверяем подключение агента/);
   assert.match(
     stand,
@@ -477,8 +488,8 @@ test("prepares a contract reserve before the stand send", async () => {
     stand,
     /canSend =[\s\S]*?canManageOrder[\s\S]*?reserved && isCommercialOffer[\s\S]*?order\.status === "ready_to_send" && \(isEstimate \|\| isManagerReply\)/,
   );
-  assert.match(stand, /Записать отправку оценки/);
-  assert.match(stand, /Ответ руководителя готов · резерв не нужен/);
+  assert.match(stand, /Решение готово — полный ответ клиенту ниже/);
+  assert.match(stand, /Ответ руководителя готов и уже показан клиенту/);
   assert.match(stand, /Текущий фокус · в работе/);
   assert.match(stand, /Резерв товара подготовлен/);
   assert.match(stand, /Подготовить резерв товара/);

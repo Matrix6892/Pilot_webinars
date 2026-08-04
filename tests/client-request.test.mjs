@@ -238,25 +238,30 @@ test("distinguishes queued, active lease, expired lease and error states", () =>
   assert.equal(orderProcessingState({ status: "error" }, now), "error");
 });
 
-test("shows safe rotating progress summaries without exposing reasoning", () => {
+test("shows only persisted progress stages with honest 30 and 180 second waits", () => {
   const startedAt = "2026-08-04T06:18:30Z";
   const events = [
     { stage: "understanding", createdAt: "2026-08-04T06:18:31Z" },
-    { stage: "model", createdAt: "2026-08-04T06:18:35Z" },
+    { stage: "primary", createdAt: "2026-08-04T06:18:35Z" },
   ];
 
   assert.deepEqual(
     activeOrderProgress(events, startedAt, Date.parse("2026-08-04T06:18:40Z")),
     {
-      title: "Разбираю все части запроса",
+      title: "Готовлю расчёт и подбор",
+      detail: "Этап подтверждён системой; ждём следующее сохранённое событие.",
       elapsed: "10 сек",
+      lastEventAt: "2026-08-04T06:18:35Z",
     },
   );
   assert.deepEqual(
     activeOrderProgress(events, startedAt, Date.parse("2026-08-04T06:19:05Z")),
     {
-      title: "Сверяю каталог, цены и доступные данные",
+      title: "Готовлю расчёт и подбор",
+      detail:
+        "Новых подтверждённых событий пока нет; запуск активен, ждём завершения этого этапа.",
       elapsed: "35 сек",
+      lastEventAt: "2026-08-04T06:18:35Z",
     },
   );
   assert.deepEqual(
@@ -266,9 +271,19 @@ test("shows safe rotating progress summaries without exposing reasoning", () => 
       Date.parse("2026-08-04T06:20:10Z"),
     ),
     {
-      title: "Проверяю, что ответ охватывает все просьбы",
+      title: "Проверяю полноту ответа",
+      detail: "Этап подтверждён системой; ждём следующее сохранённое событие.",
       elapsed: "1 мин 40 сек",
+      lastEventAt: "2026-08-04T06:20:00Z",
     },
+  );
+  assert.equal(
+    activeOrderProgress(
+      events,
+      startedAt,
+      Date.parse("2026-08-04T06:21:40Z"),
+    ).detail,
+    "Обработка идёт дольше целевых 3 минут; продолжаем тот же запуск.",
   );
 });
 

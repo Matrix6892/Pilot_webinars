@@ -350,67 +350,80 @@ export async function GET(request: Request) {
       .where(staleRequeueGuard),
   );
   await db.batch([requeueQuery, closeStaleEventsQuery, retryEventsQuery]);
-  const [job] = await db
-    .select()
-    .from(orders)
-    .where(eq(orders.status, "queued"))
-    .orderBy(asc(orders.createdAt))
-    .limit(1);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const [job] = await db
+      .select()
+      .from(orders)
+      .where(
+        and(
+          eq(orders.status, "queued"),
+          sql`${orders.mode} like 'opencode%'`,
+          isNull(orders.claimId),
+        ),
+      )
+      .orderBy(asc(orders.createdAt))
+      .limit(1);
+    if (!job) break;
 
-  if (!job) return Response.json({ job: null });
+    const claimId = crypto.randomUUID();
+    const claimQuery = db
+      .update(orders)
+      .set({
+        status: "processing",
+        claimId,
+        claimedBy,
+        attemptNo: sql`${orders.attemptNo} + 1`,
+        leaseUntil: sql`datetime('now', ${`+${JOB_LEASE_SECONDS} seconds`})`,
+        updatedAt: sql`CURRENT_TIMESTAMP`,
+      })
+      .where(
+        and(
+          eq(orders.id, job.id),
+          eq(orders.status, "queued"),
+          isNull(orders.claimId),
+        ),
+      )
+      .returning({
+        id: orders.id,
+        subject: orders.subject,
+        body: orders.body,
+        company: orders.company,
+        website: orders.website,
+        attachmentJson: orders.attachmentJson,
+        conversationJson: orders.conversationJson,
+        requestedModel: orders.requestedModel,
+        roundNo: orders.roundNo,
+        claimId: orders.claimId,
+        resultJson: orders.resultJson,
+        inventorySnapshotJson: orders.inventorySnapshotJson,
+      });
+    const initialEventQuery = insertOrderEventWhen(
+      db,
+      {
+        orderId: job.id,
+        stage: "understanding",
+        title: "Модель для заказов разбирает письмо",
+        detail:
+          "Агент собирает отдельные вопросы клиента и готовит следующий подтверждённый этап.",
+        state: "active",
+        roundNo: job.roundNo,
+        claimId,
+        attemptNo: job.attemptNo + 1,
+      },
+      and(
+        eq(orders.id, job.id),
+        eq(orders.status, "processing"),
+        eq(orders.roundNo, job.roundNo),
+        eq(orders.claimId, claimId),
+        sql`${orders.leaseUntil} > CURRENT_TIMESTAMP`,
+      )!,
+    );
+    const [claimedJobs] = await db.batch([claimQuery, initialEventQuery]);
+    const [claimedJob] = claimedJobs;
+    if (claimedJob) return Response.json({ job: claimedJob });
+  }
 
-  const claimId = crypto.randomUUID();
-  const claimQuery = db
-    .update(orders)
-    .set({
-      status: "processing",
-      claimId,
-      claimedBy,
-      attemptNo: sql`${orders.attemptNo} + 1`,
-      leaseUntil: sql`datetime('now', ${`+${JOB_LEASE_SECONDS} seconds`})`,
-      updatedAt: sql`CURRENT_TIMESTAMP`,
-    })
-    .where(and(eq(orders.id, job.id), eq(orders.status, "queued")))
-    .returning({
-      id: orders.id,
-      subject: orders.subject,
-      body: orders.body,
-      company: orders.company,
-      website: orders.website,
-      attachmentJson: orders.attachmentJson,
-      conversationJson: orders.conversationJson,
-       requestedModel: orders.requestedModel,
-       roundNo: orders.roundNo,
-       claimId: orders.claimId,
-      resultJson: orders.resultJson,
-      inventorySnapshotJson: orders.inventorySnapshotJson,
-    });
-  const initialEventQuery = insertOrderEventWhen(
-    db,
-    {
-      orderId: job.id,
-      stage: "understanding",
-      title: "Модель для заказов разбирает письмо",
-       detail:
-         "Агент собирает задачу клиента, выбирает источники и сверяет остаток на момент расчёта для этого заказа.",
-       state: "active",
-       roundNo: job.roundNo,
-       claimId,
-       attemptNo: job.attemptNo + 1,
-     },
-    and(
-      eq(orders.id, job.id),
-      eq(orders.status, "processing"),
-      eq(orders.roundNo, job.roundNo),
-      eq(orders.claimId, claimId),
-      sql`${orders.leaseUntil} > CURRENT_TIMESTAMP`,
-    )!,
-  );
-  const [claimedJobs] = await db.batch([claimQuery, initialEventQuery]);
-  const [claimedJob] = claimedJobs;
-  if (!claimedJob) return Response.json({ job: null });
-
-  return Response.json({ job: claimedJob });
+  return Response.json({ job: null });
 }
 
 export async function POST(request: Request) {
@@ -712,6 +725,10 @@ export async function POST(request: Request) {
   }
 
   if (action === "error") {
+    const errorDetail =
+      typeof payload.detail === "string" && payload.detail.trim()
+        ? payload.detail.trim().slice(0, 1_200)
+        : "Запуск остановился до подтверждённого результата. Письмо и журнал сохранены; этот же заказ можно запустить снова.";
     const failedClaimGuard = and(
       eq(orders.id, orderId),
       eq(orders.status, "error"),
@@ -734,8 +751,7 @@ export async function POST(request: Request) {
         orderId,
         stage: "error",
         title: "Работу можно продолжить",
-        detail:
-          "Письмо и журнал сохранены. Запустите обработку заказа ещё раз.",
+        detail: errorDetail,
         state: "error",
         roundNo,
         claimId,

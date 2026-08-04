@@ -34,7 +34,6 @@ function bridgeStreamHelpers(source) {
   return runInNewContext(
     `${source.slice(start, end)}
 ({
-  inventorySnapshotDetail,
   createOpenCodeEventStream,
   runPrimaryWithRetry,
   stageTimeoutForDeadline,
@@ -264,6 +263,21 @@ function agentRequestRetryHelpers(source, overrides = {}) {
       sleep: async () => {},
       ...overrides,
     },
+  );
+}
+
+function bridgeRuntimeConfigHelpers(source) {
+  const concurrencyStart = source.indexOf("function bridgeConcurrencyFrom(");
+  const concurrencyEnd = source.indexOf(
+    "const bridgeConcurrency =",
+    concurrencyStart,
+  );
+  const errorStart = source.indexOf("function safeJobErrorDetail(");
+  const errorEnd = source.indexOf("function partialRunResult(", errorStart);
+  assert.ok(concurrencyStart >= 0 && concurrencyEnd > concurrencyStart);
+  assert.ok(errorStart >= 0 && errorEnd > errorStart);
+  return runInNewContext(
+    `${source.slice(concurrencyStart, concurrencyEnd)}\n${source.slice(errorStart, errorEnd)}\n({ bridgeConcurrencyFrom, safeJobErrorDetail })`,
   );
 }
 
@@ -1278,7 +1292,7 @@ test("compound requests receive the complete catalog and keep every explicit ask
   );
   assert.match(
     reviewerInstruction,
-    /кажд[а-яё]* явно выраженн[а-яё]* просьб[а-яё]*[\s\S]*?blocking/iu,
+    /resolvedIntent\.asks[\s\S]*?полным последним сообщением[\s\S]*?material_utility/iu,
   );
 
   const coverageRetryPrompt = compoundCoverageRetryPromptFromBridge(
@@ -1908,11 +1922,7 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
   );
-  const {
-    createOpenCodeEventStream,
-    inventorySnapshotDetail,
-  } =
-    bridgeStreamHelpers(bridge);
+  const { createOpenCodeEventStream } = bridgeStreamHelpers(bridge);
   const published = [];
   const stream = createOpenCodeEventStream(async (tool) => {
     published.push(tool.detail);
@@ -1976,10 +1986,6 @@ test("publishes up to twenty unique web actions and keeps opened URLs", async ()
   assert.equal(parsed.tools[0].openedAt, "2026-07-31T09:00:00.000Z");
   assert.equal(parsed.tools[1].urls.length, 0);
   assert.equal(parsed.textParts.join(""), '{"approved":true}');
-  assert.equal(
-    inventorySnapshotDetail(5, 1),
-    "5 товаров. Данные склада взяты из обновления № 1.",
-  );
 });
 
 test("does not verify a URL from a failed web action", async () => {
@@ -2206,7 +2212,7 @@ test("shows live research and strong-model review as distinct event states", asy
   );
 });
 
-test("keeps photo and non-photo work inside one 700 second job budget", async () => {
+test("keeps photo and non-photo work inside one 650 second job budget", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
@@ -2227,7 +2233,7 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
   );
   assert.match(bridge, /const primaryOpenCodeTimeoutMs = 600_000/u);
   assert.match(bridge, /const reviewerOpenCodeTimeoutMs = 300_000/u);
-  assert.match(bridge, /const jobDeadlineMs = 700_000/u);
+  assert.match(bridge, /const jobDeadlineMs = 650_000/u);
   assert.match(bridge, /const terminalPublicationReserveMs = agentApiTimeoutMs/u);
   assert.match(
     processJob,
@@ -2282,7 +2288,7 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
       0,
       nowMs,
       capMs,
-      700_000,
+      650_000,
       reserveMs,
       terminationGraceMs,
     );
@@ -2295,15 +2301,15 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
   );
   assert.equal(
     timeout(600_000, 300_000, 12_000, 5_000),
-    83_000,
+    33_000,
   );
   assert.equal(
-    timeout(688_000, 12_000, 0, 0),
+    timeout(638_000, 12_000, 0, 0),
     12_000,
   );
 
   // Photo: download and vision consume the same clock, so primary is capped
-  // by what remains instead of receiving a fresh 700 second window.
+  // by what remains instead of receiving a fresh 650 second window.
   assert.equal(
     timeout(0, 15_000, 12_000, 0),
     15_000,
@@ -2314,11 +2320,64 @@ test("keeps photo and non-photo work inside one 700 second job budget", async ()
   );
   assert.equal(
     timeout(200_000, 600_000, 12_000, 5_000),
-    483_000,
+    433_000,
   );
   assert.equal(
-    timeout(688_000, 300_000, 12_000, 5_000),
+    timeout(638_000, 300_000, 12_000, 5_000),
     0,
+  );
+});
+
+test("validates the worker pool and persists a primary stage before the model call", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { bridgeConcurrencyFrom } = bridgeRuntimeConfigHelpers(bridge);
+
+  assert.equal(bridgeConcurrencyFrom(undefined), 1);
+  assert.equal(bridgeConcurrencyFrom("1"), 1);
+  assert.equal(bridgeConcurrencyFrom("10"), 10);
+  for (const invalid of ["", "0", "11", "1.5", "two", "  "]) {
+    assert.throws(() => bridgeConcurrencyFrom(invalid), /integer from 1 to 10/u);
+  }
+  assert.doesNotMatch(bridge, /\blet busy\b|\bif \(!busy\)/u);
+  assert.match(
+    bridge,
+    /length:\s*bridgeConcurrency[\s\S]*?jobLoop\(index \+ 1\)/u,
+  );
+  assert.match(
+    bridge,
+    /await addConfirmedEvent\([\s\S]*?"primary"[\s\S]*?runPrimary\(\{/u,
+  );
+});
+
+test("turns runtime failures into safe persisted customer-visible causes", async () => {
+  const bridge = await readFile(
+    new URL("../scripts/agent-bridge.mjs", import.meta.url),
+    "utf8",
+  );
+  const { safeJobErrorDetail } = bridgeRuntimeConfigHelpers(bridge);
+
+  assert.match(
+    safeJobErrorDetail(new Error("OpenCode timed out: secret-provider-id")),
+    /Истёк общий лимит времени/iu,
+  );
+  assert.match(
+    safeJobErrorDetail(new Error("Primary draft omitted an explicit request part")),
+    /не прошёл проверку полноты/iu,
+  );
+  assert.match(
+    safeJobErrorDetail(new Error("fetch failed with socket token=secret")),
+    /Не удалось подтвердить следующий этап через API/iu,
+  );
+  assert.doesNotMatch(
+    safeJobErrorDetail(new Error("token=secret-provider-id")),
+    /secret|token=/iu,
+  );
+  assert.match(
+    bridge,
+    /action:\s*"error"[\s\S]*?detail:\s*safeJobErrorDetail\(error\)/u,
   );
 });
 

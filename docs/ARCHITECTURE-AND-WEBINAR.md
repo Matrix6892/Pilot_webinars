@@ -154,7 +154,8 @@ presentation строит guard. Agent profile ограничен пятью ш�
 заказа, snapshots и уже открытых прямых URL. Другие ошибки не маскируются
 retry. Reviewer получает только смысловые поля результата и cap 300 секунд.
 Vision получает не больше 180 секунд; все model stages вместе с vision используют
-один deadline 700 секунд с termination grace. Это не server fast fallback:
+один deadline 650 секунд от claim с termination grace; deployed путь имеет
+сквозной лимит 660 секунд от POST, включая очередь. Это не server fast fallback:
 свободная заявка при offline остаётся live-queued или получает ошибку с
 возможностью повторить ту же карточку.
 Job-specific lease обновляется каждые 30 секунд, поэтому длинный запуск
@@ -336,15 +337,13 @@ npm run build
 node .agents/skills/manage-koler-changes/scripts/check-change-contract.mjs
 ```
 
-Live eval — отдельный платный шаг. Для финального webinar gate четыре главных
-webinar families должны пройти по три последовательных Flash/max запуска с
-отдельным Flash/max reviewer, всего 12 записей. Каждый run обязан пройти hard
-invariants отдельно (100%), а его
-JTBD-score — быть не ниже 90%. `callId` уникален для каждого run; artifact
-сохраняет `raw-primary`, `guarded`, `reviewer` и `final` attribution. Каждый case
-должен уложиться в 700 секунд и в research budget: не больше одной поисковой
-выдачи, одна прямая страница для культурного ориентира либо до трёх для
-supplier research. Manifest сохраняет repeat gate, unique call ids,
+Direct live eval — отдельная платная диагностика модели. Она проверяет hard
+invariants, JTBD-score и attribution `raw-primary` → `guarded` → `reviewer` →
+`final`, но обходит deployed API, upload, очередь, cookie и UI, поэтому не
+является webinar gate. Каждый case direct runner ограничен его собственным
+700-секундным диагностическим лимитом и research budget: не больше одной
+поисковой выдачи, одна прямая страница для культурного ориентира либо до трёх
+для supplier research. Manifest сохраняет repeat gate, unique call ids,
 min/median/p95/max, hard, efficiency, quality и latency verdicts.
 Для воспроизводимой runtime-attribution он также сохраняет только SHA-256
 публичного input-manifest, sales/reviewer prompts, guard source и каталога;
@@ -360,9 +359,8 @@ KOLER_LIVE_OUTPUT_DIR=/tmp/koler-wow-live \
   node tests/run-agent-wow-live.mjs wow-03-hostile-grill
 ```
 
-Без case-аргументов runner запускает финальный webinar gate по умолчанию:
-четыре главных family × три повтора. Диагностический прогон всех десяти
-подковырок по одному разу задаётся явно:
+Без case-аргументов direct runner запускает четыре family × три повтора.
+Диагностический прогон всех десяти подковырок по одному разу задаётся явно:
 
 ```bash
 KOLER_LIVE_OUTPUT_DIR=/tmp/koler-wow-live KOLER_LIVE_REPEAT=1 \
@@ -390,10 +388,9 @@ KOLER_LIVE_OUTPUT_DIR=/tmp/koler-wow-live KOLER_LIVE_REPEAT=3 \
   wow-09-red-curtain-reference
 ```
 
-Этот runner проверяет primary, guard и reviewer на сохранённом синтетическом
-vision-наблюдении и записывает final attribution. Загрузку изображения, MiMo,
-очередь, lease и UI отдельно проходят read-only/dry-run по сценарию ниже;
-результат runner не выдаётся за end-to-end доказательство всей страницы.
+Этот direct runner проверяет primary, guard и reviewer на сохранённом
+синтетическом vision-наблюдении и записывает final attribution. Он не является
+end-to-end доказательством страницы.
 
 ## Recovery matrix
 
@@ -410,11 +407,11 @@ vision-наблюдении и записывает final attribution. Загр�
 
 GO не объявляется по намерению или по зелёному recorded replay. Нужны зелёные
 `lint`, `typecheck`, полный test gate, build, read-only contract audit,
-read-only preflight и main-scenario check. Затем нужны все 12 live runs: четыре
-family × три последовательных запуска Flash/max с отдельным Flash/max reviewer,
-отдельным hard pass каждого,
-JTBD не ниже 90%, уникальным `callId`, attribution raw/guard/reviewer/final и
-latency не выше 700 секунд. До этого статус — NO-GO.
+remote read-only preflight и main-scenario check. Практический webinar gate —
+deployed runner с девятью функциональными routes и отдельной пачкой из десяти
+одновременных заявок. Требуются processing-stage не позже 10 секунд, p50 не
+выше 180 секунд, 10/10 полезных terminal-результатов не позже 660 секунд,
+реальные `vision`/`vision-result` для фото и отсутствие duplicate effects.
 
 ```bash
 npm run lint
@@ -424,6 +421,13 @@ npm run build
 node .agents/skills/audit-koler-demo-contract/scripts/audit-contract.mjs --format=console
 node .agents/skills/operate-koler-webinar/scripts/preflight.mjs --url "$STAND_URL"
 node .agents/skills/operate-koler-webinar/scripts/check-main-scenario.mjs --url "$STAND_URL"
+node tests/run-webinar-probes.mjs --url "$STAND_URL" --json
+```
+
+Direct-проверка модели с `KOLER_LIVE_REPEAT=3` остаётся диагностической и не
+заменяет deployed gate.
+
+```bash
 KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \
   wow-02-washer-sports-car \
   wow-03-hostile-grill \

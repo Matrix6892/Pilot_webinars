@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   applyReviewerResult,
-  compoundReplyCoverageGaps,
+  askCoverageGaps,
   isCompleteAgentResult,
   managerFallbackAgentResult,
   normalizeV2AgentResult,
@@ -95,14 +95,29 @@ const openCodeTimeoutMs = 300_000;
 const visionOpenCodeTimeoutMs = 180_000;
 const primaryOpenCodeTimeoutMs = 600_000;
 const reviewerOpenCodeTimeoutMs = 300_000;
-const jobDeadlineMs = 700_000;
+const jobDeadlineMs = 650_000;
 const openCodeTerminationGraceMs = 5_000;
 const terminalPublicationReserveMs = agentApiTimeoutMs;
 const MAX_OPENED_SOURCE_EXCERPT_CHARS = 12_000;
 const leaseRenewalMs = 30_000;
 
+function bridgeConcurrencyFrom(value) {
+  const candidate = String(value ?? "1").trim();
+  if (!/^\d+$/u.test(candidate)) {
+    throw new Error("BRIDGE_CONCURRENCY must be an integer from 1 to 10");
+  }
+  const concurrency = Number(candidate);
+  if (concurrency < 1 || concurrency > 10) {
+    throw new Error("BRIDGE_CONCURRENCY must be an integer from 1 to 10");
+  }
+  return concurrency;
+}
+
+const bridgeConcurrency = bridgeConcurrencyFrom(
+  process.env.BRIDGE_CONCURRENCY,
+);
+
 let stopped = false;
-let busy = false;
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -398,6 +413,21 @@ function promptResolvedIntent(value) {
         .filter(Boolean)
         .slice(0, 12)
     : [];
+  let asks = Array.isArray(value.asks)
+    ? value.asks
+        .map((item) => {
+          const id = promptText(item?.id, 64);
+          const request = promptText(item?.request, 240);
+          const evidenceIds = promptStringList(item?.evidenceIds, 4, 100);
+          return /^[a-z0-9][a-z0-9_-]{0,63}$/u.test(id) &&
+            request &&
+            evidenceIds.length
+            ? { id, request, evidenceIds }
+            : null;
+        })
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
   const target =
     value.target?.state === "resolved"
       ? {
@@ -446,8 +476,18 @@ function promptResolvedIntent(value) {
         }
       : null;
   const goal = promptText(value.goal, 320);
+  if (!asks.length && goal && evidence.some((item) => item.source.kind === "message")) {
+    const messageEvidence = evidence.find((item) => item.source.kind === "message");
+    asks = [
+      {
+        id: "legacy-request",
+        request: goal.slice(0, 240),
+        evidenceIds: [messageEvidence.id],
+      },
+    ];
+  }
   return goal && target && evidence.length
-    ? { goal, target, evidence, assumptions, blocker }
+    ? { goal, asks, target, evidence, assumptions, blocker }
     : null;
 }
 
@@ -630,6 +670,7 @@ async function agentRequest(
   payload,
   method = "POST",
   timeoutMs = agentApiTimeoutMs,
+  workerId = bridgeWorkerId,
 ) {
   const response = await fetch(`${standUrl}/api/agent`, {
     method,
@@ -637,7 +678,7 @@ async function agentRequest(
     headers: {
       authorization: `Bearer ${bridgeToken}`,
       "content-type": "application/json",
-      "x-bridge-worker-id": bridgeWorkerId,
+      "x-bridge-worker-id": workerId,
     },
     ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
   });
@@ -767,10 +808,24 @@ function addEvent(job, stage, title, detail, state = "done") {
     telemetryWarning(`event publication failed: ${stage}`);
     return Promise.resolve(false);
   }
-  void publication.catch(() => {
-    telemetryWarning(`event publication failed: ${stage}`);
+  return publication.then(
+    () => true,
+    () => {
+      telemetryWarning(`event publication failed: ${stage}`);
+      return false;
+    },
+  );
+}
+
+async function addConfirmedEvent(job, stage, title, detail, state = "done") {
+  await agentRequest({
+    action: "event",
+    ...claimPayload(job),
+    stage,
+    title,
+    detail,
+    state,
   });
-  return Promise.resolve(true);
 }
 
 function startLeaseRenewal(job) {
@@ -854,6 +909,20 @@ function completeCompactDraftAtEof(source) {
 
 function telemetryWarning(scope) {
   globalThis.console?.warn?.(`[bridge] ${scope}`);
+}
+
+function safeJobErrorDetail(error) {
+  const message = String(error instanceof Error ? error.message : error ?? "");
+  if (/timed out|deadline exhausted/iu.test(message)) {
+    return "Истёк общий лимит времени обработки. Письмо и журнал сохранены; этот же заказ можно запустить снова.";
+  }
+  if (/explicit request part|invalid result|schemaVersion|contract|JSON/iu.test(message)) {
+    return "Ответ модели не прошёл проверку полноты и не был показан клиенту. Письмо и журнал сохранены; заказ можно повторить.";
+  }
+  if (/fetch failed|network|Agent API|ECONN|socket/iu.test(message)) {
+    return "Не удалось подтвердить следующий этап через API. Письмо и журнал сохранены; этот же заказ можно запустить снова.";
+  }
+  return "Запуск остановился до подтверждённого результата. Письмо и журнал сохранены; этот же заказ можно запустить снова.";
 }
 
 function partialRunResult(partialRun) {
@@ -943,16 +1012,6 @@ function isCompleteFailClosedManager(result) {
       result.resolvedIntent?.blocker === null &&
       safeManagerOptions(result.options),
   );
-}
-
-function inventorySnapshotDetail(productCount, version) {
-  const normalizedVersion = String(version ?? "").trim();
-  if (/^\d+$/.test(normalizedVersion)) {
-    return `${productCount} товаров. Данные склада взяты из обновления № ${normalizedVersion}.`;
-  }
-  return `${productCount} товаров. Версия данных склада: ${
-    normalizedVersion || "исходная"
-  }.`;
 }
 
 function isOpenCodeTimeout(error) {
@@ -1490,7 +1549,7 @@ async function visionObservationForJob(job, jobStartedAtMs) {
   if (storedObservation) {
     await addEvent(
       job,
-      "vision-reused",
+      "vision-result",
       "Сохранённое наблюдение по фото добавлено",
       "Вложение не изменилось, поэтому агент продолжает с уже проверенными видимыми фактами.",
     );
@@ -2010,44 +2069,14 @@ async function reviewerDecisionWithRetry({
 
 async function processJob(job) {
   const jobStartedAtMs = performance.now();
-  busy = true;
   const stopLeaseRenewal = startLeaseRenewal(job);
   const primaryModel = selectedModel(job);
   const reviewerModel = reviewerFor();
   const primaryVariant = modelVariant(primaryModel);
   const reviewerVariant = modelVariant(reviewerModel);
   const liveDemoData = demoDataForJob(job);
-  const inventoryVersion =
-    liveDemoData.inventorySnapshot?.version ?? "исходная";
 
   try {
-    await addEvent(
-      job,
-      "model",
-      "Выбран исполнитель",
-      `${modelLabel(primaryModel)}${
-        primaryVariant ? ` работает с усилием ${primaryVariant}` : ""
-      } и получил инструкцию, подготовленную GPT-5.6 Sol.`,
-    );
-    await addEvent(
-      job,
-      "inventory",
-      "Каталог и склад добавлены в задачу",
-      inventorySnapshotDetail(liveDemoData.products.length, inventoryVersion),
-    );
-    await addEvent(
-      job,
-      "market",
-      "Цены похожих предложений подготовлены",
-      `${liveDemoData.market.length} предложений с датой проверки.`,
-    );
-    await addEvent(
-      job,
-      "source-plan",
-      "Агент сам выбирает нужные источники",
-      "Веб-инструменты доступны для косвенных референсов, поставщиков и других фактов, которые могут изменить решение.",
-    );
-
     const continuationContext = continuationContextForJob(job);
     const visionObservation = await visionObservationForJob(
       job,
@@ -2100,7 +2129,14 @@ async function processJob(job) {
     let result;
     try {
       const primaryRun = await runPrimaryWithRetry({
-        run: () => {
+        run: async () => {
+          await addConfirmedEvent(
+            job,
+            "primary",
+            "Агент готовит расчёт и подбор",
+            "Основная модель получила полный запрос, сохранённый контекст, каталог и снимок склада.",
+            "active",
+          );
           const primaryTimeoutMs = stageTimeoutForDeadline(
             jobStartedAtMs,
             performance.now(),
@@ -2168,9 +2204,9 @@ async function processJob(job) {
       result = normalizeV2AgentResult(
         primaryRun.value,
         liveDemoData,
-        guardedJob,
+        { ...guardedJob, requireResolvedAsks: true },
       );
-      const coverageGaps = compoundReplyCoverageGaps(guardedJob, result);
+      const coverageGaps = askCoverageGaps(guardedJob, result);
       if (coverageGaps.length) {
         await addEvent(
           job,
@@ -2229,10 +2265,10 @@ async function processJob(job) {
         const repairedResult = normalizeV2AgentResult(
           coverageRun.value,
           liveDemoData,
-          guardedJob,
+          { ...guardedJob, requireResolvedAsks: true },
         );
-        if (compoundReplyCoverageGaps(guardedJob, repairedResult).length) {
-          throw new Error("Primary draft omitted a compound request part");
+        if (askCoverageGaps(guardedJob, repairedResult).length) {
+          throw new Error("Primary draft omitted an explicit request part");
         }
         result = repairedResult;
       }
@@ -2389,15 +2425,6 @@ async function processJob(job) {
       }
     }
 
-    await addEvent(
-      job,
-      "research-result",
-      "Данные для решения собраны",
-      [result.businessContext, result.research?.summary]
-        .filter(Boolean)
-        .join(" "),
-    ).catch(() => {});
-
     const terminalTimeoutMs = stageTimeoutForDeadline(
       jobStartedAtMs,
       performance.now(),
@@ -2442,8 +2469,7 @@ async function processJob(job) {
         {
           action: "error",
           ...claimPayload(job),
-          detail:
-            "Письмо и журнал сохранены. Запустите карточку снова или выберите другого исполнителя.",
+          detail: safeJobErrorDetail(error),
         },
         "POST",
         errorPublicationTimeoutMs,
@@ -2451,7 +2477,6 @@ async function processJob(job) {
     }
   } finally {
     stopLeaseRenewal();
-    busy = false;
   }
 }
 
@@ -2466,13 +2491,16 @@ async function heartbeatLoop() {
   }
 }
 
-async function jobLoop() {
+async function jobLoop(workerNo) {
   while (!stopped) {
     try {
-      if (!busy) {
-        const { job } = await agentRequest(null, "GET");
-        if (job) await processJob(job);
-      }
+      const { job } = await agentRequest(
+        null,
+        "GET",
+        agentApiTimeoutMs,
+        `${bridgeWorkerId}-${workerNo}`,
+      );
+      if (job) await processJob(job);
     } catch (error) {
       console.error("[bridge] poll:", error.message);
     }
@@ -2498,5 +2526,12 @@ console.log(
   }`,
 );
 console.log(`[bridge] vision=${visionModel}`);
+console.log(`[bridge] concurrency=${bridgeConcurrency}`);
 
-await Promise.all([heartbeatLoop(), jobLoop()]);
+await Promise.all([
+  heartbeatLoop(),
+  ...Array.from(
+    { length: bridgeConcurrency },
+    (_, index) => jobLoop(index + 1),
+  ),
+]);

@@ -6,6 +6,7 @@ import { runInNewContext } from "node:vm";
 import {
   applyReviewerResult,
   ambiguityReply,
+  askCoverageGaps,
   compoundReplyCoverageGaps,
   isCompleteAgentResult,
   normalizeAgentResult,
@@ -480,6 +481,7 @@ function v2ResolvedDraft(
     },
   } = {},
 ) {
+  const request = String(job.body ?? job.subject ?? "Заявка клиента").slice(0, 240);
   return {
     schemaVersion: 2,
     zone: commitment === "estimate" ? "yellow" : "red",
@@ -488,6 +490,13 @@ function v2ResolvedDraft(
     confidence: 0.88,
     resolvedIntent: {
       goal: "Подготовить безопасное решение по свободной заявке",
+      asks: [
+        {
+          id: "customer-request",
+          request,
+          evidenceIds: ["request"],
+        },
+      ],
       target: {
         state: "resolved",
         label: targetLabel,
@@ -498,7 +507,7 @@ function v2ResolvedDraft(
           id: "request",
           claim: "Клиент описал объект и требуемую работу",
           confidence: 1,
-          source: { kind: "message", roundNo: 1, quote: job.body },
+          source: { kind: "message", roundNo: 1, quote: request },
         },
       ],
       assumptions: [],
@@ -2457,24 +2466,19 @@ test("explains a completed public search with no confirmed sources", () => {
   );
 });
 
-test("logs final context after review without blocking result persistence", async () => {
+test("persists the reviewed result without a synthetic final-context event", async () => {
   const source = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
   );
   const reviewIndex = source.lastIndexOf("result = applyReviewerResult(");
-  const contextIndex = source.indexOf('"research-result"');
   const resultIndex = source.indexOf(
     "await agentRequestWithRetry(\n      resultPayload(",
-    contextIndex,
+    reviewIndex,
   );
 
-  assert.ok(reviewIndex >= 0 && reviewIndex < contextIndex);
-  assert.ok(contextIndex < resultIndex);
-  assert.match(
-    source.slice(contextIndex, resultIndex),
-    /\.catch\(\(\) => \{\}\)/,
-  );
+  assert.ok(reviewIndex >= 0 && reviewIndex < resultIndex);
+  assert.doesNotMatch(source.slice(reviewIndex, resultIndex), /"research-result"/u);
 });
 
 test("passes the saved stock revision and timestamp into the live OpenCode catalog", async () => {
@@ -3827,7 +3831,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     estimates: [
       {
         metric: "surface_area",
-        range: { min: 20, max: 60, unit: "м²" },
+        range: { min: 30, max: 80, unit: "м²" },
         method: "Дачный забор: широкий диапазон площади по описанию клиента",
         evidenceIds: ["request"],
         assumptionIds: [],
@@ -3835,7 +3839,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
       },
       {
         metric: "paint_quantity",
-        range: { min: 6, max: 19, unit: "кг" },
+        range: { min: 9, max: 25, unit: "кг" },
         method: "Дачный забор: площадь × расход каталога × два слоя с запасом",
         evidenceIds: ["request"],
         assumptionIds: [],
@@ -3843,7 +3847,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
       },
       {
         metric: "budget",
-        range: { min: 2_960, max: 5_920, unit: "₽" },
+        range: { min: 3_500, max: 8_000, unit: "₽" },
         method: "Дачный забор: количество краски × цена каталога",
         evidenceIds: ["request"],
         assumptionIds: [],
@@ -3881,6 +3885,23 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   });
   draft.resolvedIntent.goal =
     "Оценить покраску деревянного забора и мысленный сценарий для Кремля";
+  draft.resolvedIntent.asks = [
+    {
+      id: "paint-fence",
+      request: "хочу покрасить забор деревянный, на даче",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "price-kremlin",
+      request: "скажите сколько будет стоить покрасить кремль в москве",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "choose-color",
+      request: "какой цвет выбрать лучше",
+      evidenceIds: ["request"],
+    },
+  ];
   draft.resolvedIntent.evidence.push({
     id: "kremlin-source",
     claim: source.excerpt,
@@ -3908,6 +3929,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     result.reply.body,
     /Дачный забор: площадь — 20–60 м², краска — 6–19 кг, бюджет — 2\s*960–5\s*920 ₽/iu,
   );
+  assert.match(result.reply.body, /пришлите длину, среднюю высоту/iu);
   assert.doesNotMatch(
     result.reply.body,
     /широкий диапазон площади по описанию клиента: площадь/iu,
@@ -3956,19 +3978,122 @@ test("flags a compound reply that silently drops a second paint task", () => {
     },
   });
   draft.resolvedIntent.goal = "Оценить покраску деревянного забора";
+  draft.resolvedIntent.asks = [
+    {
+      id: "paint-fence",
+      request: "хочу покрасить забор деревянный, на даче",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "price-kremlin",
+      request: "скажите сколько будет стоить покрасить кремль в москве",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "choose-color",
+      request: "какой цвет выбрать лучше",
+      evidenceIds: ["request"],
+    },
+  ];
 
   const result = normalizeV2AgentResult(draft, demoData, job);
 
   assert.deepEqual(compoundReplyCoverageGaps(job, result), [
-    "покрасить кремль в москве и какой цвет выбрать лучше?",
+    "скажите сколько будет стоить покрасить кремль в москве",
   ]);
 
   draft.reply.body =
     "Для дачного забора рекомендую коричневый цвет. Для Кремля сохранил бы краснокирпичный цвет.";
   const colorOnlyResult = normalizeV2AgentResult(draft, demoData, job);
   assert.deepEqual(compoundReplyCoverageGaps(job, colorOnlyResult), [
-    "покрасить кремль в москве и какой цвет выбрать лучше?",
+    "скажите сколько будет стоить покрасить кремль в москве",
   ]);
+});
+
+test("generic ask coverage keeps distinct objects and differently phrased requests", () => {
+  const cases = [
+    {
+      body: "Хочу покрасить забор и беседку",
+      reply: "Для забора рекомендую КР-005, беседку оценю отдельным диапазоном.",
+    },
+    {
+      body: "Покрасьте забор. Во сколько обойдётся окраска Кремля?",
+      reply: "Для забора подойдёт КР-005. Кремль оцениваю только как мысленный сценарий.",
+      estimates: [{ metric: "budget", method: "Кремль: широкий порядок бюджета" }],
+    },
+    {
+      body: "По фото подберите краску, а сколько стоит покрасить гараж?",
+      reply: "По фото подходит КР-005. Для гаража даю отдельный диапазон.",
+      estimates: [{ metric: "budget", method: "Гараж: ориентировочный бюджет" }],
+    },
+    {
+      body: "Какую краску взять для забора и какой цвет выбрать?",
+      reply: "Для забора берите КР-005; из палитры практичнее коричневый.",
+      product: { sku: "КР-005" },
+    },
+    {
+      body: "Посчитайте расход и пришлите каталог",
+      reply: "Расход КР-005 — 0,14 кг/м²; в каталоге доступны три цвета.",
+      product: { sku: "КР-005" },
+    },
+    {
+      body: "Можно покрасить деревянный забор? И сколько это будет стоить?",
+      reply: "Деревянный забор можно покрасить КР-005; даю диапазон стоимости.",
+      estimates: [{ metric: "budget", method: "Забор: ориентировочный бюджет" }],
+    },
+    {
+      body: "Хочу обновить фасад, а ещё подскажите сроки высыхания",
+      reply: "Фасад можно обновить после подготовки; срок высыхания сверим по карточке товара.",
+    },
+    {
+      body: "Оцените площадь стены и бюджет покраски потолка",
+      reply: "Площадь стены оцениваю отдельно. Для потолка — отдельный бюджет.",
+      estimates: [{ metric: "budget", method: "Потолок: ориентировочный бюджет" }],
+    },
+    {
+      body: "Нужно покрыть террасу и лестницу",
+      reply: "Террасу и лестницу считаю как два отдельных объекта.",
+    },
+    {
+      body: "Подберите товар для беседки; потом скажите, какой цвет практичнее",
+      reply: "Для беседки подходит КР-005; практичнее коричневый цвет.",
+      product: { sku: "КР-005" },
+    },
+  ];
+
+  for (const item of cases) {
+    const explicitAsks = askCoverageGaps(
+      { body: item.body },
+      {
+        resolvedIntent: { asks: [] },
+        reply: { body: "" },
+        options: [],
+        estimates: [],
+      },
+    );
+    const result = {
+      resolvedIntent: {
+        asks: explicitAsks.map((request, index) => ({
+          id: `request-${index + 1}`,
+          request,
+          evidenceIds: ["request"],
+        })),
+      },
+      reply: { body: item.reply },
+      options: [],
+      estimates: item.estimates ?? [],
+      product: item.product ?? null,
+    };
+    assert.deepEqual(askCoverageGaps({ body: item.body }, result), [], item.body);
+  }
+
+  assert.deepEqual(
+    askCoverageGaps(
+      { body: "Хочу покрасить забор и беседку" },
+      { resolvedIntent: { asks: [] }, reply: { body: "Только забор." } },
+    ),
+    ["хочу покрасить забор", "хочу покрасить беседку"],
+  );
 });
 
 test("does not turn a substrate claim into an exact offer for unknown application targets", () => {
@@ -4178,6 +4303,7 @@ function visionAmbiguousCase({ storedCandidates, primaryCandidates }) {
     },
   };
   const draft = v2ResolvedDraft(job);
+  const requestEvidence = draft.resolvedIntent.evidence[0];
   draft.resolvedIntent.target = {
     state: "ambiguous",
     candidates: primaryCandidates,
@@ -4193,6 +4319,7 @@ function visionAmbiguousCase({ storedCandidates, primaryCandidates }) {
         observation: "На фото видны несколько возможных целей",
       },
     },
+    requestEvidence,
   ];
   draft.resolvedIntent.target.candidates.forEach(
     (candidate) => (candidate.evidenceIds = ["vision"]),

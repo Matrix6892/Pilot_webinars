@@ -109,8 +109,15 @@ export type TargetCandidate = {
   evidenceIds: string[];
 };
 
+export type ResolvedAsk = {
+  id: string;
+  request: string;
+  evidenceIds: string[];
+};
+
 export type ResolvedIntent = {
   goal: string;
+  asks: ResolvedAsk[];
   target:
     | { state: "resolved"; label: string; evidenceIds: string[] }
     | {
@@ -1454,6 +1461,15 @@ function withV2Result(
     schemaVersion: 2,
     resolvedIntent: {
       goal: targetClaim.replace(/^[^:]+:\s*/u, "") || targetClaim,
+      asks: [
+        {
+          id: "request-1",
+          request:
+            (input.body.trim() || input.subject.trim()).slice(0, 240) ||
+            "Подготовить ответ по заявке",
+          evidenceIds: [targetEvidence?.id ?? evidence[0].id],
+        },
+      ],
       target: {
         state: "resolved",
         label: targetClaim.replace(/^[^:]+:\s*/u, "") || "задача клиента",

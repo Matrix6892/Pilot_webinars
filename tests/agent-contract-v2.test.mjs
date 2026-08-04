@@ -33,6 +33,13 @@ function draft(overrides = {}) {
     missing: ["площадь", "цвет или номер RAL"],
     resolvedIntent: {
       goal: "Подобрать краску и оценить расход",
+      asks: [
+        {
+          id: "paint-wall",
+          request: "покрасить стену",
+          evidenceIds: ["message-target"],
+        },
+      ],
       target: {
         state: "resolved",
         label: "стена",
@@ -706,6 +713,63 @@ test("schema v2 survives stored JSON round-trip with lifecycle fields intact", (
   assert.deepEqual(decoded.supplierLeads, result.supplierLeads);
   assert.ok(decoded.options.every((option) => option.followUpActor));
   assert.equal(isCompleteAgentResult(decoded), true);
+});
+
+test("stored v2 without asks synthesizes one ask from the latest customer message", () => {
+  const candidate = draft();
+  const job = {
+    subject: "Покрасить стену как в Красной комнате",
+    body: "Фото приложил. Сделайте примерно такой глубокий красный, как в Twin Peaks.",
+    attachment: {
+      name: "room.jpg",
+      src: candidate.visionObservation.attachmentRef,
+      alt: "Фото комнаты",
+    },
+    visionObservation: candidate.visionObservation,
+    openedSourceUrls: ["https://example.com/red-room"],
+  };
+  const stored = approve(normalizeAgentResult(candidate, demoData, job), job);
+  delete stored.resolvedIntent.asks;
+  stored.resolvedIntent.goal = "Подберите цвет для беседки";
+  stored.resolvedIntent.evidence.push({
+    id: "message-latest",
+    claim: "Клиент просит подобрать цвет для беседки",
+    confidence: 1,
+    source: {
+      kind: "message",
+      roundNo: 2,
+      quote: "Подберите цвет для беседки",
+    },
+  });
+
+  const decoded = decodeStoredAgentResult(stored);
+
+  assert.deepEqual(decoded.resolvedIntent.asks, [
+    {
+      id: "legacy-request",
+      request: "Подберите цвет для беседки",
+      evidenceIds: ["message-latest"],
+    },
+  ]);
+  assert.equal(isCompleteAgentResult(decoded), true);
+});
+
+test("schema v2 rejects unknown, duplicate, and ungrounded asks", () => {
+  const unknownEvidence = draft();
+  unknownEvidence.resolvedIntent.asks[0].evidenceIds = ["missing-message"];
+  assert.equal(isCompleteAgentResult(unknownEvidence), false);
+
+  const duplicateIds = draft();
+  duplicateIds.resolvedIntent.asks.push({
+    ...duplicateIds.resolvedIntent.asks[0],
+    request: "покрасить стену",
+  });
+  assert.equal(isCompleteAgentResult(duplicateIds), false);
+
+  const inventedDetail = draft();
+  inventedDetail.resolvedIntent.asks[0].request =
+    "покрасить стену золотой краской";
+  assert.equal(isCompleteAgentResult(inventedDetail), false);
 });
 
 test("reviewer outage preserves an honest estimate for the manager", () => {

@@ -261,20 +261,21 @@ try {
 }
 
 const leaseMatch = files.agentRoute.match(/JOB_LEASE_SECONDS\s*=\s*(\d+)/u);
-const timeoutValues = [...files.bridge.matchAll(/const (?:openCodeTimeoutMs|primaryOpenCodeTimeoutMs|reviewerOpenCodeTimeoutMs|modelChainDeadlineMs) = ([\d_]+);/gu)]
+const timeoutValues = [...files.bridge.matchAll(/const (?:openCodeTimeoutMs|primaryOpenCodeTimeoutMs|reviewerOpenCodeTimeoutMs|jobDeadlineMs) = ([\d_]+);/gu)]
   .map((match) => Number(match[1].replaceAll("_", "")));
 if (leaseMatch && timeoutValues.length >= 2) {
   const leaseMs = Number(leaseMatch[1]) * 1_000;
   const chainMs = Math.max(...timeoutValues);
-  if (chainMs <= leaseMs) {
+  const hasRenewal = /startLeaseRenewal\(job\)[\s\S]{0,30000}stopLeaseRenewal\(\)/u.test(files.bridge);
+  if (chainMs > leaseMs && !hasRenewal) {
     record(
-      "WARN",
+      "FAIL",
       "bridge-lease-budget",
       `Model chain exceeds the ${leaseMatch[1]} second processing lease; renewal must remain active`,
       `${paths.agentRoute}:${lineOf(files.agentRoute, leaseMatch[0])}`,
     );
   } else {
-    record("PASS", "bridge-lease-budget", "Processing lease is renewed while the 700 second model chain runs", paths.agentRoute);
+    record("PASS", "bridge-lease-budget", `Processing lease covers the ${chainMs / 1_000} second model chain through job renewal`, paths.agentRoute);
   }
 }
 

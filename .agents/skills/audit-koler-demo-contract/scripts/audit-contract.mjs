@@ -79,6 +79,8 @@ const coreFiles = [
   "tests/vision-bridge.test.mjs",
   "tests/public-web-fetch.test.mjs",
   "tests/agent-contract-v2.test.mjs",
+  "tests/flow-integrity.test.mjs",
+  "tests/run-webinar-probes.mjs",
   ".agents/skills/operate-koler-webinar/SKILL.md",
   ".agents/skills/operate-koler-webinar/references/canonical-scenario.md",
   ".agents/skills/operate-koler-webinar/references/recovery-matrix.md",
@@ -355,18 +357,28 @@ for (const file of [
 ]) {
   requirePattern({
     file,
+    pattern: /node tests\/run-webinar-probes\.mjs --url "\$STAND_URL" --json/u,
+    claim: `${file} использует deployed API runner как обязательный webinar gate`,
+    canonical: [
+      location("tests/run-webinar-probes.mjs", /export const PROBES/u),
+      location("tests/run-webinar-probes.mjs", /runConcurrentProbe/u),
+    ],
+    detail: "Практический webinar gate должен проходить API, upload, polling и действия пользователя, а не прямой model runner.",
+  });
+  requirePattern({
+    file,
     pattern: /KOLER_LIVE_REPEAT=3[\s\S]{0,420}wow-02-washer-sports-car[\s\S]{0,120}wow-03-hostile-grill[\s\S]{0,120}wow-08-two-ton-shortage[\s\S]{0,120}wow-09-red-curtain-reference/iu,
-    claim: `${file} использует текущие четыре webinar certification family`,
+    claim: `${file} использует текущие четыре family для формальной проверки повторяемости`,
     canonical: [location("tests/run-agent-wow-live.mjs", /export const WEBINAR_CASE_IDS/u)],
-    detail: "Финальная 4 × 3 команда должна совпадать с WEBINAR_CASE_IDS runtime runner.",
+    detail: "Необязательная release-серия 4 × 3 должна совпадать с WEBINAR_CASE_IDS runtime runner.",
   });
   if (matches(file, /KOLER_LIVE_REPEAT=3[\s\S]{0,420}wow-01-equal-targets/iu)) {
     addFinding({
       severity: "P1",
-      claim: `${file} не включает diagnostic ambiguity case в обязательный webinar gate`,
+      claim: `${file} не включает diagnostic ambiguity case в release-серию`,
       canonical: [location("tests/run-agent-wow-live.mjs", /export const WEBINAR_CASE_IDS/u)],
       conflicts: [location(file, /KOLER_LIVE_REPEAT=3/u)],
-      detail: "wow-01 остаётся диагностическим bonus-case и не должен входить в финальную 4 × 3 сертификацию.",
+      detail: "wow-01 остаётся диагностическим bonus-case и не входит в формальную release-серию.",
     });
   }
 }
@@ -438,7 +450,7 @@ const researchPathChecks = [
     anchors: [
       {
         file: "tests/vision-bridge.test.mjs",
-        pattern: /test\("keeps photo and non-photo work inside one 700 second job budget"/u,
+        pattern: /test\("keeps photo and non-photo work inside one 650 second job budget"/u,
       },
       {
         file: "tests/vision-bridge.test.mjs",
@@ -643,6 +655,11 @@ const agentContractChecks = [
     claim: "TypeScript задаёт полный AgentResult v2",
   },
   {
+    file: "lib/demo-engine.ts",
+    pattern: /export type ResolvedAsk[\s\S]{0,300}evidenceIds:\s*string\[\][\s\S]{0,300}asks:\s*ResolvedAsk\[\]/u,
+    claim: "ResolvedIntent v2 перечисляет явные просьбы клиента",
+  },
+  {
     file: "public/prompts/sales-agent.md",
     pattern: /## Компактный JSON-draft[\s\S]{0,1800}"schemaVersion": 2[\s\S]{0,500}"resolvedIntent"[\s\S]{0,1000}"commitment"[\s\S]{0,500}"reply"/u,
     claim: "Primary prompt задаёт компактное обязательное ядро v2",
@@ -656,6 +673,16 @@ const agentContractChecks = [
     file: "lib/agent-guard.mjs",
     pattern: /export function normalizeV2AgentResult[\s\S]{0,12000}schemaVersion:\s*2[\s\S]{0,12000}zone:\s*"yellow"[\s\S]{0,500}route:\s*"ready"/u,
     claim: "Guard достраивает полный маршрут AgentResult v2",
+  },
+  {
+    file: "lib/agent-guard.mjs",
+    pattern: /export function askCoverageGaps\(job, result\)[\s\S]{0,3500}\.map\(\(\{ request \}\) => request\)/u,
+    claim: "Guard универсально проверяет покрытие всех asks",
+  },
+  {
+    file: "public/prompts/reviewer.md",
+    pattern: /resolvedIntent\.asks[\s\S]{0,300}полным последним сообщением[\s\S]{0,200}material_utility/u,
+    claim: "Reviewer независимо блокирует пропущенную просьбу",
   },
 ];
 for (const check of agentContractChecks) {
@@ -683,7 +710,7 @@ const agentSurfaceChecks = [
       },
       {
         file: "scripts/agent-bridge.mjs",
-        pattern: /await agentRequest\(\s*resultPayload\(\s*job,\s*result,\s*verifiedOpenedSourceUrls,\s*primaryModel,\s*reviewerModel,\s*reviewerProvenance,\s*guardedJob\.openedSources,\s*\),\s*"POST",\s*terminalTimeoutMs,\s*\);/u,
+        pattern: /await agentRequestWithRetry\(\s*resultPayload\(\s*job,\s*result,\s*verifiedOpenedSourceUrls,\s*primaryModel,\s*reviewerModel,\s*reviewerProvenance,\s*guardedJob\.openedSources,\s*\),\s*"POST",\s*terminalTimeoutMs,\s*\);/u,
       },
     ],
     claim: "Bridge нормализует и отправляет AgentResult",
@@ -1052,7 +1079,7 @@ const timeoutContract = [
   ["primary", primaryTimeoutMs, 600, /600\s+секунд/u],
   ["synthesis", synthesisTimeoutMs, 300, /300[- ]секунд|300\s+секунд/iu],
   ["reviewer", reviewerTimeoutMs, 300, /300\s+секунд/iu],
-  ["deadline", modelDeadlineMs, 700, /700\s+секунд/iu],
+  ["deadline", modelDeadlineMs, 650, /650\s+секунд/iu],
 ];
 for (const [name, actualMs, expectedSeconds, docsPattern] of timeoutContract) {
   const actualSeconds = Number.isFinite(actualMs) ? actualMs / 1000 : Number.NaN;
@@ -1065,6 +1092,22 @@ for (const [name, actualMs, expectedSeconds, docsPattern] of timeoutContract) {
       detail: `Expected ${expectedSeconds}s, runtime has ${String(actualSeconds)}s.`,
     });
   }
+}
+
+for (const file of [
+  "README.md",
+  "docs/ARCHITECTURE-AND-WEBINAR.md",
+  "docs/WEBINAR-RUNBOOK.md",
+]) {
+  requirePattern({
+    file,
+    pattern: /660\s+секунд/iu,
+    claim: `${file} фиксирует deployed operational limit 660 секунд от POST`,
+    canonical: [
+      location("tests/run-webinar-probes.mjs", /OPERATIONAL_LIMIT_MS = 660_000/u),
+    ],
+    detail: "Bridge budget 650 секунд от claim и deployed limit 660 секунд от POST не должны смешиваться.",
+  });
 }
 
 const sharedDeadlineAnchors = [
@@ -1087,7 +1130,7 @@ if (
     claim: "Every model stage is constrained by the remaining shared deadline",
     canonical: [
       location("scripts/agent-bridge.mjs", /function stageTimeoutForDeadline/u),
-      location("tests/vision-bridge.test.mjs", /keeps photo and non-photo work inside one 700 second job budget/u),
+      location("tests/vision-bridge.test.mjs", /keeps photo and non-photo work inside one 650 second job budget/u),
     ],
     conflicts: [location("scripts/agent-bridge.mjs", /const jobDeadlineMs/u)],
     detail: "Vision download, vision, primary, synthesis, reviewer and terminal publication must derive timeout from one remaining job budget.",

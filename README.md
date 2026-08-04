@@ -190,8 +190,9 @@ Vision получает до 180 секунд. Первичный исследо
 300-секундный synthesis: без нового поиска собирает компактный semantic draft из
 заказа, snapshots и уже открытых прямых URL. Другие ошибки не маскируются
 retry. Reviewer получает компактный view результата и cap 300 секунд; вся
-chain с termination grace ограничена 700 секундами. Быстрого server fallback
-для свободной заявки нет.
+chain с termination grace ограничена 650 секундами от claim. Сквозной лимит
+deployed-проверки — 660 секунд от POST, включая очередь. Быстрого server
+fallback для свободной заявки нет.
 
 Reviewer считается сработавшим только после transport event `review-result`.
 `review-skipped` означает безопасный fail-closed boundary (полный manager
@@ -233,11 +234,12 @@ action key и иных чувствительных полей. Private detail �
 заказа из того же окна или через admin. Перед эфиром обновите лист и найдите
 последнюю синтетическую контрольную заявку.
 
-Для действий с карточкой сайт выдаёт отдельный action key и хранит его в
-текущем окне браузера; D1 хранит только хеш. Private detail и мутации доступны
-создавшему участнику с capability либо администратору после проверки сессии.
-Публичный журнал предназначен только для учебных данных и отдаёт synthetic
-summary.
+Для действий с карточкой сайт выдаёт отдельный action key, а сервер ставит
+HttpOnly capability-cookie; D1 хранит только хеш. Ключ не записывается в web
+storage, а после reload UI использует серверный `canManageOrder`. Private detail
+и мутации доступны создавшему участнику с capability либо администратору после
+проверки сессии. Публичный журнал предназначен только для учебных данных и
+отдаёт synthetic summary.
 
 Стенд принимает от одного посетителя до 20 заявок и 40 действий с карточками
 в минуту, а также до 6 фотографий за 10 минут. Общие пределы стенда составляют
@@ -416,15 +418,14 @@ OPENCODE_ENABLE_EXA=1
 
 ## GO / NO-GO
 
-Статический GO возможен только при зелёных `lint`, `typecheck`, полном test
-gate, build, `check-change-contract`, `check-eval-readiness`, contract audit,
-local-only preflight и main-scenario check. Затем нужен отдельный live gate:
-четыре webinar families по три последовательных Flash/max запуска с отдельным
-Flash/max reviewer, всего 12
-записей. Каждый запуск должен иметь отдельный hard pass, unique `callId`,
-latency не более 700 секунд, шесть quality dimensions JTBD не ниже 90%,
-attribution `raw-primary` → `guarded` → `reviewer` → `final` и отсутствие
-recorded mixing. Synthetic live manifest с recorded vision не является MiMo run.
+Webinar GO возможен только при зелёных `lint`, `typecheck`, полном test gate,
+build, `check-change-contract`, `check-eval-readiness`, contract audit,
+remote read-only preflight и main-scenario check. Обязательный live gate идёт
+через deployed `/api/orders`: девять функциональных probes и пачка из десяти
+одновременных заявок. Нужны первая processing-stage не позже 10 секунд, p50 не
+выше 180 секунд, 10/10 полезных terminal-результатов не позже 660 секунд,
+реальные `vision`/`vision-result` для фото и отсутствие duplicate effects.
+Прямой model runner не доказывает очередь, cookie, UI или согласование.
 
 ```bash
 npm run lint
@@ -434,8 +435,15 @@ npm run build
 node .agents/skills/manage-koler-changes/scripts/check-change-contract.mjs
 node .agents/skills/evaluate-koler-agent-rules/scripts/check-eval-readiness.mjs
 node .agents/skills/audit-koler-demo-contract/scripts/audit-contract.mjs --format=console
-node .agents/skills/operate-koler-webinar/scripts/preflight.mjs
-node .agents/skills/operate-koler-webinar/scripts/check-main-scenario.mjs
+node .agents/skills/operate-koler-webinar/scripts/preflight.mjs --url "$STAND_URL"
+node .agents/skills/operate-koler-webinar/scripts/check-main-scenario.mjs --url "$STAND_URL"
+node tests/run-webinar-probes.mjs --url "$STAND_URL" --json
+```
+
+Для диагностики только модельной цепочки, но не вместо deployed gate, четыре
+holdout-family можно прогнать по три раза:
+
+```bash
 KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \
   wow-02-washer-sports-car \
   wow-03-hostile-grill \
@@ -443,6 +451,4 @@ KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \
   wow-09-red-curtain-reference
 ```
 
-Пока live gate не выполнен и не сохранён с зелёным manifest, статус — NO-GO,
-даже если локальные проверки зелёные. Recorded demo не заменяет этот gate и
-запускается только явным выбором поддержанного примера.
+Recorded demo и direct runner не заменяют deployed live gate.

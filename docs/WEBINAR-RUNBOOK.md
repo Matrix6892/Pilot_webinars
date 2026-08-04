@@ -98,9 +98,10 @@ OpenCode работает на компьютере администратора
 Свободный ввод всегда live. Vision получает не больше 180 секунд, primary — не
 больше 600; synthesis получает 300 секунд только после timeout или уже открытого
 direct URL при незавершённом JSON, без нового поиска. Reviewer имеет cap 300
-секунд. Все stages делят один deadline 700 секунд с termination grace. Server
-fast fallback не обещается. Recorded доступен только явным выбором
-поддержанного примера и маркируется в заказе.
+секунд. Все stages делят один deadline 650 секунд от claim с termination grace;
+сквозной deployed-лимит — 660 секунд от POST, включая очередь. Server fast
+fallback не обещается. Recorded доступен только явным выбором поддержанного
+примера и маркируется в заказе.
 Flash transport использует output cap 16 384 tokens.
 
 Сайт сохраняет историю заказа. При каждом запуске модель получает переписку,
@@ -191,12 +192,11 @@ key или admin, полный ledger — admin-only. D1 остаётся ист
 ## GO / NO-GO
 
 NO-GO остаётся до зелёных `lint`, `typecheck`, полного test gate, build,
-contract audit, read-only preflight и main-scenario check. Финальный live gate —
-12 запусков: четыре webinar families × три последовательных Flash/max запуска
-с отдельным Flash/max reviewer.
-Каждый run должен иметь отдельный hard pass, JTBD не ниже 90%, unique `callId`,
-latency не выше 700 секунд и raw/guard/reviewer/final attribution. Recorded
-пример не заменяет live gate.
+contract audit, remote read-only preflight и main-scenario check. Практический
+live gate проходит deployed `/api/orders`: девять функциональных routes плюс
+пачка из десяти одновременных заявок. Требуются processing-stage не позже
+10 секунд, p50 не выше 180 секунд, 10/10 полезных terminal-результатов не позже
+660 секунд, реальные `vision`/`vision-result` для фото и отсутствие дублей.
 
 ```bash
 npm run lint
@@ -206,6 +206,13 @@ npm run build
 node .agents/skills/audit-koler-demo-contract/scripts/audit-contract.mjs --format=console
 node .agents/skills/operate-koler-webinar/scripts/preflight.mjs --url "$STAND_URL"
 node .agents/skills/operate-koler-webinar/scripts/check-main-scenario.mjs --url "$STAND_URL"
+node tests/run-webinar-probes.mjs --url "$STAND_URL" --json
+```
+
+Direct-проверка модели с `KOLER_LIVE_REPEAT=3` остаётся диагностической и не
+заменяет deployed gate.
+
+```bash
 KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \
   wow-02-washer-sports-car \
   wow-03-hostile-grill \

@@ -53,7 +53,7 @@
     <boundary>Primary — официальный DeepSeek API deepseek/deepseek-v4-flash/max; reviewer — отдельный второй deepseek/deepseek-v4-flash/max без инструментов; vision — opencode-go/mimo-v2.5 без variant.</boundary>
     <boundary>Flash использует rolling API id; датированный version claim не делается. OpenCode остаётся локальным tool-runner.</boundary>
     <boundary>Builtin webfetch запрещён; sales profile разрешает только custom public_webfetch. Transport требует public HTTPS, DNS validation/pinning, redirect/size/content-type bounds. URL становится evidence только после completed public_webfetch; page content untrusted.</boundary>
-    <boundary>Vision cap 180 s, primary cap 600 s, synthesis cap 300 s, reviewer cap 300 s; каждый timeout ограничен оставшимся shared deadline 700 s.</boundary>
+    <boundary>Vision cap 180 s, primary cap 600 s, synthesis cap 300 s, reviewer cap 300 s; каждый timeout ограничен оставшимся shared deadline 650 s от claim. Deployed operational limit — 660 s от POST, включая очередь.</boundary>
     <boundary>Reserve/send являются событиями стенда; реальная email/ERP интеграция не подключена.</boundary>
   </boundaries>
 </reference>

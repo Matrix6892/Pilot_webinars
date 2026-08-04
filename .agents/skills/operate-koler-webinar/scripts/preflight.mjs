@@ -2,7 +2,7 @@
 
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { runScenarioCheck } from "./check-main-scenario.mjs";
 
@@ -59,6 +59,28 @@ function add(checks, level, name, detail, fallback = "") {
     detail,
     ...(fallback ? { fallback } : {}),
   });
+}
+
+export function deployedSystemContract(body) {
+  const models = Array.isArray(body?.models) ? body.models : [];
+  const flash = models.find(
+    (model) => model?.id === "deepseek/deepseek-v4-flash",
+  );
+  const failures = [
+    ...(body?.contractRevision === "webinar-completion-v1"
+      ? []
+      : ["contractRevision != webinar-completion-v1"]),
+    ...(body?.bridgeOnline === true ? [] : ["bridgeOnline != true"]),
+    ...(body?.provider === "DeepSeek API"
+      ? []
+      : ["provider != DeepSeek API"]),
+    ...(flash?.variant === "max" &&
+    flash?.roles?.includes("primary") &&
+    flash?.roles?.includes("reviewer")
+      ? []
+      : ["Flash/max primary+reviewer отсутствует в model catalog"]),
+  ];
+  return { ok: failures.length === 0, failures };
 }
 
 async function fileExists(path) {
@@ -318,22 +340,25 @@ async function remoteChecks(checks, baseUrl, timeoutMs) {
         "Bridge status",
         `GET /api/orders?system=1: HTTP ${response.status}`,
       );
-    } else if (body?.bridgeOnline === true) {
-      add(checks, "PASS", "Bridge status", "Heartbeat свежий, live-режим доступен");
     } else {
+      const contract = deployedSystemContract(body);
       add(
         checks,
-        "WARN",
-        "Bridge status",
-        "Heartbeat не подтверждён",
-        "Восстановить bridge и повторить ту же live-карточку; recorded допустим только отдельным явным выбором",
+        contract.ok ? "PASS" : "FAIL",
+        "Deployed completion contract",
+        contract.ok
+          ? "Revision webinar-completion-v1, свежий heartbeat и Flash/max подтверждены"
+          : contract.failures.join("; "),
+        contract.ok
+          ? ""
+          : "Развернуть текущую web-версию, восстановить bridge и повторить read-only gate",
       );
     }
   } catch (error) {
     add(
       checks,
-      "WARN",
-      "Bridge status",
+      "FAIL",
+      "Deployed completion contract",
       error.message,
       "Восстановить bridge и повторить ту же live-карточку; не включать server fast fallback",
     );
@@ -599,7 +624,12 @@ async function main() {
   if (result.verdict === "NO-GO") process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(`PREFLIGHT NO-GO: ${error.message}`);
-  process.exitCode = 1;
-});
+if (
+  process.argv[1] &&
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+) {
+  main().catch((error) => {
+    console.error(`PREFLIGHT NO-GO: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

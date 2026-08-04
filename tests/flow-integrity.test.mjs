@@ -13,6 +13,15 @@ import {
 import { confirmSupplierPlan } from "../lib/supplier-plan.mjs";
 import { resolveVisionImageUrl } from "../lib/upload-guard.mjs";
 import { isSearchResultUrl } from "../lib/public-web-url.mjs";
+import { deployedSystemContract } from "../.agents/skills/operate-koler-webinar/scripts/preflight.mjs";
+import {
+  CONTRACT_REVISION,
+  FIRST_STAGE_LIMIT_MS,
+  FLASH_MODEL,
+  OPERATIONAL_LIMIT_MS,
+  P50_TARGET_MS,
+  WEBINAR_PROBES,
+} from "./run-webinar-probes.mjs";
 
 function exportedFunctionFromTypeScript(
   source,
@@ -497,6 +506,79 @@ test("protects public order actions and bounds public intake", async () => {
   );
 });
 
+test("remote webinar gate requires the deployed revision, heartbeat, and Flash identity", () => {
+  const ready = deployedSystemContract({
+    contractRevision: "webinar-completion-v1",
+    bridgeOnline: true,
+    provider: "DeepSeek API",
+    models: [
+      {
+        id: "deepseek/deepseek-v4-flash",
+        variant: "max",
+        roles: ["primary", "reviewer"],
+      },
+    ],
+  });
+  assert.deepEqual(ready, { ok: true, failures: [] });
+
+  for (const mutation of [
+    { contractRevision: "old" },
+    { bridgeOnline: false },
+    { provider: "OpenCode Go" },
+    { models: [{ id: "opencode-go/deepseek-v4-pro", variant: "max", roles: ["primary"] }] },
+  ]) {
+    assert.equal(
+      deployedSystemContract({
+        contractRevision: "webinar-completion-v1",
+        bridgeOnline: true,
+        provider: "DeepSeek API",
+        models: [
+          {
+            id: "deepseek/deepseek-v4-flash",
+            variant: "max",
+            roles: ["primary", "reviewer"],
+          },
+        ],
+        ...mutation,
+      }).ok,
+      false,
+    );
+  }
+});
+
+test("deployed probe runner covers nine routes plus the ten-order capacity gate", async () => {
+  assert.equal(CONTRACT_REVISION, "webinar-completion-v1");
+  assert.equal(FLASH_MODEL, "deepseek/deepseek-v4-flash");
+  assert.equal(FIRST_STAGE_LIMIT_MS, 10_000);
+  assert.equal(P50_TARGET_MS, 180_000);
+  assert.equal(OPERATIONAL_LIMIT_MS, 660_000);
+  assert.deepEqual(
+    WEBINAR_PROBES.map((probe) => probe.id),
+    [
+      "fence-kremlin",
+      "one-verb-two-objects",
+      "different-wording",
+      "photo-independent-question",
+      "ambiguous-photo",
+      "follow-up-after-ready",
+      "manager-completion",
+      "reload-capability",
+      "malformed-output-boundary",
+    ],
+  );
+  assert.equal(WEBINAR_PROBES.filter((probe) => probe.image).length, 2);
+  assert.equal(WEBINAR_PROBES.filter((probe) => probe.followUp).length, 2);
+  const runner = await readFile(
+    new URL("./run-webinar-probes.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(runner, /\/api\/uploads/u);
+  assert.match(runner, /\/api\/orders/u);
+  assert.match(runner, /vision-result/u);
+  assert.match(runner, /Promise\.all\([\s\S]*?concurrentBodies/u);
+  assert.doesNotMatch(runner, /playwright|runOpenCode|opencode run/iu);
+});
+
 test("replays a client order id and capability without duplicate rows", async () => {
   const route = await readFile(
     new URL("../app/api/orders/route.ts", import.meta.url),
@@ -691,6 +773,45 @@ test("gates order detail before sensitive reads and keeps public ledger syntheti
     ),
     true,
   );
+
+  let cookieReads = 0;
+  const privilegedReader = exportedFunctionFromTypeScript(
+    ordersRoute,
+    "canReadOrder",
+    {
+      Headers,
+      Request,
+      orderCapabilityCookieName: (orderId) => `koler_order_capability_${orderId}`,
+      canChangeOrder: async (request) =>
+        request.headers.get("x-order-key") === "header-wins" ||
+        request.headers.get("x-test-admin") === "true",
+      cookieValue: () => {
+        cookieReads += 1;
+        return "f".repeat(64);
+      },
+    },
+  );
+  assert.equal(
+    await privilegedReader(
+      new Request("https://koler.test/api/orders?id=ord_header", {
+        headers: { "x-order-key": "header-wins" },
+      }),
+      "hash",
+      "ord_header",
+    ),
+    true,
+  );
+  assert.equal(
+    await privilegedReader(
+      new Request("https://koler.test/api/orders?id=ord_admin", {
+        headers: { "x-test-admin": "true" },
+      }),
+      "hash",
+      "ord_admin",
+    ),
+    true,
+  );
+  assert.equal(cookieReads, 0);
 
   const detailAuth = ordersRoute.indexOf(
     "if (!(await canReadOrder(request, capability.actionTokenHash, id)))",
@@ -1124,7 +1245,7 @@ test("retries an errored order in the same card with a compare-and-set transitio
 
   assert.match(
     retry,
-    /canChangeOrder\(request, failedCapability\.actionTokenHash\)/,
+    /canReadOrder\(request, failedCapability\.actionTokenHash, retryId\)/,
   );
   assert.match(retry, /eq\(orders\.status, "error"\)/);
   assert.match(
@@ -1315,7 +1436,7 @@ test("preserves confirmed company research while refreshing commercial facts", a
   );
 });
 
-test("commits clarification and autonomous customer reply as complete transitions", async () => {
+test("commits clarification and a cookie-capable follow-up as atomic transitions", async () => {
   const route = await readFile(
     new URL("../app/api/orders/route.ts", import.meta.url),
     "utf8",
@@ -1327,9 +1448,6 @@ test("commits clarification and autonomous customer reply as complete transition
   const customerReply = route.slice(
     route.indexOf('if (action === "customer_reply")'),
     route.indexOf('if (action === "recalculate")'),
-  );
-  const autonomousReply = customerReply.slice(
-    customerReply.indexOf("const result = buildDemoResult("),
   );
 
   assert.match(clarification, /const transitionGuard = and\(/);
@@ -1348,36 +1466,381 @@ test("commits clarification and autonomous customer reply as complete transition
   );
   assert.doesNotMatch(clarification, /db\.insert\(orderEvents\)/);
 
-  assert.match(autonomousReply, /const transitionGuard = and\(/);
-  assert.match(autonomousReply, /eq\(orders\.status, "awaiting_customer"\)/);
-  assert.match(autonomousReply, /coalesce\(\$\{orders\.resultJson\}/);
-  assert.match(autonomousReply, /coalesce\(\$\{orders\.conversationJson\}/);
+  assert.match(customerReply, /followUpStatuses\.has\(order\.status\)/);
+  assert.match(customerReply, /code:\s*"order_busy"/);
+  assert.match(customerReply, /code:\s*"follow_up_not_allowed"/);
+  assert.match(customerReply, /const transitionGuard = and\(/);
+  assert.match(customerReply, /eq\(orders\.status, order\.status\)/);
+  assert.match(customerReply, /coalesce\(\$\{orders\.resultJson\}/);
+  assert.match(customerReply, /coalesce\(\$\{orders\.conversationJson\}/);
   assert.match(
-    autonomousReply,
+    customerReply,
     /coalesce\(\$\{orders\.inventorySnapshotJson\}/,
   );
-  assert.match(autonomousReply, /coalesce\(\$\{orders\.sentAt\}/);
-  assert.match(autonomousReply, /insertResultHistoryWhen\(/);
-  assert.match(autonomousReply, /transitionEvents\.map\(/);
-  assert.match(autonomousReply, /insertOrderEventWhen\(/);
+  assert.match(customerReply, /coalesce\(\$\{orders\.sentAt\}/);
+  assert.match(customerReply, /currentReply[\s\S]*?replyAlreadyStored/);
+  assert.match(customerReply, /insertOrderEventWhen\(/);
   assert.equal(
     (customerReply.match(/managerDecision:\s*null/g) ?? []).length,
-    2,
+    1,
   );
   assert.equal(
     (customerReply.match(/managerOptionId:\s*null/g) ?? []).length,
-    2,
+    1,
   );
   assert.equal(
     (customerReply.match(/managerDecidedAt:\s*null/g) ?? []).length,
-    2,
+    1,
   );
+  for (const field of ["sentAt", "claimId", "claimedBy", "leaseUntil"]) {
+    assert.match(customerReply, new RegExp(`${field}:\\s*null`));
+  }
+  assert.match(customerReply, /attemptNo:\s*0/);
+  assert.match(customerReply, /roundNo:\s*nextRoundNo/);
   assert.match(
-    autonomousReply,
-    /await db\.batch\(\[\s*historyQuery,\s*\.\.\.eventQueries,\s*updateOrderQuery,\s*\]\)/,
+    customerReply,
+    /await db\.batch\(\[\s*replyEventQuery,\s*queueOrderQuery,\s*\]\)/,
   );
-  assert.doesNotMatch(autonomousReply, /await appendResultHistory\(/);
-  assert.doesNotMatch(autonomousReply, /db\.insert\(orderEvents\)/);
+  assert.doesNotMatch(customerReply, /resultJson:\s*null/);
+  assert.doesNotMatch(customerReply, /db\.insert\(orderEvents\)/);
+});
+
+test("executes the full follow-up state matrix and admits one concurrent submit", async () => {
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+  const allowed = [
+    "clarification_ready",
+    "awaiting_customer",
+    "awaiting_approval",
+    "ready_to_send",
+    "reserved",
+    "sent",
+  ];
+
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    const insertOrder = database.prepare(`
+      INSERT INTO orders (
+        id, subject, body, status, zone, mode, result_json,
+        conversation_json, round_no, inventory_snapshot_json,
+        manager_decision, manager_option_id, manager_decided_at, sent_at,
+        claim_id, claimed_by, attempt_no, lease_until
+      ) VALUES (?, 'Заявка', 'Исходный вопрос', ?, 'red', 'opencode-live', ?,
+                '[]', 2, '{"version":1}', 'решение', 'option-1',
+                '2026-08-04T09:00:00.000Z', ?, 'claim-old', 'worker-old', 3,
+                '2026-08-04T09:02:00.000Z')
+    `);
+    const resultJson = JSON.stringify({
+      schemaVersion: 2,
+      reply: { subject: "Готовый ответ", body: "Сохранённый ответ агента" },
+    });
+    for (const status of [...allowed, "queued", "processing", "error"]) {
+      const id = `follow-${status}`;
+      insertOrder.run(
+        id,
+        status,
+        resultJson,
+        status === "sent" ? "2026-08-04T09:01:00.000Z" : null,
+      );
+      database
+        .prepare(
+          "INSERT INTO order_events (order_id, stage, title, round_no, attempt_no) VALUES (?, 'decision', 'Прежнее решение', 2, 3)",
+        )
+        .run(id);
+      database
+        .prepare(
+          "INSERT INTO order_result_history (order_id, round_no, zone, route, status, reason, source_key) VALUES (?, 2, 'red', 'manager', ?, 'Прежний результат', 'result:2')",
+        )
+        .run(id, status);
+    }
+
+    const snapshotFor = (id) => ({
+      ...database
+        .prepare(
+          `SELECT id, status, result_json AS resultJson,
+                  conversation_json AS conversationJson,
+                  inventory_snapshot_json AS inventorySnapshotJson,
+                  round_no AS roundNo, sent_at AS sentAt
+           FROM orders WHERE id = ?`,
+        )
+        .get(id),
+    });
+    const applyFollowUp = (snapshot, answer) => {
+      if (["queued", "processing"].includes(snapshot.status)) {
+        return { status: 409, code: "order_busy" };
+      }
+      if (!allowed.includes(snapshot.status)) {
+        return { status: 409, code: "follow_up_not_allowed" };
+      }
+      const conversation = JSON.parse(snapshot.conversationJson ?? "[]");
+      const reply = JSON.parse(snapshot.resultJson).reply.body;
+      const nextConversation = [
+        ...conversation,
+        ...(conversation.some(
+          (message) => message.role === "agent" && message.body === reply,
+        )
+          ? []
+          : [{ role: "agent", body: reply, createdAt: "2026-08-04T09:03:00.000Z" }]),
+        { role: "customer", body: answer, createdAt: "2026-08-04T09:03:00.000Z" },
+      ];
+      const guard = `
+        id = ? AND status = ?
+        AND coalesce(result_json, '') = coalesce(?, '')
+        AND coalesce(conversation_json, '') = coalesce(?, '')
+        AND coalesce(inventory_snapshot_json, '') = coalesce(?, '')
+        AND round_no = ?
+        AND coalesce(sent_at, '') = coalesce(?, '')
+      `;
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const event = database.prepare(`
+          INSERT INTO order_events (
+            order_id, stage, title, detail, round_no, claim_id, attempt_no
+          )
+          SELECT id, 'customer-reply', 'Клиент продолжил тот же заказ', ?,
+                 round_no + 1, NULL, 0
+          FROM orders WHERE ${guard}
+        `).run(
+          answer,
+          snapshot.id,
+          snapshot.status,
+          snapshot.resultJson,
+          snapshot.conversationJson,
+          snapshot.inventorySnapshotJson,
+          snapshot.roundNo,
+          snapshot.sentAt,
+        );
+        const update = database.prepare(`
+          UPDATE orders
+          SET status = 'queued', zone = NULL, conversation_json = ?,
+              round_no = round_no + 1,
+              inventory_snapshot_json = '{"version":2}',
+              manager_decision = NULL, manager_option_id = NULL,
+              manager_decided_at = NULL, sent_at = NULL, claim_id = NULL,
+              claimed_by = NULL, lease_until = NULL, attempt_no = 0,
+              mode = 'opencode-live'
+          WHERE ${guard}
+        `).run(
+          JSON.stringify(nextConversation),
+          snapshot.id,
+          snapshot.status,
+          snapshot.resultJson,
+          snapshot.conversationJson,
+          snapshot.inventorySnapshotJson,
+          snapshot.roundNo,
+          snapshot.sentAt,
+        );
+        assert.equal(event.changes, update.changes);
+        if (update.changes !== 1) {
+          database.exec("ROLLBACK");
+          return { status: 409, code: "order_busy" };
+        }
+        database.exec("COMMIT");
+        return { status: 200, roundNo: snapshot.roundNo + 1 };
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    };
+
+    for (const status of allowed) {
+      const id = `follow-${status}`;
+      assert.deepEqual(applyFollowUp(snapshotFor(id), `Ответ из ${status}`), {
+        status: 200,
+        roundNo: 3,
+      });
+      const row = database
+        .prepare(
+          `SELECT status, zone, round_no AS roundNo,
+                  manager_decision AS managerDecision,
+                  manager_option_id AS managerOptionId,
+                  manager_decided_at AS managerDecidedAt, sent_at AS sentAt,
+                  claim_id AS claimId, claimed_by AS claimedBy,
+                  attempt_no AS attemptNo, lease_until AS leaseUntil,
+                  result_json AS resultJson, conversation_json AS conversationJson
+           FROM orders WHERE id = ?`,
+        )
+        .get(id);
+      assert.equal(row.status, "queued");
+      assert.equal(row.zone, null);
+      assert.equal(row.roundNo, 3);
+      for (const field of [
+        "managerDecision",
+        "managerOptionId",
+        "managerDecidedAt",
+        "sentAt",
+        "claimId",
+        "claimedBy",
+        "leaseUntil",
+      ]) {
+        assert.equal(row[field], null, `${status}: ${field}`);
+      }
+      assert.equal(row.attemptNo, 0);
+      assert.equal(row.resultJson, resultJson);
+      assert.deepEqual(
+        JSON.parse(row.conversationJson).map(({ role, body }) => ({ role, body })),
+        [
+          { role: "agent", body: "Сохранённый ответ агента" },
+          { role: "customer", body: `Ответ из ${status}` },
+        ],
+      );
+      assert.equal(
+        database
+          .prepare(
+            "SELECT count(*) AS count FROM order_result_history WHERE order_id = ?",
+          )
+          .get(id).count,
+        1,
+      );
+    }
+
+    assert.deepEqual(applyFollowUp(snapshotFor("follow-queued"), "Ещё ответ"), {
+      status: 409,
+      code: "order_busy",
+    });
+    assert.deepEqual(
+      applyFollowUp(snapshotFor("follow-processing"), "Ещё ответ"),
+      { status: 409, code: "order_busy" },
+    );
+    assert.deepEqual(applyFollowUp(snapshotFor("follow-error"), "Ещё ответ"), {
+      status: 409,
+      code: "follow_up_not_allowed",
+    });
+
+    const duplicateId = "follow-ready_to_send";
+    database.prepare(`
+      UPDATE orders
+      SET status = 'ready_to_send', zone = 'green', round_no = 4,
+          conversation_json = '[]', inventory_snapshot_json = '{"version":3}'
+      WHERE id = ?
+    `).run(duplicateId);
+    const stale = snapshotFor(duplicateId);
+    assert.equal(applyFollowUp(stale, "Одинаковый новый вопрос").status, 200);
+    assert.deepEqual(applyFollowUp(stale, "Одинаковый новый вопрос"), {
+      status: 409,
+      code: "order_busy",
+    });
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_events WHERE order_id = ? AND stage = 'customer-reply' AND detail = 'Одинаковый новый вопрос'",
+        )
+        .get(duplicateId).count,
+      1,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("ten racing workers claim ten unique jobs and persist ten initial stages", async () => {
+  const directory = new URL("../drizzle/", import.meta.url);
+  const files = (await readdir(directory))
+    .filter((name) => /^\d{4}_.+\.sql$/u.test(name))
+    .sort();
+  const database = new DatabaseSync(":memory:");
+
+  try {
+    for (const file of files) {
+      database.exec(await readFile(new URL(file, directory), "utf8"));
+    }
+    const insert = database.prepare(`
+      INSERT INTO orders (
+        id, subject, body, status, mode, round_no, attempt_no, created_at
+      ) VALUES (?, 'Параллельная заявка', 'Подберите краску', 'queued',
+                'opencode-live', 1, 0, ?)
+    `);
+    for (let index = 0; index < 10; index += 1) {
+      insert.run(
+        `parallel-${index + 1}`,
+        `2026-08-04T09:00:${String(index).padStart(2, "0")}.000Z`,
+      );
+    }
+
+    const claimOne = async (workerNo) => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const job = database
+          .prepare(
+            "SELECT id, round_no AS roundNo, attempt_no AS attemptNo FROM orders WHERE status = 'queued' AND mode LIKE 'opencode%' AND claim_id IS NULL ORDER BY created_at LIMIT 1",
+          )
+          .get();
+        if (!job) return null;
+        await new Promise((resolve) => setImmediate(resolve));
+        const claimId = `claim-${workerNo}-${attempt}`;
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          const claimed = database.prepare(`
+            UPDATE orders
+            SET status = 'processing', claim_id = ?, claimed_by = ?,
+                attempt_no = attempt_no + 1,
+                lease_until = '2026-08-04T09:01:30.000Z'
+            WHERE id = ? AND status = 'queued' AND claim_id IS NULL
+            RETURNING id, round_no AS roundNo, attempt_no AS attemptNo
+          `).get(claimId, `worker-${workerNo}`, job.id);
+          if (!claimed) {
+            database.exec("ROLLBACK");
+            continue;
+          }
+          database.prepare(`
+            INSERT INTO order_events (
+              order_id, stage, title, state, round_no, claim_id, attempt_no,
+              created_at
+            ) VALUES (?, 'understanding', 'Модель разбирает письмо', 'active',
+                      ?, ?, ?, '2026-08-04T09:00:09.000Z')
+          `).run(claimed.id, claimed.roundNo, claimId, claimed.attemptNo);
+          database.exec("COMMIT");
+          return { id: claimed.id, claimId };
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      }
+      return null;
+    };
+
+    const claims = await Promise.all(
+      Array.from({ length: 10 }, (_, index) => claimOne(index + 1)),
+    );
+    assert.equal(claims.every(Boolean), true);
+    assert.equal(new Set(claims.map((claim) => claim.id)).size, 10);
+    assert.equal(new Set(claims.map((claim) => claim.claimId)).size, 10);
+    assert.equal(
+      database
+        .prepare("SELECT count(*) AS count FROM orders WHERE status = 'processing'")
+        .get().count,
+      10,
+    );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT count(*) AS count FROM order_events WHERE stage = 'understanding' AND state = 'active'",
+        )
+        .get().count,
+      10,
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test("persists the bridge error cause instead of replacing it with animation copy", async () => {
+  const route = await readFile(
+    new URL("../app/api/agent/route.ts", import.meta.url),
+    "utf8",
+  );
+  const errorAction = route.slice(
+    route.indexOf('if (action === "error")'),
+    route.indexOf('return Response.json({ error: "unknown action"'),
+  );
+
+  assert.match(errorAction, /payload\.detail\.trim\(\)\.slice\(0, 1_200\)/u);
+  assert.match(errorAction, /detail:\s*errorDetail/u);
+  assert.match(errorAction, /state:\s*"error"/u);
 });
 
 test("commits each initial order with its first observable rows in one batch", async () => {

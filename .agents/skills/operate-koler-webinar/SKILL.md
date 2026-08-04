@@ -44,7 +44,7 @@ description: Проверяет готовность, репетирует и в
   </routing>
 
   <status_policy>
-    <status name="GO">Только после deterministic lint/typecheck/full tests/build, change/eval/audit checks, local preflight and scenario check, и после 4 families × 3 live runs с unique callIds, hard invariants 100%, latency ≤700 s, six-quality JTBD ≥90%, raw/guard/reviewer/final attribution и без recorded mixing. Main shortage baseline подтверждён фактически; любой выявленный brief/runtime price drift блокирует GO.</status>
+    <status name="GO">Только после deterministic lint/typecheck/full tests/build, change/eval/audit checks, remote read-only preflight and scenario check, затем deployed runner: девять functional routes и batch из десяти заявок, first processing-stage ≤10 s, p50 ≤180 s, 10/10 useful terminal ≤660 s, без duplicate effects и recorded mixing. Main shortage baseline подтверждён фактически; любой выявленный brief/runtime price drift блокирует GO. Direct model runner остаётся диагностическим и не доказывает deployed JTBD.</status>
     <status name="GO WITH FALLBACK">Допустим только для не-критичного представления вроде задержки Google или недоступного R2 после отдельного явного решения; bridge offline не получает server fast fallback.</status>
     <status name="NO-GO">Не подтверждён main shortage, есть P0/P1 drift, bridge/lease/reviewer/privacy boundary нарушена, mandatory ledger/API недоступен или live gate не выполнен.</status>
   </status_policy>
@@ -71,6 +71,6 @@ description: Проверяет готовность, репетирует и в
     <criterion>Public web contract uses only custom public_webfetch with HTTPS, DNS validation/pinning, redirect/size/content-type bounds; builtin webfetch is denied.</criterion>
     <criterion>Main deterministic check validates 2 000/300/1 700, supplier snapshot, own price 349 ₽/кг and total 718 400 ₽.</criterion>
     <criterion>Recovery preserves same order and offers no silent server fast fallback.</criterion>
-    <criterion>Final GO requires four live families × three unique callIds, hard pass per run, ≤700 s, six-quality JTBD ≥90%, attribution and no recorded mixing.</criterion>
+    <criterion>Webinar GO requires deployed API/upload/polling/actions probes plus a ten-order batch: first stage ≤10 s, p50 ≤180 s and 10/10 useful terminal ≤660 s; direct model runs do not replace this gate.</criterion>
   </success_criteria>
 </skill>
