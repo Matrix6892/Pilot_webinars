@@ -4004,7 +4004,11 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     ],
     reply: {
       subject: "Два цветовых решения",
-      body: "Для дачного забора выбрал бы коричневый: он спокойно стареет рядом с деревом и землёй. Для Кремля сохранил бы узнаваемую историческую палитру и сначала сделал пробный выкрас.",
+      body:
+        "Для дачного забора выбрал бы коричневый: он спокойно стареет рядом с деревом и землёй. " +
+        "Для второго объекта подготовил отдельный мысленный расчёт. " +
+        "Границы такой оценки явно обозначены. " +
+        "Цвет у Кремля уже выбран — исторический красный кирпич, его определяют реставраторы, а не палитра магазина.",
     },
   });
   draft.resolvedIntent.goal =
@@ -4037,6 +4041,17 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
       openedAt: source.openedAt,
     },
   });
+  draft.resolvedIntent.assumptions = [{
+    id: "fence-geometry",
+    claim: "До замера используем модельный диапазон площади забора 45–120 м².",
+    basedOnEvidenceIds: ["request"],
+    confidence: 0.3,
+    range: { min: 45, max: 120, unit: "м²" },
+    confirmBefore: "commercial_offer",
+  }];
+  for (const estimate of draft.estimates.filter((item) => /забор/iu.test(item.method))) {
+    estimate.assumptionIds = ["fence-geometry"];
+  }
 
   const result = normalizeV2AgentResult(draft, demoData, job);
 
@@ -4049,11 +4064,20 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.match(result.reply.body, /296 ₽\/кг/iu);
   assert.match(result.reply.body, /белый, коричневый, зелёный/iu);
   assert.match(result.reply.body, /(?:выбрал бы|я бы выбрал) коричневый/iu);
+  assert.match(result.reply.body, /историческ[^.]{0,80}палитр/iu);
   assert.match(
     result.reply.body,
     /Дачный забор: площадь — 20–60 м², краска — 6–19 кг, бюджет — 2\s*960–5\s*920 ₽/iu,
   );
   assert.match(result.reply.body, /пришлите длину, среднюю высоту/iu);
+  const fenceAssumption = result.resolvedIntent.assumptions.find((item) =>
+    /забор/iu.test(item.claim),
+  );
+  assert.deepEqual(fenceAssumption?.range, { min: 20, max: 60, unit: "м²" });
+  assert.doesNotMatch(fenceAssumption?.claim ?? "", /45\s*[–-]\s*120/u);
+  for (const estimate of result.estimates.filter((item) => /забор/iu.test(item.method))) {
+    assert.deepEqual(estimate.assumptionIds, [fenceAssumption.id]);
+  }
   assert.doesNotMatch(
     result.reply.body,
     /широкий диапазон площади по описанию клиента: площадь/iu,
@@ -4069,7 +4093,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
 
   const missingKremlinColor = structuredClone(result);
   missingKremlinColor.reply.body = missingKremlinColor.reply.body.replace(
-    /Для Кремля сохранил бы узнаваемую историческую палитру и сначала сделал пробный выкрас\./iu,
+    /Цвет у Кремля уже выбран[^.]*\./iu,
     "Для Кремля подготовлена отдельная мысленная оценка бюджета.",
   );
   assert.deepEqual(compoundReplyCoverageGaps(job, missingKremlinColor), [
