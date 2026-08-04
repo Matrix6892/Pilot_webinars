@@ -557,6 +557,10 @@ test("deployed probe runner covers nine routes plus the ten-order capacity gate"
     "Рекомендую сохранить утверждённый исторический облик — красно-кирпичные стены.",
     KREMLIN_COLOR_GUIDANCE_PATTERN,
   );
+  assert.match(
+    "Правильный ответ — сохранять утверждённый исторический облик.",
+    KREMLIN_COLOR_GUIDANCE_PATTERN,
+  );
   assert.doesNotMatch(
     "У Кремля исторический облик.",
     KREMLIN_COLOR_GUIDANCE_PATTERN,
