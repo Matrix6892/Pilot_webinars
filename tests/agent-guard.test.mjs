@@ -4098,6 +4098,12 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
     "Для деревянного забора я бы выбрал коричневый из подтверждённой палитры.";
   assert.deepEqual(compoundReplyCoverageGaps(job, sectionedColorAdvice), []);
 
+  const traditionalColorAdvice = structuredClone(result);
+  traditionalColorAdvice.reply.body =
+    "Цвет забора: рекомендую коричневый — классика для дачи. " +
+    "А цвет Кремлю по традиции — красный, кирпичный, тот самый вид с Красной площади.";
+  assert.deepEqual(compoundReplyCoverageGaps(job, traditionalColorAdvice), []);
+
   const missingKremlinColor = structuredClone(result);
   missingKremlinColor.reply.body = missingKremlinColor.reply.body.replace(
     /Цвет у Кремля уже выбран[^.]*\./iu,
