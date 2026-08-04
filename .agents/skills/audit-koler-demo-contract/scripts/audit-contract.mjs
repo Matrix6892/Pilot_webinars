@@ -256,7 +256,7 @@ if (
   directProvider?.api !== "https://api.deepseek.com/v1" ||
   !directProvider?.env?.includes("DEEPSEEK_API_KEY") ||
   !directProvider?.models?.["deepseek-v4-flash"] ||
-  Number(directProvider?.models?.["deepseek-v4-flash"]?.limit?.output) !== 65_536
+  Number(directProvider?.models?.["deepseek-v4-flash"]?.limit?.output) !== 32_768
 ) {
   addFinding({
     severity: "P1",
