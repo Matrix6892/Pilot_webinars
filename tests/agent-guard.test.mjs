@@ -4352,6 +4352,74 @@ test("a target clarification reuses the original ask without hiding new requests
   ]);
 });
 
+test("a follow-up color recommendation survives canonical estimate copy", () => {
+  const job = {
+    body: "Подберите краску и дайте диапазон расхода для деревянного забора без размеров.",
+    roundNo: 2,
+    conversation: [{
+      role: "customer",
+      body: "А теперь добавьте рекомендацию по практичному цвету для дачи.",
+    }],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "Деревянный забор",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 20, max: 60, unit: "м²" },
+        method: "Деревянный забор: типовой диапазон без замера",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 6, max: 19, unit: "кг" },
+        method: "Деревянный забор: площадь × расход КР-005 × два слоя",
+        candidateSku: "КР-005",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+    ],
+    reply: {
+      subject: "Практичный цвет для дачного забора",
+      body: "Практичный цвет для дачи — коричневый: он спокойно смотрится среди зелени.",
+    },
+  });
+  draft.resolvedIntent.asks.push({
+    id: "practical-color",
+    request: job.conversation[0].body,
+    evidenceIds: ["color-request"],
+  });
+  draft.resolvedIntent.evidence.push({
+    id: "color-request",
+    claim: "Клиент просит рекомендацию по практичному цвету для дачи.",
+    confidence: 1,
+    source: {
+      kind: "message",
+      roundNo: 2,
+      quote: job.conversation[0].body,
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.match(
+    result.reply.body,
+    /(?:практичн\p{L}*\s+цвет[^.]*коричнев|я бы выбрал коричневый)/iu,
+  );
+  assert.deepEqual(askCoverageGaps(job, result), []);
+
+  const paletteOnly = structuredClone(result);
+  paletteOnly.reply.body =
+    "Для забора доступны белый, коричневый и зелёный цвета.";
+  assert.deepEqual(askCoverageGaps(job, paletteOnly), [
+    job.conversation[0].body,
+  ]);
+});
+
 test("accepts close ask fragments without accepting unknown evidence", () => {
   const job = {
     body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
