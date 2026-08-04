@@ -4428,7 +4428,7 @@ test("a follow-up color recommendation survives canonical estimate copy", () => 
     ],
     reply: {
       subject: "Практичный цвет для дачного забора",
-      body: "Практичный цвет для дачи — коричневый: он спокойно смотрится среди зелени.",
+      body: "Цвет советую коричневый: он спокойно смотрится среди зелени.",
     },
   });
   draft.resolvedIntent.asks.push({
@@ -4451,13 +4451,13 @@ test("a follow-up color recommendation survives canonical estimate copy", () => 
 
   assert.match(
     result.reply.body,
-    /(?:практичн\p{L}*\s+цвет[^.]*коричнев|я бы выбрал коричневый)/iu,
+    /(?:цвет советую коричневый|я бы выбрал коричневый)/iu,
   );
   assert.deepEqual(askCoverageGaps(job, result), []);
 
   const paletteOnly = structuredClone(result);
   paletteOnly.reply.body =
-    "Для забора доступны белый, коричневый и зелёный цвета.";
+    "Совет по подготовке: очистите поверхность. Для забора доступны белый, коричневый и зелёный цвета.";
   assert.deepEqual(askCoverageGaps(job, paletteOnly), [
     job.conversation[0].body,
   ]);
