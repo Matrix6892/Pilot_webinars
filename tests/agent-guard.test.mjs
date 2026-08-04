@@ -4274,6 +4274,38 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
     [],
   );
 
+  const enumeratedBody =
+    "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.";
+  const enumeratedResult = {
+    resolvedIntent: {
+      asks: [
+        { id: "paint", request: "Подберите краску для деревянной беседки", evidenceIds: ["request"] },
+        { id: "color", request: "Подберите цвет для деревянной беседки", evidenceIds: ["request"] },
+        { id: "budget", request: "Оцените диапазон бюджета на краску для деревянной беседки", evidenceIds: ["request"] },
+      ],
+    },
+    reply: {
+      body: "Для деревянной беседки подходит КР-005; рекомендую коричневый цвет; бюджет — 1 700–5 000 ₽.",
+    },
+    options: [],
+    estimates: [
+      { metric: "paint_quantity", method: "Беседка: расход КР-005", candidateSku: "КР-005" },
+      { metric: "budget", method: "Беседка: диапазон бюджета", candidateSku: "КР-005" },
+    ],
+  };
+  assert.deepEqual(
+    askCoverageGaps({ body: enumeratedBody }, enumeratedResult),
+    [],
+  );
+
+  const withoutColor = structuredClone(enumeratedResult);
+  withoutColor.resolvedIntent.asks.splice(1, 1);
+  withoutColor.reply.body =
+    "Для деревянной беседки подходит КР-005; бюджет — 1 700–5 000 ₽.";
+  assert.deepEqual(askCoverageGaps({ body: enumeratedBody }, withoutColor), [
+    enumeratedBody.toLowerCase().replace(/\.$/u, ""),
+  ]);
+
   const ambiguousBody =
     "Хочу покрасить это на фотографии. Подберите краску и оцените расход.";
   const ambiguousAsks = askCoverageGaps(
