@@ -4463,6 +4463,74 @@ test("a follow-up color recommendation survives canonical estimate copy", () => 
   ]);
 });
 
+test("a preparation follow-up keeps every earlier estimate ask visible", () => {
+  const job = {
+    body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
+    roundNo: 2,
+    conversation: [{
+      role: "customer",
+      body: "После перезагрузки добавьте, пожалуйста, совет по подготовке поверхности.",
+    }],
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "Деревянная беседка",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 12, max: 30, unit: "м²" },
+        method: "Деревянная беседка: типовой диапазон без замера",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 4, max: 9, unit: "кг" },
+        method: "Деревянная беседка: площадь × расход КР-005 × два слоя",
+        candidateSku: "КР-005",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+      {
+        metric: "budget",
+        range: { min: 1184, max: 2664, unit: "₽" },
+        method: "Деревянная беседка: количество КР-005 × 296 ₽/кг",
+        candidateSku: "КР-005",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+    ],
+    reply: {
+      subject: "Подготовка деревянной беседки",
+      body: "Перед покраской очистите поверхность, отшлифуйте непрочное старое покрытие и нанесите совместимый грунт.",
+    },
+  });
+  draft.resolvedIntent.asks.push({
+    id: "surface-preparation",
+    request: job.conversation[0].body,
+    evidenceIds: ["preparation-request"],
+  });
+  draft.resolvedIntent.evidence.push({
+    id: "preparation-request",
+    claim: "Клиент просит совет по подготовке поверхности.",
+    confidence: 1,
+    source: {
+      kind: "message",
+      roundNo: 2,
+      quote: job.conversation[0].body,
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.match(result.reply.body, /я бы выбрал коричневый/iu);
+  assert.match(result.reply.body, /очистите поверхность.+отшлифуйте.+грунт/iu);
+  assert.deepEqual(askCoverageGaps(job, result), []);
+});
+
 test("accepts close ask fragments without accepting unknown evidence", () => {
   const job = {
     body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
