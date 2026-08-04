@@ -4281,7 +4281,7 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
       asks: [
         { id: "paint", request: "Подберите краску для деревянной беседки", evidenceIds: ["request"] },
         { id: "color", request: "Подберите цвет для деревянной беседки", evidenceIds: ["request"] },
-        { id: "budget", request: "Оцените диапазон бюджета на краску для деревянной беседки", evidenceIds: ["request"] },
+        { id: "budget", request: "Подберите диапазон бюджета", evidenceIds: ["request"] },
       ],
     },
     reply: {
