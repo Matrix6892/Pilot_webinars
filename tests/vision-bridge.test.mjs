@@ -43,13 +43,13 @@ function bridgeStreamHelpers(source) {
   );
 }
 
-function childEnvironmentFromBridge(source, env, model) {
+function childEnvironmentFromBridge(source, env, model, opencodeDbPath = "") {
   const start = source.indexOf("function childEnvironment(");
   const end = source.indexOf("async function agentRequest(", start);
   assert.ok(start >= 0 && end > start);
   return runInNewContext(
     `${source.slice(start, end)}
-childEnvironment(${JSON.stringify(model)})`,
+childEnvironment(${JSON.stringify(model)}, ${JSON.stringify(opencodeDbPath)})`,
     { process: { env } },
   );
 }
@@ -1697,6 +1697,7 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
     bridge,
     env,
     "deepseek/deepseek-v4-flash",
+    "/tmp/koler-run-1/opencode.db",
   );
   const reviewerEnvironment = childEnvironmentFromBridge(
     bridge,
@@ -1714,8 +1715,16 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
   assert.equal(directEnvironment.OPENCODE_API_KEY, "provider-secret");
   assert.equal(directEnvironment.OPENCODE_GO_API_KEY, "provider-secret");
   assert.equal(directEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
+  assert.equal(
+    directEnvironment.OPENCODE_DB,
+    "/tmp/koler-run-1/opencode.db",
+  );
   assert.equal(reviewerEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
   assert.equal(visionEnvironment.DEEPSEEK_API_KEY, undefined);
+  assert.match(
+    bridge,
+    /childEnvironment\(model,\s*join\(promptDirectory, "opencode\.db"\)\)/u,
+  );
   for (const secretName of [
     "BRIDGE_TOKEN",
     "KOLER_ADMIN_CODE",

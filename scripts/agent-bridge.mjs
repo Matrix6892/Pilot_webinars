@@ -638,7 +638,7 @@ function continuationContextForJob(job) {
   };
 }
 
-function childEnvironment(model) {
+function childEnvironment(model, opencodeDbPath = "") {
   const names = [
     "HOME",
     "LANG",
@@ -659,11 +659,13 @@ function childEnvironment(model) {
   if (String(model).startsWith("deepseek/")) {
     names.push("DEEPSEEK_API_KEY");
   }
-  return Object.fromEntries(
+  const environment = Object.fromEntries(
     names
       .filter((name) => typeof process.env[name] === "string")
       .map((name) => [name, process.env[name]]),
   );
+  if (opencodeDbPath) environment.OPENCODE_DB = opencodeDbPath;
+  return environment;
 }
 
 async function agentRequest(
@@ -1422,7 +1424,8 @@ async function runOpenCode({
       ],
       {
         cwd: root,
-        env: childEnvironment(model),
+        // ponytail: each concurrent CLI run gets a disposable SQLite file.
+        env: childEnvironment(model, join(promptDirectory, "opencode.db")),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
