@@ -4060,6 +4060,15 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   );
   assert.deepEqual(compoundReplyCoverageGaps(job, result), []);
   assert.equal(isCompleteAgentResult(result), true);
+
+  const missingKremlinColor = structuredClone(result);
+  missingKremlinColor.reply.body = missingKremlinColor.reply.body.replace(
+    /Для Кремля сохранил бы узнаваемую историческую палитру и сначала сделал пробный выкрас\./iu,
+    "Для Кремля подготовлена отдельная мысленная оценка бюджета.",
+  );
+  assert.deepEqual(compoundReplyCoverageGaps(job, missingKremlinColor), [
+    "какой цвет выбрать лучше",
+  ]);
 });
 
 test("flags a compound reply that silently drops a second paint task", () => {
@@ -4124,6 +4133,7 @@ test("flags a compound reply that silently drops a second paint task", () => {
 
   assert.deepEqual(compoundReplyCoverageGaps(job, result), [
     "скажите сколько будет стоить покрасить кремль в москве",
+    "какой цвет выбрать лучше",
   ]);
 
   draft.reply.body =

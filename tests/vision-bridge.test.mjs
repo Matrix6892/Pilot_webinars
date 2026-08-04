@@ -1337,6 +1337,10 @@ test("compound requests receive the complete catalog and keep every explicit ask
   );
   assert.match(
     coverageRetryPrompt,
+    /общий вопрос о цвете[\s\S]*?каждый объект[\s\S]*?отдельную рекомендацию/iu,
+  );
+  assert.match(
+    coverageRetryPrompt,
     /необычн[а-яё]*, защищённ[а-яё]* или некоммерческ[а-яё]* неодушевлённ[а-яё]* объект[\s\S]*?surface_area[\s\S]*?paint_quantity[\s\S]*?budget/iu,
   );
   assert.match(
