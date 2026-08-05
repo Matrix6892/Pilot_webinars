@@ -586,12 +586,11 @@ function continuationContextForJob(job) {
           .filter((roundNo) => Number.isSafeInteger(roundNo) && roundNo > 0)
       : []),
   );
+  // ponytail: every fresh round reuses bounded v2 context; current snapshots stay authoritative.
   if (
     !Number.isSafeInteger(currentRound) ||
     currentRound <= priorMessageRound ||
     previousResult?.schemaVersion !== 2 ||
-    previousResult?.resolvedIntent?.blocker?.kind !==
-      "target_ambiguity" ||
     !latestCustomerReply
   ) {
     return null;

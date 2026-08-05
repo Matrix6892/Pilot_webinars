@@ -645,7 +645,7 @@ storedVisionObservationForJob`,
   );
 });
 
-test("reuses resolved context and opened pages after a target-blocker reply", async () => {
+test("reuses structured context after target blockers and ordinary follow-ups", async () => {
   const bridge = await readFile(
     new URL("../scripts/agent-bridge.mjs", import.meta.url),
     "utf8",
@@ -795,6 +795,52 @@ test("reuses resolved context and opened pages after a target-blocker reply", as
   assert.deepEqual(context.openedSourceUrls, [culturalUrl]);
   assert.equal(context.openedSourceUrls.includes(priorOpenedUrl), false);
   assert.equal(context.openedSourceUrls.includes(supplierUrl), false);
+
+  const priorReady = JSON.parse(job.resultJson);
+  priorReady.resolvedIntent = {
+    ...priorReady.resolvedIntent,
+    goal: "Подобрать краску, цвет и бюджет для деревянной беседки",
+    asks: [
+      {
+        id: "gazebo-paint",
+        request: "Подберите краску, цвет и бюджет для деревянной беседки",
+        evidenceIds: ["message"],
+      },
+    ],
+    target: {
+      state: "resolved",
+      label: "деревянная беседка",
+      evidenceIds: ["message"],
+    },
+    blocker: null,
+  };
+  const ordinaryContext = JSON.parse(
+    JSON.stringify(
+      continuationContextForJob({
+        ...job,
+        conversationJson: JSON.stringify([
+          {
+            role: "agent",
+            body: "Готов подбор, цвет и диапазон бюджета.",
+          },
+          {
+            role: "customer",
+            body: "Добавьте совет по подготовке поверхности.",
+          },
+        ]),
+        resultJson: JSON.stringify(priorReady),
+      }),
+    ),
+  );
+  assert.equal(
+    ordinaryContext.latestCustomerReply.body,
+    "Добавьте совет по подготовке поверхности.",
+  );
+  assert.equal(
+    ordinaryContext.resolvedIntent.target.label,
+    "деревянная беседка",
+  );
+  assert.equal(ordinaryContext.resolvedIntent.asks[0].id, "gazebo-paint");
 
   const processJob = bridge.slice(
     bridge.indexOf("async function processJob"),
