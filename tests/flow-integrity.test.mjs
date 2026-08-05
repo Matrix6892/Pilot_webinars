@@ -2415,6 +2415,30 @@ test("manager approval prepares a safe nonbinding client reply instead of an err
     approval.indexOf("if (approvalCoverageGaps.length)") <
       approval.indexOf("const historyQuery"),
   );
+  const recalculation = route.slice(
+    route.indexOf('if (action === "recalculate")'),
+    route.indexOf('if (action === "reserve")'),
+  );
+  assert.match(
+    recalculation,
+    /answerCoverageGaps[\s\S]*?askCoverageGaps[\s\S]*?answerCoverageOutdated/,
+  );
+  assert.match(
+    recalculation,
+    /!supplierOutdated\s*&&\s*!answerCoverageOutdated/,
+  );
+  const runner = await readFile(
+    new URL("./run-webinar-probes.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    runner,
+    /allowCoverageRecalculate[\s\S]*?\[200, 409\][\s\S]*?action: "recalculate"/,
+  );
+  assert.match(
+    runner,
+    /finishForClient\(context, recalculated, false\)/,
+  );
   assert.match(
     route,
     /preparedReply[\s\S]*?selectedReply[\s\S]*?join\("\\n\\n"\)/,

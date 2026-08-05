@@ -286,11 +286,37 @@ function managerOption(result) {
     result?.options?.[0];
 }
 
-async function approveManager(context, state) {
+async function approveManager(context, state, allowCoverageRecalculate = true) {
   assert.equal(state.order.status, "awaiting_approval");
   const option = managerOption(state.order.result);
   assert.ok(option?.id, `${context.probe.id}: manager result has no option`);
-  await patchOrder(context, { action: "approve", optionId: option.id });
+  const approval = await patchOrder(
+    context,
+    { action: "approve", optionId: option.id },
+    [200, 409],
+  );
+  if (approval.response.status === 409) {
+    assert.equal(
+      approval.data?.recalculate,
+      true,
+      `${context.probe.id}: manager approval failed without recovery`,
+    );
+    assert.equal(
+      allowCoverageRecalculate,
+      true,
+      `${context.probe.id}: manager reply stayed incomplete after one recalculation`,
+    );
+    await patchOrder(context, { action: "recalculate" });
+    const nextRound = state.order.roundNo + 1;
+    const recalculated = await waitForTerminal(context, nextRound);
+    assert.notEqual(
+      recalculated.order.status,
+      "error",
+      `${context.probe.id}: coverage recalculation failed`,
+    );
+    assertNoPrimaryFallback(context.probe, recalculated, nextRound);
+    return finishForClient(context, recalculated, false);
+  }
   const approved = await readOrder(context);
   assert.equal(
     approved.order.status,
@@ -300,10 +326,18 @@ async function approveManager(context, state) {
   return { ...approved, latencyMs: Date.now() - context.postAt };
 }
 
-async function finishForClient(context, state) {
+async function finishForClient(
+  context,
+  state,
+  allowCoverageRecalculate = true,
+) {
   let current = state;
   if (current.order.status === "awaiting_approval") {
-    current = await approveManager(context, current);
+    current = await approveManager(
+      context,
+      current,
+      allowCoverageRecalculate,
+    );
   }
   assert.ok(
     clientCompleteStatuses.has(current.order.status),

@@ -1629,6 +1629,21 @@ export async function PATCH(request: Request) {
       [],
     );
     const previousResult = storedAgentResult(order.resultJson);
+    const answerCoverageGaps = previousResult
+      ? askCoverageGaps(
+          {
+            subject: order.subject,
+            body: order.body,
+            conversation,
+            attachment: storedJson<Attachment | null>(
+              order.attachmentJson,
+              null,
+            ),
+          },
+          previousResult,
+        )
+      : [];
+    const answerCoverageOutdated = answerCoverageGaps.length > 0;
     const liveData = await getDemoDataWithInventory();
     const inventoryOutdated = await savedResultUsesOldInventory(order);
     const supplierOutdated = Boolean(
@@ -1638,7 +1653,8 @@ export async function PATCH(request: Request) {
     if (
       order.status !== "error" &&
       !inventoryOutdated &&
-      !supplierOutdated
+      !supplierOutdated &&
+      !answerCoverageOutdated
     ) {
       return Response.json(
         {
@@ -1675,7 +1691,10 @@ export async function PATCH(request: Request) {
       );
     }
     const stockChange =
-      dataChanges.join(" ") || "Склад перечитан по свежим данным.";
+      dataChanges.join(" ") ||
+      (answerCoverageOutdated
+        ? "Предыдущий вариант не закрывал все просьбы клиента."
+        : "Склад перечитан по свежим данным.");
     const bridgeIsOnline = await bridgeOnline();
     const recordedMode = order.mode === "recorded-demo";
 
@@ -1704,7 +1723,9 @@ export async function PATCH(request: Request) {
               ? "Свежие данные склада и поставщика переданы агенту"
               : supplierOutdated
                 ? "Свежее предложение передано агенту"
-                : "Новый остаток передан агенту",
+                : answerCoverageOutdated
+                  ? "Неполный ответ возвращён агенту"
+                  : "Новый остаток передан агенту",
           detail: `${stockChange} Модель для заказов заново готовит решение, письмо и варианты для руководителя.`,
           state: "active",
           ...eventMetadata({ ...order, roundNo: order.roundNo + 1 }),
