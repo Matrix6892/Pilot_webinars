@@ -1771,12 +1771,15 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
   assert.equal(directEnvironment.OPENCODE_API_KEY, "provider-secret");
   assert.equal(directEnvironment.OPENCODE_GO_API_KEY, "provider-secret");
   assert.equal(directEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
+  assert.equal(directEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
   assert.equal(
     directEnvironment.OPENCODE_DB,
     "/tmp/koler-run-1/opencode.db",
   );
   assert.equal(reviewerEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
+  assert.equal(reviewerEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
   assert.equal(visionEnvironment.DEEPSEEK_API_KEY, undefined);
+  assert.equal(visionEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
   assert.match(
     bridge,
     /childEnvironment\(model,\s*join\(promptDirectory, "opencode\.db"\)\)/u,

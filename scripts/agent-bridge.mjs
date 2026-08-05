@@ -663,6 +663,8 @@ function childEnvironment(model, opencodeDbPath = "") {
       .filter((name) => typeof process.env[name] === "string")
       .map((name) => [name, process.env[name]]),
   );
+  // ponytail: one-shot order agents never use global skills; skip their cold-start scan.
+  environment.OPENCODE_DISABLE_EXTERNAL_SKILLS = "true";
   if (opencodeDbPath) environment.OPENCODE_DB = opencodeDbPath;
   return environment;
 }
