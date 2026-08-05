@@ -4533,6 +4533,84 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
   );
 });
 
+test("keeps a customer-grounded estimate scope when unsupported attribution is removed", () => {
+  const body = "Подберите краску и бюджет для металлических ворот.";
+  const job = { body, roundNo: 1 };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "металлические ворота",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 10, max: 30, unit: "м²" },
+        method: "Ворота: площадь обеих сторон типовых створок",
+        evidenceIds: ["request"],
+        assumptionIds: ["gate-size"],
+        confidence: 0.5,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 3.6, max: 10.8, unit: "кг" },
+        method: "Ворота: площадь × расход КР-001 × два слоя",
+        evidenceIds: ["request"],
+        assumptionIds: ["gate-size"],
+        confidence: 0.5,
+        candidateSku: "КР-001",
+      },
+      {
+        metric: "budget",
+        range: { min: 1_250, max: 3_770, unit: "₽" },
+        method: "Ворота, бюджет: расход × 349 ₽/кг по КР-001",
+        evidenceIds: ["request"],
+        assumptionIds: ["gate-size"],
+        confidence: 0.5,
+        candidateSku: "КР-001",
+      },
+    ],
+    reply: {
+      subject: "Краска и бюджет для ворот",
+      body: "Рекомендую КР-001 для ворот по 349 ₽/кг; бюджет — 1 250–3 770 ₽.",
+    },
+  });
+  draft.resolvedIntent.asks = [
+    {
+      id: "paint-selection",
+      request: "Подберите краску для металлических ворот.",
+      evidenceIds: ["request"],
+    },
+    {
+      id: "budget-estimate",
+      request: "Подберите бюджет для металлических ворот.",
+      evidenceIds: ["request"],
+    },
+  ];
+  draft.resolvedIntent.assumptions = [
+    {
+      id: "gate-size",
+      claim: "Площадь двух сторон ворот принята в диапазоне 10–30 м².",
+      basedOnEvidenceIds: ["request"],
+      confidence: 0.5,
+      confirmBefore: "commercial_offer",
+    },
+  ];
+
+  const result = normalizeV2AgentResult(draft, demoData, {
+    ...job,
+    requireResolvedAsks: true,
+  });
+
+  assert.equal(result.estimates.length, 3);
+  assert.match(
+    result.estimates.find((estimate) => estimate.metric === "budget").method,
+    /^Ворота, бюджет:/u,
+  );
+  assert.doesNotMatch(
+    result.estimates.find((estimate) => estimate.metric === "budget").method,
+    /КР-001|349/u,
+  );
+  assert.deepEqual(askCoverageGaps(job, result), []);
+});
+
 test("preparation follow-up accepts concrete actions without parroting the request", () => {
   const followUp =
     "После перезагрузки добавьте, пожалуйста, совет по подготовке поверхности.";
@@ -4739,7 +4817,7 @@ test("a preparation follow-up keeps every earlier estimate ask visible", () => {
     ],
     reply: {
       subject: "Подготовка деревянной беседки",
-      body: "Перед покраской очистите поверхность, отшлифуйте непрочное старое покрытие и нанесите совместимый грунт.",
+      body: "Дополнительно учтём подготовку поверхности перед работой.",
     },
   });
   draft.resolvedIntent.asks.push({
@@ -4761,7 +4839,36 @@ test("a preparation follow-up keeps every earlier estimate ask visible", () => {
   const result = normalizeV2AgentResult(draft, demoData, job);
 
   assert.match(result.reply.body, /я бы выбрал коричневый/iu);
-  assert.match(result.reply.body, /очистите поверхность.+отшлифуйте.+грунт/iu);
+  assert.match(result.reply.body, /очистите поверхность.+удалите пыль.+просушите/iu);
+  assert.deepEqual(askCoverageGaps(job, result), []);
+});
+
+test("turns a conservative no-size catalog fit into a useful range", () => {
+  const job = {
+    body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
+    roundNo: 1,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "деревянная беседка",
+    commitment: "none",
+    estimates: [],
+    reply: {
+      subject: "Нужна проверка",
+      body: "Для ответа нужно сначала уточнить размеры беседки.",
+    },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.equal(result.route, "ready");
+  assert.equal(result.commitment, "estimate");
+  assert.deepEqual(
+    result.estimates.map((estimate) => estimate.metric),
+    ["surface_area", "paint_quantity", "budget"],
+  );
+  assert.ok(result.estimates.every((estimate) => estimate.candidateSku === "КР-005"));
+  assert.match(result.reply.body, /10–50 м²/iu);
+  assert.match(result.reply.body, /я бы выбрал коричневый/iu);
   assert.deepEqual(askCoverageGaps(job, result), []);
 });
 

@@ -50,7 +50,11 @@ function childEnvironmentFromBridge(source, env, model, opencodeDbPath = "") {
   return runInNewContext(
     `${source.slice(start, end)}
 childEnvironment(${JSON.stringify(model)}, ${JSON.stringify(opencodeDbPath)})`,
-    { process: { env } },
+    {
+      join: (...parts) => parts.join("/"),
+      process: { env },
+      root: "/workspace",
+    },
   );
 }
 
@@ -194,12 +198,12 @@ function runOpenCodeFromBridge(
       rm: remove,
       root: "/workspace",
       setTimeout,
-      spawn: (_command, arguments_) => {
+      spawn: (_command, arguments_, options) => {
         const child = new EventEmitter();
         child.stdout = new EventEmitter();
         child.stderr = new EventEmitter();
         child.kill = () => {};
-        onSpawn(arguments_, child);
+        onSpawn(arguments_, child, options);
         if (closes) queueMicrotask(() => child.emit("close", closeCode));
         return child;
       },
@@ -1639,10 +1643,14 @@ test("passes max effort to separate direct Flash text runs, not MiMo, and settle
     "utf8",
   );
   const spawned = [];
+  const spawnOptions = [];
   const neverCompletes = new Promise(() => {});
   const runOpenCode = runOpenCodeFromBridge(
     bridge,
-    (arguments_) => spawned.push(arguments_),
+    (arguments_, _child, options) => {
+      spawned.push(arguments_);
+      spawnOptions.push(options);
+    },
     () => neverCompletes,
   );
 
@@ -1707,6 +1715,9 @@ test("passes max effort to separate direct Flash text runs, not MiMo, and settle
   );
   assert.equal(spawned[0][spawned[0].indexOf("--agent") + 1], "koler-reviewer");
   assert.equal(spawned[1][spawned[1].indexOf("--agent") + 1], "koler-sales");
+  for (const options of spawnOptions) {
+    assert.equal(options.cwd, "/tmp/koler-agent-test");
+  }
   assert.match(
     bridge,
     /catch \(primaryError\)[\s\S]*?managerFallbackAgentResult\(guardedJob/,
@@ -1773,13 +1784,43 @@ test("child env scopes the official DeepSeek key to the direct primary", async (
   assert.equal(directEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
   assert.equal(directEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
   assert.equal(
+    directEnvironment.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER,
+    "true",
+  );
+  assert.deepEqual(
+    JSON.parse(directEnvironment.OPENCODE_CONFIG_CONTENT),
+    { snapshot: false },
+  );
+  assert.equal(directEnvironment.OPENCODE_CONFIG, "/workspace/opencode.json");
+  assert.equal(
+    directEnvironment.OPENCODE_CONFIG_DIR,
+    "/workspace/.opencode",
+  );
+  assert.equal(directEnvironment.OPENCODE_DISABLE_PROJECT_CONFIG, "true");
+  assert.equal(
     directEnvironment.OPENCODE_DB,
     "/tmp/koler-run-1/opencode.db",
   );
   assert.equal(reviewerEnvironment.DEEPSEEK_API_KEY, "deepseek-secret");
   assert.equal(reviewerEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
+  assert.equal(
+    reviewerEnvironment.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER,
+    "true",
+  );
+  assert.deepEqual(
+    JSON.parse(reviewerEnvironment.OPENCODE_CONFIG_CONTENT),
+    { snapshot: false },
+  );
   assert.equal(visionEnvironment.DEEPSEEK_API_KEY, undefined);
   assert.equal(visionEnvironment.OPENCODE_DISABLE_EXTERNAL_SKILLS, "true");
+  assert.equal(
+    visionEnvironment.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER,
+    "true",
+  );
+  assert.deepEqual(
+    JSON.parse(visionEnvironment.OPENCODE_CONFIG_CONTENT),
+    { snapshot: false },
+  );
   assert.match(
     bridge,
     /childEnvironment\(model,\s*join\(promptDirectory, "opencode\.db"\)\)/u,

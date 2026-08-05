@@ -665,6 +665,11 @@ function childEnvironment(model, opencodeDbPath = "") {
   );
   // ponytail: one-shot order agents never use global skills; skip their cold-start scan.
   environment.OPENCODE_DISABLE_EXTERNAL_SKILLS = "true";
+  environment.OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER = "true";
+  environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({ snapshot: false });
+  environment.OPENCODE_CONFIG = join(root, "opencode.json");
+  environment.OPENCODE_CONFIG_DIR = join(root, ".opencode");
+  environment.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
   if (opencodeDbPath) environment.OPENCODE_DB = opencodeDbPath;
   return environment;
 }
@@ -1424,7 +1429,7 @@ async function runOpenCode({
         ...fileArguments,
       ],
       {
-        cwd: root,
+        cwd: promptDirectory,
         // ponytail: each concurrent CLI run gets a disposable SQLite file.
         env: childEnvironment(model, join(promptDirectory, "opencode.db")),
         stdio: ["ignore", "pipe", "pipe"],
@@ -2289,7 +2294,17 @@ async function processJob(job) {
           liveDemoData,
           { ...guardedJob, requireResolvedAsks: true },
         );
-        if (askCoverageGaps(guardedJob, repairedResult).length) {
+        const repairedCoverageGaps = askCoverageGaps(
+          guardedJob,
+          repairedResult,
+        );
+        if (repairedCoverageGaps.length) {
+          console.error(
+            `[bridge] coverage ${job.id}: initial=${coverageGaps.length} final=${repairedCoverageGaps.length} ` +
+              `asks=${result?.resolvedIntent?.asks?.length ?? 0}/${repairedResult?.resolvedIntent?.asks?.length ?? 0} ` +
+              `estimates=${result?.estimates?.length ?? 0}/${repairedResult?.estimates?.length ?? 0} ` +
+              `routes=${result?.route ?? "none"}/${repairedResult?.route ?? "none"}`,
+          );
           throw new Error("Primary draft omitted an explicit request part");
         }
         result = repairedResult;
