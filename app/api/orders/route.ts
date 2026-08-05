@@ -24,6 +24,7 @@ import {
   type SupplierPlan,
 } from "@/lib/demo-engine";
 import {
+  askCoverageGaps,
   decodeStoredAgentResult,
   isCompleteAgentResult,
   managerFallbackAgentResult,
@@ -2183,10 +2184,11 @@ export async function PATCH(request: Request) {
       );
     }
   }
-  const currentInput = inputWithConversation(
-    order,
-    storedJson<ConversationMessage[]>(order.conversationJson, []),
+  const conversation = storedJson<ConversationMessage[]>(
+    order.conversationJson,
+    [],
   );
+  const currentInput = inputWithConversation(order, conversation);
   const requestText = [
     currentInput.subject,
     currentInput.body,
@@ -2392,6 +2394,27 @@ export async function PATCH(request: Request) {
     };
   }
   const nextStatus = approvalStatus(needsCustomerReply, result.commitment);
+  const approvalCoverageGaps = needsCustomerReply
+    ? []
+    : askCoverageGaps(
+        {
+          subject: order.subject,
+          body: order.body,
+          conversation,
+          attachment: currentInput.attachment,
+        },
+        result,
+      );
+  if (approvalCoverageGaps.length) {
+    return Response.json(
+      {
+        error:
+          "Выбранный вариант не отвечает на весь запрос клиента. Пересчитайте заказ.",
+        recalculate: true,
+      },
+      { status: 409 },
+    );
+  }
   if (!isCompleteAgentResult(result)) {
     return Response.json(
       {

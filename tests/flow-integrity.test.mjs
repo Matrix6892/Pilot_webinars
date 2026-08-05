@@ -2409,6 +2409,14 @@ test("manager approval prepares a safe nonbinding client reply instead of an err
   );
   assert.match(
     route,
+    /askCoverageGaps[\s\S]*?if \(approvalCoverageGaps\.length\)[\s\S]*?recalculate:\s*true/,
+  );
+  assert.ok(
+    approval.indexOf("if (approvalCoverageGaps.length)") <
+      approval.indexOf("const historyQuery"),
+  );
+  assert.match(
+    route,
     /preparedReply[\s\S]*?selectedReply[\s\S]*?join\("\\n\\n"\)/,
   );
 });

@@ -4843,6 +4843,71 @@ test("a preparation follow-up keeps every earlier estimate ask visible", () => {
   assert.deepEqual(askCoverageGaps(job, result), []);
 });
 
+test("understands preparing an object before painting without the word surface", () => {
+  const followUp =
+    "Спасибо. А как правильно подготовить деревянный забор перед покраской?";
+  const job = {
+    body: "Подберите краску и диапазон бюджета для деревянного забора.",
+    conversation: [{ role: "customer", body: followUp }],
+    roundNo: 2,
+  };
+  const draft = v2ResolvedDraft(job, {
+    targetLabel: "Деревянный забор",
+    commitment: "estimate",
+    estimates: [
+      {
+        metric: "surface_area",
+        range: { min: 20, max: 60, unit: "м²" },
+        method: "Деревянный забор: диапазон без замера",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.4,
+      },
+      {
+        metric: "paint_quantity",
+        range: { min: 6, max: 19, unit: "кг" },
+        method: "Деревянный забор: площадь × расход КР-005 × два слоя",
+        candidateSku: "КР-005",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+      {
+        metric: "budget",
+        range: { min: 2960, max: 5920, unit: "₽" },
+        method: "Деревянный забор: количество КР-005 × 296 ₽/кг",
+        candidateSku: "КР-005",
+        evidenceIds: ["request"],
+        assumptionIds: [],
+        confidence: 0.5,
+      },
+    ],
+    reply: {
+      subject: "Повторная оценка забора",
+      body: "Повторяю диапазонную оценку и жду размеры забора.",
+    },
+  });
+  draft.resolvedIntent.asks = [{
+    id: "fence-preparation",
+    request: followUp,
+    evidenceIds: ["preparation-request"],
+  }];
+  draft.resolvedIntent.evidence.push({
+    id: "preparation-request",
+    claim: "Клиент спрашивает, как подготовить деревянный забор перед покраской.",
+    confidence: 1,
+    source: { kind: "message", roundNo: 2, quote: followUp },
+  });
+
+  const result = normalizeV2AgentResult(draft, demoData, job);
+
+  assert.match(
+    result.reply.body,
+    /очистите поверхность.+удалите пыль.+просушите/iu,
+  );
+  assert.deepEqual(askCoverageGaps(job, result), []);
+});
+
 test("turns a conservative no-size catalog fit into a useful range", () => {
   const job = {
     body: "Подберите краску, цвет и диапазон бюджета для деревянной беседки без размеров.",
