@@ -3941,7 +3941,7 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   const sourceUrl = "https://reference.example/kremlin-scale";
   const source = openedWeb(
     sourceUrl,
-    "Справочная страница описывает Московский Кремль как крупный архитектурный комплекс.",
+    "Справочная страница описывает Московский Кремль как крупный архитектурный комплекс и объект Всемирного наследия ЮНЕСКО.",
   );
   const job = {
     subject: "Вопросики",
@@ -4088,6 +4088,34 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   assert.deepEqual(compoundReplyCoverageGaps(job, result), []);
   assert.equal(isCompleteAgentResult(result), true);
 
+  const sanitizedProtectedReply = structuredClone(draft);
+  sanitizedProtectedReply.reply.body =
+    "Для дачного забора рекомендую коричневый. Точный оттенок утверждается реставрационным проектом.";
+  const protectedReply = normalizeV2AgentResult(
+    sanitizedProtectedReply,
+    demoData,
+    job,
+  );
+  assert.match(
+    protectedReply.reply.body,
+    /Для «Кремль» рекомендую сохранить утверждённый исторический облик/iu,
+  );
+  assert.deepEqual(compoundReplyCoverageGaps(job, protectedReply), []);
+
+  const ungroundedProtectedReply = structuredClone(sanitizedProtectedReply);
+  ungroundedProtectedReply.resolvedIntent.evidence.find(
+    (item) => item.id === "kremlin-source",
+  ).claim = "Справочная страница описывает масштаб архитектурного комплекса.";
+  const ungroundedResult = normalizeV2AgentResult(
+    ungroundedProtectedReply,
+    demoData,
+    job,
+  );
+  assert.doesNotMatch(
+    ungroundedResult.reply.body,
+    /сохранить утверждённый исторический облик/iu,
+  );
+
   const liveCoverageRepair = structuredClone(draft);
   liveCoverageRepair.reply.body = [
     "Добрый день! Разбил ваш запрос на три задачи: покраска деревянного забора на даче, стоимость покраски Кремля в Москве и выбор цвета. Отвечаю по каждой.",
@@ -4131,6 +4159,9 @@ test("compound estimates keep each ask distinct and surface grounded catalog gui
   const historicalAsideOnly = structuredClone(protectedAppearanceResult);
   historicalAsideOnly.reply.body = historicalAsideOnly.reply.body.replace(
     /Но цвет выбирать не нужно:[^.]+\./iu,
+    "",
+  ).replace(
+    /Для «Кремль» рекомендую сохранить утверждённый исторический облик;[^.]+\./iu,
     "",
   );
   assert.deepEqual(compoundReplyCoverageGaps(job, historicalAsideOnly), [
