@@ -4502,6 +4502,41 @@ test("generic ask coverage keeps distinct objects and differently phrased reques
   );
 });
 
+test("preparation follow-up accepts concrete actions without parroting the request", () => {
+  const followUp =
+    "После перезагрузки добавьте, пожалуйста, совет по подготовке поверхности.";
+  const job = {
+    body: "Подберите краску, цвет и бюджет для деревянной беседки.",
+    conversation: [{ role: "customer", body: followUp }],
+    roundNo: 2,
+  };
+  const result = {
+    resolvedIntent: {
+      asks: [
+        {
+          id: "surface-preparation",
+          request: "Дать совет по подготовке поверхности",
+          evidenceIds: ["follow-up"],
+        },
+      ],
+      target: { state: "resolved", label: "деревянная беседка" },
+    },
+    reply: {
+      body: "Перед окраской очистите беседку, просушите, отшлифуйте и загрунтуйте.",
+    },
+    options: [],
+    estimates: [],
+  };
+
+  assert.deepEqual(askCoverageGaps(job, result), []);
+
+  const acknowledgement = structuredClone(result);
+  acknowledgement.reply.body = "Спасибо, учтём ваш вопрос.";
+  assert.deepEqual(askCoverageGaps(job, acknowledgement), [
+    "Дать совет по подготовке поверхности",
+  ]);
+});
+
 test("a target clarification reuses the original ask without hiding new requests", () => {
   const job = {
     body: "Хочу покрасить это на фотографии. Подберите краску и оцените расход.",
