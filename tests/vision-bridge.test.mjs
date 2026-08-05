@@ -1358,11 +1358,12 @@ test("compound requests receive the complete catalog and keep every explicit ask
       schemaVersion: 2,
       resolvedIntent: {
         goal: "Оценить забор и мысленный сценарий для Кремля",
+        asks: [{ request: "покрасить деревянный забор" }],
       },
       estimates: [],
       reply: { subject: "Забор", body: "Оценка только забора" },
     },
-    ["мысленный сценарий для Кремля"],
+    ["мысленный сценарий для Кремля", "покрасить деревянный забор"],
     ["https://ru.wikipedia.org/wiki/Московский_Кремль"],
   );
   assert.match(
@@ -1373,6 +1374,11 @@ test("compound requests receive the complete catalog and keep every explicit ask
   assert.match(coverageRetryPrompt, /одну прямую\s+страницу/iu);
   assert.doesNotMatch(coverageRetryPrompt, /Не вызывай инструменты/u);
   assert.match(coverageRetryPrompt, /мысленный сценарий для Кремля/u);
+  assert.match(coverageRetryPrompt, /покрасить деревянный забор/u);
+  assert.match(
+    coverageRetryPrompt,
+    /полный список просьб[\s\S]*?уже закрытые пункты не удаляй/iu,
+  );
   assert.match(
     coverageRetryPrompt,
     /каждой пропущенной[\s\S]*?grounded estimates[\s\S]*?названия объекта/iu,
@@ -1407,7 +1413,7 @@ test("compound requests receive the complete catalog and keep every explicit ask
     coverageRetryPrompt,
     /правовую и коммерческую границу[\s\S]*?отдельно/iu,
   );
-  const coverageBlockStart = bridge.indexOf("const coverageRun =");
+  const coverageBlockStart = bridge.indexOf("const requiredAsks =");
   const coverageBlock = bridge.slice(
     coverageBlockStart,
     bridge.indexOf("const repairedResult", coverageBlockStart),
@@ -1422,6 +1428,10 @@ test("compound requests receive the complete catalog and keep every explicit ask
   assert.match(
     coverageBlock,
     /openedSourcesFromTools\(coverageRun\.tools\)/iu,
+  );
+  assert.match(
+    coverageBlock,
+    /coverageGaps[\s\S]*?result\?\.resolvedIntent\?\.asks[\s\S]*?\.slice\(0, 6\)/u,
   );
 });
 

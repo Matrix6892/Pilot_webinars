@@ -1780,7 +1780,7 @@ ${
 function compoundCoverageRetryPrompt(
   prompt,
   draft,
-  coverageGaps,
+  requiredAsks,
   openedSourceUrls,
 ) {
   const contextStart = prompt.indexOf("## Текущий заказ");
@@ -1801,9 +1801,9 @@ ${compactContext}
 
 ${promptJson(draft)}
 
-## Что обязательно восстановить
+## Полный список просьб, которые обязательно сохранить
 
-${promptJson(coverageGaps)}
+${promptJson(requiredAsks)}
 
 Уже открытые прямые страницы:
 ${promptJson(openedSourceUrls)}
@@ -1812,6 +1812,8 @@ ${promptJson(openedSourceUrls)}
   открытых страниц, выполни один целевой discovery-поиск и открой одну прямую
   страницу. Если подходящая страница уже открыта, не ищи повторно.
 - Верни заново один полный компактный primary draft, а не патч.
+- Каждый смысловой пункт полного списка сохрани в resolvedIntent.asks и явно
+  закрой в reply либо релевантной option; уже закрытые пункты не удаляй.
 - Сохрани подтверждённые evidence и assumptions. Для каждой пропущенной
   числовой подзадачи добавь отдельные grounded estimates; начни method с
   названия объекта. Не выдумывай точность сверх открытых фактов.
@@ -2239,13 +2241,20 @@ async function processJob(job) {
             "OpenCode timed out before compound coverage repair: job deadline exhausted",
           );
         }
+        // ponytail: one repair sees missing asks and the good asks it must not drop.
+        const requiredAsks = [
+          ...new Set([
+            ...coverageGaps,
+            ...(result?.resolvedIntent?.asks ?? []).map((ask) => ask?.request),
+          ].filter(Boolean)),
+        ].slice(0, 6);
         const coverageRun = await runPrimary({
           agent: "koler-sales",
           timeoutMs: coverageTimeoutMs,
           runPrompt: compoundCoverageRetryPrompt(
             prompt,
             primaryRun.value,
-            coverageGaps,
+            requiredAsks,
             verifiedOpenedSourceUrls,
           ),
           publishResearch: true,
