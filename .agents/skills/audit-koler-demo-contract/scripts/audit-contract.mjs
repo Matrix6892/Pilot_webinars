@@ -48,6 +48,7 @@ const coreFiles = [
   "docs/ARCHITECTURE-AND-WEBINAR.md",
   "docs/AGENT-BEHAVIOR-STANDARD.md",
   "docs/WEBINAR-RUNBOOK.md",
+  "docs/archive/ARCHITECTURE-AND-WEBINAR-v1.md",
   "data/models.json",
   "opencode.json",
   "data/paint-demo.json",
@@ -947,18 +948,27 @@ for (const surface of scenarioDocs) {
   }
 }
 
+const secondaryLegacyAbsentFrom = [
+  "README.md",
+  "docs/ARCHITECTURE-AND-WEBINAR.md",
+  "docs/WEBINAR-RUNBOOK.md",
+];
+for (const file of secondaryLegacyAbsentFrom) {
+  if (matches(file, /620\s*(?:700)?\s*₽|620\s*кг|620\/420|420\s*700|254\s*700/iu)) {
+    addFinding({
+      severity: "P1",
+      claim: `${file} keeps the old ПРОТЕК scenario numbers out of active docs`,
+      canonical: scenarioEvidence,
+      conflicts: [location(file, /620\s*(?:700)?\s*₽|620\s*кг|620\/420|420\s*700|254\s*700/iu)],
+      detail:
+        "Per approved plan L4 the 620/420/260/150/700 scenario lives only in docs/archive/, not in active docs.",
+    });
+  }
+}
 const secondaryScenarioChecks = [
   [
-    "README.md",
-    /Вторич(?:ный|ная|ное|ные)\/legacy regression example[^\n]*\n?[^\n]{0,80}620 кг/iu,
-  ],
-  [
-    "docs/ARCHITECTURE-AND-WEBINAR.md",
-    /### Контроль управляемого сценария ПРОТЕК\s+Старый складской эпизод остаётся локальной проверкой причинности/u,
-  ],
-  [
-    "docs/WEBINAR-RUNBOOK.md",
-    /(?:вторичн[а-яё]*|secondary|legacy)[^\n]{0,100}ПРОТЕК[^\n]*\n[^\n]{0,100}отдельн[а-яё]* локальн[а-яё]* проверк[а-яё]*/iu,
+    "docs/archive/ARCHITECTURE-AND-WEBINAR-v1.md",
+    /ПРОТЕК/iu,
   ],
   [
     ".agents/skills/operate-koler-webinar/references/canonical-scenario.md",
