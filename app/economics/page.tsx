@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 export const metadata: Metadata = {
   title: "Экономика агента — Колер",
@@ -118,7 +119,7 @@ export default function EconomicsPage() {
           дешевле человеческого часа на порядки, но честная единица сравнения —
           не «дешевле ли агент», а «сколько спасённых сделок на рубль токенов».
         </p>
-        <a href="/">Вернуться к живому стенду</a>
+        <Link href="/">Вернуться к живому стенду</Link>
       </footer>
     </main>
   );
