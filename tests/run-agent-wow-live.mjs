@@ -2733,7 +2733,8 @@ export function evaluateResearchEfficiency(
       (/search/iu.test(String(event.tool ?? "")) ||
         (event.urls ?? []).some(isSearchResultUrl)),
   ).length;
-  const searchActionLimit = culturalReferenceContract ? 2 : 1;
+  const searchActionLimit =
+    culturalReferenceContract || shortageExpectations.has(item.id) ? 2 : 1;
   const failures = [];
   if (searchActions > searchActionLimit) {
     failures.push(`search-actions ${searchActions} > ${searchActionLimit}`);

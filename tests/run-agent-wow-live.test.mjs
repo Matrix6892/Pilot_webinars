@@ -2594,6 +2594,44 @@ test("research efficiency bounds cultural attempts and counts only content-valid
   assert.equal(threeOrdinaryAttempts.passed, false);
   assert.match(threeOrdinaryAttempts.failures.join(" "), /direct-sources 3 > 2/u);
 
+  const shortageItem = holdout.cases.find(
+    (candidate) => candidate.id === "wow-08-two-ton-shortage",
+  );
+  const shortageDirectUrl = "https://supplier.example/kr001-bulk";
+  const twoShortagePasses = evaluateResearchEfficiency(
+    shortageItem,
+    [shortageDirectUrl],
+    [
+      { tool: "public_webfetch", completed: true, urls: ["https://search.example/search?q=kr001+wholesale"] },
+      {
+        tool: "public_webfetch",
+        completed: true,
+        urls: ["https://search.example/search?q=industrial+paint+supplier"],
+      },
+      { tool: "public_webfetch", completed: true, urls: [shortageDirectUrl] },
+    ],
+  );
+  assert.equal(twoShortagePasses.passed, true);
+  assert.equal(twoShortagePasses.searchActions, 2);
+  assert.equal(twoShortagePasses.searchActionLimit, 2);
+
+  const threeShortageSearches = evaluateResearchEfficiency(
+    shortageItem,
+    [shortageDirectUrl],
+    [
+      { tool: "public_webfetch", completed: true, urls: ["https://search.example/search?q=kr001+wholesale"] },
+      {
+        tool: "public_webfetch",
+        completed: true,
+        urls: ["https://search.example/search?q=industrial+paint+supplier"],
+      },
+      { tool: "public_webfetch", completed: true, urls: ["https://search.example/search?q=bulk+paint"] },
+      { tool: "public_webfetch", completed: true, urls: [shortageDirectUrl] },
+    ],
+  );
+  assert.equal(threeShortageSearches.passed, false);
+  assert.match(threeShortageSearches.failures.join(" "), /search-actions 3 > 2/u);
+
   const item = holdout.cases.find(
     (candidate) => candidate.id === "wow-09-red-curtain-reference",
   );

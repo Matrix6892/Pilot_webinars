@@ -690,6 +690,36 @@ test("target evidence keeps action sources and drops catalog or web support", ()
   );
 });
 
+test("schema v2 scrubs internal color codes from client-facing copy", () => {
+  const candidate = draft();
+  candidate.reply = {
+    subject: "Покраска корпуса: RAL 7016",
+    body:
+      "Подбираем краску: цвета — RAL 9005, другие цвета по заказу. " +
+      "Тон фиксируем образцом.\n\nЗафиксировал «стена».",
+  };
+  const job = {
+    subject: "Покрасить стену",
+    body: "Красим стену на фото.",
+    attachment: {
+      name: "room.jpg",
+      src: candidate.visionObservation.attachmentRef,
+    },
+    visionObservation: candidate.visionObservation,
+    openedSourceUrls: ["https://example.com/red-room"],
+  };
+  const result = normalizeV2AgentResult(candidate, demoData, job);
+
+  assert.doesNotMatch(result.reply.body, /\bRAL\s?\d{4}\b/iu);
+  assert.doesNotMatch(result.reply.subject, /\bRAL\s?\d{4}\b/iu);
+  assert.match(result.reply.body, /тон по образцу/u);
+  for (const option of result.options ?? []) {
+    if (option?.reply?.body) {
+      assert.doesNotMatch(option.reply.body, /\bRAL\s?\d{4}\b/iu);
+    }
+  }
+});
+
 test("schema v2 survives stored JSON round-trip with lifecycle fields intact", () => {
   const job = {
     subject: "Покрасить стену как в Красной комнате",
