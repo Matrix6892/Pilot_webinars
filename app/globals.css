@@ -5541,3 +5541,159 @@ time {
   background: var(--muted);
   box-shadow: 0 0 0 3px rgb(85 93 88 / 14%);
 }
+
+/* ── 13. Страница экономики /economics (синтетический слайд) ── */
+.eco-shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: clamp(32px, 5vw, 72px) clamp(20px, 4vw, 48px) 64px;
+}
+
+.eco-head h1 {
+  max-width: 900px;
+  margin: 14px 0 0;
+  font-size: clamp(32px, 3.6vw, 52px);
+  font-weight: 600;
+  letter-spacing: -0.026em;
+  line-height: 1.06;
+}
+
+.eco-lead {
+  max-width: 720px;
+  margin: 18px 0 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.eco-grid,
+.eco-money {
+  display: grid;
+  margin-top: 28px;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+
+.eco-cell {
+  display: flex;
+  flex-direction: column;
+  padding: 22px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+}
+
+.eco-cell strong {
+  font-family: var(--font-geologica), sans-serif;
+  font-size: clamp(30px, 3vw, 44px);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.eco-cell span {
+  margin-top: 12px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.eco-cell small {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.eco-cell-ink {
+  border: 0;
+  background: var(--ink);
+}
+
+.eco-cell-ink span {
+  color: var(--on-ink-label);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.eco-cell-ink strong {
+  margin-top: 8px;
+  color: #fff;
+}
+
+.eco-cell-ink small {
+  color: var(--on-ink-body);
+}
+
+.eco-compare {
+  margin-top: 40px;
+  padding: 26px 26px 10px;
+  border-radius: var(--r-l);
+  background: var(--ink);
+  color: #fff;
+}
+
+.eco-compare h2 {
+  margin: 0;
+  font-size: clamp(22px, 2.2vw, 30px);
+  letter-spacing: -0.02em;
+}
+
+.eco-compare ul {
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eco-compare li {
+  display: grid;
+  padding: 14px 0;
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  gap: 6px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.eco-compare li span:first-child {
+  color: var(--on-ink-body);
+}
+
+.eco-compare li span:last-child {
+  color: #fff;
+  font-weight: 650;
+}
+
+.eco-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 36px;
+  gap: 24px;
+}
+
+.eco-foot p {
+  max-width: 640px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.eco-foot a {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}
+
+@media (max-width: 720px) {
+  .eco-compare li {
+    grid-template-columns: 1fr;
+  }
+
+  .eco-foot {
+    flex-direction: column;
+  }
+}
