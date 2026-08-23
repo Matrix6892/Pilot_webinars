@@ -5286,3 +5286,252 @@ footer span:last-child {
     transform: translateY(0);
   }
 }
+
+/* ============================================================
+   UI REFRESH LAYER — taste-skill pass (см. docs/UI-REFRESH-SPEC.md)
+   Откат: удалить эту секцию целиком или `git revert` коммита.
+   Все правила — переопределения поверх базовых стилей выше.
+   ============================================================ */
+
+/* ── 1. Токены ─────────────────────────────────────────── */
+:root {
+  --accent: #8a4a16;
+  --accent-strong: #6e3a10;
+  --muted: #555d58;
+  --green-text: #1c5a3d;
+  --yellow-text: #7e4d08;
+  --red-text: #993127;
+  --on-ink-label: #d1ab84;
+  --on-ink-body: #bfc7c3;
+  --r-s: 10px;
+  --r-m: 14px;
+  --r-l: 22px;
+  --shadow-rest: 0 1px 2px rgb(42 38 28 / 5%), 0 6px 20px rgb(42 38 28 / 5%);
+  --shadow-float: 0 2px 8px rgb(42 38 28 / 6%), 0 28px 70px rgb(42 38 28 / 10%);
+  --shadow: var(--shadow-float);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+}
+
+/* ── 2. Типографика: кириллический трекинг и шкала ────── */
+.hero-intro h1 {
+  font-size: clamp(38px, 4.4vw, 64px);
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1.05;
+}
+
+.demo-heading h2,
+.control-intro h2,
+.day-heading h2 {
+  font-size: clamp(30px, 3.4vw, 52px);
+  font-weight: 580;
+  letter-spacing: -0.026em;
+  line-height: 1.06;
+}
+
+.modal-head h2 {
+  font-size: clamp(26px, 3vw, 44px);
+  letter-spacing: -0.026em;
+}
+
+.metric-grid strong {
+  letter-spacing: -0.03em;
+}
+
+time {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .demo-heading h2,
+  .control-intro h2,
+  .day-heading h2 {
+    font-size: clamp(30px, 8vw, 39px);
+  }
+}
+
+/* ── 3. Контраст и семантика цвета ─────────────────────── */
+.zone-green .zone-name { color: var(--green-text); }
+.zone-yellow .zone-name { color: var(--yellow-text); }
+.zone-red .zone-name { color: var(--red-text); }
+
+.zone-green .zone-light { background: var(--green); }
+.zone-yellow .zone-light { background: var(--yellow); }
+.zone-red .zone-light { background: var(--red); }
+
+.option-number {
+  color: var(--muted);
+}
+
+.window-dots span:first-child,
+.window-dots span:nth-child(2),
+.window-dots span:nth-child(3) {
+  background: #dcd7cc;
+}
+
+.photo-upload-button small {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.photo-upload-button:hover {
+  border-color: var(--accent);
+  background: rgb(240 223 202 / 35%);
+}
+
+.market-form label > span,
+.market-form label > small,
+.console-signout {
+  font-size: 11px;
+}
+
+.market-form label > span {
+  color: var(--on-ink-label);
+}
+
+.market-form label > small {
+  color: var(--on-ink-body);
+}
+
+/* ── 4. Радиус-язык 10 / 14 / 22 ───────────────────────── */
+.workbench,
+.control-story,
+.modal-sheet,
+.metric-grid,
+.hero-status,
+.source-dock {
+  border-radius: var(--r-l);
+}
+
+.mail-card,
+.reply-card,
+.agent-difference {
+  border-radius: var(--r-m);
+}
+
+.connection,
+.topbar .connection {
+  border-radius: 999px;
+}
+
+/* ── 5. Тени: только тёплые ────────────────────────────── */
+.mail-card {
+  box-shadow: var(--shadow-rest);
+}
+
+.modal-sheet {
+  box-shadow: 0 28px 70px rgb(28 25 18 / 32%);
+}
+
+/* ── 6. CTA-физика: постоянная охра без прыжка оттенка ─── */
+.send-button,
+.approve-button {
+  background: var(--accent);
+  transition:
+    transform var(--dur-1) var(--ease-out),
+    background var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out);
+}
+
+.send-button:hover,
+.approve-button:hover {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgb(110 58 16 / 25%);
+}
+
+.send-button:active,
+.approve-button:active {
+  transform: translateY(0) scale(0.99);
+}
+
+.send-button:disabled,
+.approve-button:disabled {
+  transform: none;
+  box-shadow: none;
+}
+
+/* ── 7. Форма заявки: читаемость ввода с проектора ─────── */
+.mail-field input,
+.mail-field select {
+  font-size: 14px;
+}
+
+.mail-body textarea {
+  min-height: 210px;
+}
+
+.preset-controls select,
+.preset-controls button {
+  min-height: 44px;
+}
+
+.public-journal-note strong {
+  color: var(--yellow-text);
+}
+
+/* ── 8. Журнал событий: активный шаг виден периферийно ─── */
+.event-list {
+  gap: 10px;
+}
+
+.event-item.is-active {
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+/* ── 9. Варианты руководителя ──────────────────────────── */
+.option-card {
+  padding: 20px;
+}
+
+.option-card.is-selected {
+  background: rgb(240 223 202 / 40%);
+}
+
+.option-card:focus-within {
+  box-shadow: 0 0 0 3px rgb(138 74 22 / 28%);
+}
+
+.option-label {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+/* ── 10. Деунификация рядов карточек ───────────────────── */
+.system-map article {
+  border-top: 3px solid transparent;
+}
+
+.system-map article:first-child,
+.system-map article:last-child {
+  border-top-color: var(--accent);
+}
+
+.system-map article:nth-child(n + 3):nth-child(-n + 5) {
+  background: rgb(255 253 248 / 82%);
+}
+
+.control-story article:first-child {
+  border-top: 3px solid var(--accent-soft);
+}
+
+/* ── 11. Секция живого склада: пропорции и кегль заголовка ── */
+.live-inventory {
+  grid-template-columns: minmax(300px, 0.8fr) minmax(0, 1.2fr);
+}
+
+.live-inventory-intro h2 {
+  font-size: clamp(30px, 3vw, 44px);
+  letter-spacing: -0.026em;
+  line-height: 1.06;
+}
+
+@media (max-width: 720px) {
+  .live-inventory {
+    grid-template-columns: 1fr;
+  }
+}
