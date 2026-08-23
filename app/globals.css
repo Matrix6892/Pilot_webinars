@@ -5535,3 +5535,9 @@ time {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── 12. Офлайн-точка bridge: жёлтый зарезервирован маршрутом yellow ── */
+.connection:not(.is-live) .connection-dot {
+  background: var(--muted);
+  box-shadow: 0 0 0 3px rgb(85 93 88 / 14%);
+}
