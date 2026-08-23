@@ -161,7 +161,7 @@ h3 {
 .brand small {
   margin-top: 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .connection {
@@ -279,7 +279,7 @@ main {
 .hero-status > span {
   margin-bottom: 14px;
   color: #d1ab84;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -322,7 +322,7 @@ main {
   margin-bottom: auto;
   color: var(--accent);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -334,7 +334,7 @@ main {
 .system-map article small {
   margin-top: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -387,7 +387,7 @@ main {
 .source-dock span {
   color: #c89e74;
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .zone-explainer {
@@ -432,7 +432,7 @@ main {
 
 .zone-guide > summary small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .zone-guide > summary::after {
@@ -446,7 +446,7 @@ main {
   color: #fff;
   content: "+";
   font-size: 16px;
-  transition: transform 160ms ease;
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .zone-guide[open] > summary::after {
@@ -490,7 +490,7 @@ main {
 
 .zone-name {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -509,7 +509,7 @@ main {
 
 .zone-explain small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -657,7 +657,7 @@ main {
   background: var(--panel);
   color: var(--ink);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .text-button,
@@ -689,7 +689,7 @@ main {
   display: block;
   margin: 0 0 6px 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -719,7 +719,7 @@ main {
 .mail-model-status span {
   margin: 0 0 6px 2px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -748,7 +748,7 @@ main {
 
 .preset-controls > button small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .mail-card {
@@ -766,7 +766,7 @@ main {
   padding: 0 16px;
   border-bottom: 1px solid #e4e0d8;
   color: #8a8983;
-  font-size: 11px;
+  font-size: 12px;
   grid-template-columns: 1fr auto 1fr;
 }
 
@@ -874,7 +874,7 @@ main {
 
 .mail-model small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -912,7 +912,7 @@ main {
 .zone-hint small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -926,12 +926,12 @@ main {
 
 .public-journal-note strong {
   color: #6f5322;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .public-journal-note span {
   color: #756b59;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -945,7 +945,7 @@ main {
 
 .mail-actions > small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -965,9 +965,7 @@ main {
   font-size: 12px;
   font-weight: 700;
   transition:
-    transform 150ms ease,
-    background 150ms ease;
-}
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1),    background 150ms cubic-bezier(0.22, 1, 0.36, 1);}
 
 .send-button:hover {
   background: var(--accent);
@@ -1031,7 +1029,7 @@ main {
   align-self: center;
   color: var(--accent);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -1042,7 +1040,7 @@ main {
 .process-preview small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -1073,7 +1071,7 @@ main {
 
 .run-head > div:first-child > small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .order-card-preview {
@@ -1097,7 +1095,7 @@ main {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   gap: 8px;
 }
@@ -1144,7 +1142,7 @@ main {
   border-radius: 13px;
   background: rgb(255 253 248 / 82%);
   opacity: 0;
-  animation: rise 330ms ease forwards;
+  animation: rise 330msms cubic-bezier(0.16, 1, 0.3, 1) forwards;
   grid-template-columns: 38px 1fr auto;
   gap: 10px;
 }
@@ -1167,7 +1165,7 @@ main {
 .event-index {
   color: var(--muted);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .event-item h3 {
@@ -1187,7 +1185,7 @@ main {
   align-self: start;
   color: var(--muted);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1213,7 +1211,7 @@ main {
 .previous-result-history span,
 .previous-result-history small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .previous-result-history strong {
@@ -1265,7 +1263,7 @@ main {
   background: var(--ink);
   color: #fff;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1302,7 +1300,7 @@ main {
 }
 
 .decision-poster > span {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1316,7 +1314,7 @@ main {
 
 .decision-poster small {
   color: rgb(23 32 29 / 62%);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -1326,7 +1324,7 @@ main {
   border-radius: 999px;
   background: rgb(255 255 255 / 68%);
   color: var(--ink);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   text-decoration: none;
 }
@@ -1362,7 +1360,7 @@ main {
   display: block;
   margin-bottom: 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1399,7 +1397,7 @@ main {
 .research-card > small {
   align-self: center;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -1423,7 +1421,7 @@ main {
   display: block;
   margin-top: 7px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -1454,7 +1452,7 @@ main {
 .research-links small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
 }
 
@@ -1502,7 +1500,7 @@ main {
 .numbers-row small {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .manager-block {
@@ -1530,13 +1528,13 @@ main {
   background: var(--ink);
   color: #fff;
   font-family: var(--font-geologica), sans-serif;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .manager-heading small,
 .reply-head small {
   color: var(--red);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1588,10 +1586,7 @@ main {
   background: #fff;
   cursor: pointer;
   transition:
-    border-color 150ms ease,
-    box-shadow 150ms ease,
-    transform 150ms ease;
-}
+    border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),    box-shadow 150ms cubic-bezier(0.22, 1, 0.36, 1),    transform 150ms cubic-bezier(0.22, 1, 0.36, 1);}
 
 .option-card:hover {
   transform: translateY(-1px);
@@ -1620,7 +1615,7 @@ main {
   margin-bottom: 25px;
   color: var(--red);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .option-card h4 {
@@ -1654,7 +1649,7 @@ main {
   display: block;
   margin-top: auto;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1670,7 +1665,7 @@ main {
 
 .selected-option-letter span {
   color: var(--red);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 780;
 }
 
@@ -1695,7 +1690,7 @@ main {
   background: var(--ink);
   color: #fff;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1732,7 +1727,7 @@ main {
 
 .approval-stamp small {
   color: #527862;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1773,7 +1768,7 @@ main {
   border-radius: 999px;
   background: #efede7;
   color: #686962;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -1832,13 +1827,13 @@ main {
   place-items: center;
   border-radius: 50%;
   background: #efede7;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .reply-steps strong {
   min-width: 0;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.25;
 }
 
@@ -1896,7 +1891,7 @@ main {
 
 .reply-action small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -1906,7 +1901,7 @@ main {
   border-radius: 10px;
   background: var(--green-soft);
   color: var(--green);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -1922,7 +1917,7 @@ main {
   border-radius: 999px;
   background: var(--green-soft);
   color: #32684b;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -1945,13 +1940,13 @@ main {
   padding: 5px 7px;
   border-radius: 999px;
   background: #e7e3da;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .source-line small {
   margin-left: auto;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .error-banner {
@@ -2011,7 +2006,7 @@ main {
 .control-grid article > span {
   margin-bottom: auto;
   color: #d0a57b;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2026,7 +2021,7 @@ main {
 .control-grid p {
   margin: 9px 0 0;
   color: #b9c0bd;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.48;
 }
 
@@ -2039,7 +2034,7 @@ main {
   background: transparent;
   color: #fff;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -2082,7 +2077,7 @@ main {
 
 .metric-grid span {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2099,7 +2094,7 @@ main {
 
 .metric-grid small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .zone-totals {
@@ -2113,7 +2108,7 @@ main {
   display: flex;
   align-items: center;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   gap: 7px;
 }
 
@@ -2142,7 +2137,7 @@ footer {
   padding: 18px clamp(20px, 4vw, 68px);
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   grid-template-columns: 1fr auto 1fr;
   gap: 20px;
 }
@@ -2192,7 +2187,7 @@ footer span:last-child {
 
 .modal-head small {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2240,7 +2235,7 @@ footer span:last-child {
   max-width: 680px;
   margin: 0 0 12px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2266,7 +2261,7 @@ footer span:last-child {
   min-height: 40px;
   background: var(--paper-deep);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2278,7 +2273,7 @@ footer span:last-child {
 .catalog-row small {
   margin-bottom: 4px;
   color: var(--accent);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .catalog-row strong {
@@ -2289,7 +2284,7 @@ footer span:last-child {
 .catalog-row p {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -2301,7 +2296,7 @@ footer span:last-child {
   padding: 20px;
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   grid-column: 1 / -1;
 }
 
@@ -2314,7 +2309,7 @@ footer span:last-child {
   border-radius: 10px;
   background: var(--ink);
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-decoration: none;
 }
@@ -2335,7 +2330,7 @@ footer span:last-child {
   max-width: 100%;
   color: var(--blue);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -2348,7 +2343,7 @@ footer span:last-child {
   max-width: 620px;
   margin: 10px 0 12px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2373,7 +2368,7 @@ footer span:last-child {
 .instruction-list > a > span {
   color: var(--accent);
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .instruction-list strong,
@@ -2388,7 +2383,7 @@ footer span:last-child {
 .instruction-list small {
   margin-top: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .instruction-rule {
@@ -2405,7 +2400,7 @@ footer span:last-child {
 .instruction-rule p {
   margin: 7px 0 0;
   color: #43565e;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2443,7 +2438,7 @@ footer span:last-child {
 .agent-log > span {
   margin-bottom: 7px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2481,7 +2476,7 @@ footer span:last-child {
 
 .original-mail small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .agent-facts {
@@ -2533,17 +2528,17 @@ footer span:last-child {
 .agent-log time {
   color: #8e9a95;
   font-family: var(--font-geologica), sans-serif;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .agent-log strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .agent-log p {
   margin: 0;
   color: #b9c1bd;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -2596,7 +2591,7 @@ footer span:last-child {
 .hero-roles small {
   margin-top: 2px;
   color: #bac2be;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.42;
 }
 
@@ -2610,7 +2605,7 @@ footer span:last-child {
   width: max-content;
   color: #f2efe7;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2648,7 +2643,7 @@ footer span:last-child {
   max-width: 580px;
   margin-top: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -2674,7 +2669,7 @@ footer span:last-child {
 
 .photo-upload-button span {
   color: var(--ink);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -2728,7 +2723,7 @@ footer span:last-child {
 .mail-attachment small {
   margin-top: 4px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -2746,7 +2741,7 @@ footer span:last-child {
 .photo-status {
   margin: -8px 18px 15px;
   color: var(--green);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2763,9 +2758,7 @@ footer span:last-child {
   background: var(--blue-soft);
   scroll-margin-top: 92px;
   transition:
-    box-shadow 220ms ease,
-    transform 220ms ease;
-  grid-template-columns: minmax(0, 1fr) auto;
+    box-shadow 220ms cubic-bezier(0.22, 1, 0.36, 1),    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);  grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
 }
 
@@ -2784,7 +2777,7 @@ footer span:last-child {
 
 .freshness-banner span {
   color: var(--blue);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -2797,7 +2790,7 @@ footer span:last-child {
 .freshness-banner small {
   margin-top: 4px;
   color: #51636b;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .freshness-banner button {
@@ -2808,12 +2801,10 @@ footer span:last-child {
   background: var(--blue);
   color: #fff;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
   transition:
-    background-color 150ms ease,
-    transform 150ms ease;
-}
+    background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),    transform 150ms cubic-bezier(0.22, 1, 0.36, 1);}
 
 .freshness-banner button:hover {
   background: #23485c;
@@ -2845,7 +2836,7 @@ footer span:last-child {
 
 .transition-heading span {
   color: var(--green);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -2892,7 +2883,7 @@ footer span:last-child {
 
 .transition-comparison small {
   color: var(--ink-soft);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -2905,13 +2896,13 @@ footer span:last-child {
 .decision-transition > p {
   margin: 0;
   color: #4f6558;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .decision-transition > small {
   color: var(--green);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -2921,7 +2912,7 @@ footer span:last-child {
   border-radius: 12px;
   background: var(--blue-soft);
   color: #455e69;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -2933,7 +2924,7 @@ footer span:last-child {
 .transition-details p {
   margin: 8px 0 0;
   color: #4f6558;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2954,14 +2945,14 @@ footer span:last-child {
 .transition-letter-grid span {
   display: block;
   color: var(--green);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
 .transition-letter-grid p {
   margin: 8px 0 0;
   color: #4f6558;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -2988,7 +2979,7 @@ footer span:last-child {
 
 .proofs-heading span {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3003,7 +2994,7 @@ footer span:last-child {
   max-width: 420px;
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -3040,9 +3031,7 @@ footer span:last-child {
   font-size: 12px;
   line-height: 1.4;
   transition:
-    border-color 160ms ease,
-    color 160ms ease;
-}
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),    color 160ms cubic-bezier(0.22, 1, 0.36, 1);}
 
 .decision-proof summary small {
   display: inline-flex;
@@ -3064,10 +3053,7 @@ footer span:last-child {
   font-size: 13px;
   line-height: 1;
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
-}
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),    color 160ms cubic-bezier(0.22, 1, 0.36, 1),    transform 160ms cubic-bezier(0.22, 1, 0.36, 1);}
 
 .decision-proof[open] summary small span {
   background: var(--accent);
@@ -3095,7 +3081,7 @@ footer span:last-child {
 .decision-proof p {
   margin: 10px 0 0;
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -3135,7 +3121,7 @@ footer span:last-child {
 
 .calculation-heading span {
   color: var(--green);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3161,7 +3147,7 @@ footer span:last-child {
   border: 1px solid #bfd0c4;
   border-radius: 999px;
   background: #fff;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -3173,7 +3159,7 @@ footer span:last-child {
 .calculation-card > p {
   margin: 0;
   color: #536159;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   grid-column: 1 / -1;
 }
@@ -3223,7 +3209,7 @@ footer span:last-child {
 .conversation-archive summary {
   color: var(--muted);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -3259,7 +3245,7 @@ footer span:last-child {
 
 .conversation-flow article p {
   margin: 5px 0;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-line;
 }
@@ -3276,7 +3262,7 @@ footer span:last-child {
 
 .customer-reply-intro > span {
   color: #7b4a08;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3288,7 +3274,7 @@ footer span:last-child {
 .customer-reply-form p {
   margin: 0;
   color: #6b5e40;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -3309,7 +3295,7 @@ footer span:last-child {
 
 .customer-reply-presets > span {
   color: #5c4d2f;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -3327,7 +3313,7 @@ footer span:last-child {
   background: #fff;
   color: var(--ink);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -3367,7 +3353,7 @@ footer span:last-child {
   background: var(--ink);
   color: #fff;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
   grid-column: 2;
 }
@@ -3395,7 +3381,7 @@ footer span:last-child {
 
 .supplier-help-card > div > span {
   color: #28714a;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3452,7 +3438,7 @@ footer span:last-child {
 .supplier-rescue-summary small {
   margin-top: 5px;
   color: #62736a;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -3479,7 +3465,7 @@ footer span:last-child {
 .supplier-help-card dd {
   margin: 4px 0 0;
   overflow-wrap: anywhere;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3493,14 +3479,14 @@ footer span:last-child {
 
 .supplier-comparison summary {
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .supplier-comparison > p {
   margin: 8px 0 0;
   color: #486353;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .supplier-comparison ul {
@@ -3527,7 +3513,7 @@ footer span:last-child {
 }
 
 .supplier-comparison li strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .supplier-comparison li span,
@@ -3560,7 +3546,7 @@ footer span:last-child {
 
 .supplier-help-card > small {
   color: #486353;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   grid-column: 1 / -1;
 }
@@ -3601,7 +3587,7 @@ footer span:last-child {
   background: transparent;
   color: var(--ink);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 750;
 }
 
@@ -3667,7 +3653,7 @@ footer span:last-child {
 .inventory-loading {
   padding: 22px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   grid-column: 1 / -1;
 }
 
@@ -3694,7 +3680,7 @@ footer span:last-child {
 
 .console-head span {
   color: #d1ab84;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3736,7 +3722,7 @@ footer span:last-child {
 
 .partner-console-heading span {
   color: #d1ab84;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3749,7 +3735,7 @@ footer span:last-child {
 .partner-console-heading p {
   margin: 0;
   color: #b8c0bc;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -3782,7 +3768,7 @@ footer span:last-child {
   border-radius: 9px;
   background: rgb(255 255 255 / 8%);
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -3807,7 +3793,7 @@ footer span:last-child {
   background: #fff;
   color: var(--ink);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3859,7 +3845,7 @@ footer span:last-child {
 .market-loading {
   margin-top: 10px;
   color: #b8c0bc;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .inventory-presets {
@@ -3930,7 +3916,7 @@ footer span:last-child {
   border-radius: 9px;
   background: rgb(255 255 255 / 8%);
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .inventory-form select option {
@@ -3953,7 +3939,7 @@ footer span:last-child {
   background: #fff;
   color: var(--ink);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -3976,7 +3962,7 @@ footer span:last-child {
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 9px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1.4;
 }
@@ -4009,7 +3995,7 @@ footer span:last-child {
 
 .ledger-heading > div:first-child > span {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -4022,7 +4008,7 @@ footer span:last-child {
   max-width: 700px;
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -4042,7 +4028,7 @@ footer span:last-child {
   background: transparent;
   color: var(--ink);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   text-decoration: none;
 }
@@ -4050,7 +4036,7 @@ footer span:last-child {
 .ledger-actions > small {
   max-width: 380px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.45;
   text-align: right;
 }
@@ -4079,7 +4065,7 @@ footer span:last-child {
   border-radius: 9px;
   background: var(--blue-soft);
   color: var(--blue);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
@@ -4097,7 +4083,7 @@ footer span:last-child {
   border-radius: 999px;
   background: var(--paper);
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ledger-summary strong {
@@ -4121,7 +4107,7 @@ footer span:last-child {
   min-width: 900px;
   border-collapse: collapse;
   background: #fff;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ledger-table-wrap th,
@@ -4156,7 +4142,7 @@ footer span:last-child {
   background: transparent;
   color: var(--blue);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -4206,7 +4192,7 @@ footer span:last-child {
   border-radius: 50%;
   background: var(--ink);
   color: #fff;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -4251,7 +4237,7 @@ footer span:last-child {
 .agent-attachment figcaption span {
   margin-top: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -4266,7 +4252,7 @@ footer span:last-child {
 
 .agent-conversation > span {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -4277,13 +4263,13 @@ footer span:last-child {
 }
 
 .agent-conversation strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .agent-conversation p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -4546,7 +4532,7 @@ footer span:last-child {
     justify-self: center;
     min-height: 34px;
     padding: 0 10px;
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .connection > span:last-child {
@@ -4555,7 +4541,7 @@ footer span:last-child {
 
   .connection > span:last-child::after {
     content: "По правилам";
-    font-size: 10px;
+    font-size: 12px;
   }
 
   .connection.is-live > span:last-child::after {
@@ -4568,7 +4554,7 @@ footer span:last-child {
 
   .topbar-link::after {
     content: "К заявке";
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .brand small {
@@ -4646,7 +4632,7 @@ footer span:last-child {
   .system-map-mobile small {
     margin-top: 3px;
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     line-height: 1.35;
   }
 
@@ -5237,7 +5223,7 @@ footer span:last-child {
   }
 
   .supplier-source-note {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .modal-sheet {
