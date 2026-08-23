@@ -2350,6 +2350,7 @@ export function OrderStand() {
   const currentRunEvents = order
     ? events.filter((event) => isCurrentOrderEvent(event, order))
     : [];
+  const latestRunEvent = currentRunEvents.at(-1);
   const activeProgress =
     processingState === "processing-active"
       ? activeOrderProgress(
@@ -3085,7 +3086,11 @@ export function OrderStand() {
                         <h3>{activeProgress?.title ?? processingCopy.title}</h3>
                         <p>
                           {activeProgress
-                            ? `${activeProgress.elapsed} · ${activeProgress.detail} Последнее подтверждённое событие: ${formatEventTime(activeProgress.lastEventAt)}. Страница обновляется автоматически каждые 3 секунды.`
+                            ? `${activeProgress.elapsed} · ${
+                                latestRunEvent
+                                  ? `${humanizeText(latestRunEvent.detail)} `
+                                  : ""
+                              }${activeProgress.detail} Последнее подтверждённое событие: ${formatEventTime(activeProgress.lastEventAt)}. Страница обновляется автоматически каждые 3 секунды.`
                             : processingCopy.detail}
                         </p>
                       </div>

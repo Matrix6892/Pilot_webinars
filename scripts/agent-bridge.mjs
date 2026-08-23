@@ -1570,7 +1570,11 @@ async function visionObservationForJob(job, jobStartedAtMs) {
     job,
     "vision",
     "Модель для фото изучает снимок",
-    "Отдельная модель отмечает только видимые признаки.",
+    `Смотрю на снимок «${
+      String(attachment?.name ?? "").trim() || "без имени"
+    }» из заявки «${
+      String(job.subject ?? "").trim().slice(0, 120) || "без темы"
+    }»: отмечаю только видимые признаки.`,
     "active",
   );
   try {
@@ -2155,7 +2159,11 @@ async function processJob(job) {
             job,
             "primary",
             "Агент готовит расчёт и подбор",
-            "Основная модель получила полный запрос, сохранённый контекст, каталог и снимок склада.",
+            `Разбираю запрос «${
+              String(job.subject ?? "").trim().slice(0, 120) || "без темы"
+            }»: сверяю каталог, свежий остаток на складе и собираю черновик ответа${
+              continuationContext ? " с учётом нового сообщения клиента" : ""
+            }.`,
             "active",
           );
           const primaryTimeoutMs = stageTimeoutForDeadline(

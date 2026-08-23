@@ -493,6 +493,60 @@ test("bounds MiMo at two calls and skips retry without termination reserve", asy
   }
 });
 
+test("stage events carry a live thinking line into the focus panel and CSV", async () => {
+  const [bridge, stand] = await Promise.all([
+    readFile(new URL("../scripts/agent-bridge.mjs", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/order-stand.tsx", import.meta.url),
+      "utf8",
+    ),
+  ]);
+
+  const events = [];
+  const visionObservationForJob = visionObservationForJobFromBridge(bridge, {
+    addEvent: async (_job, ...event) => events.push(event),
+    runOpenCode: async () => ({
+      value: {
+        summary: "Видна окрашенная секция.",
+        visibleFacts: ["Покрытие неоднородное."],
+        uncertainties: [],
+      },
+    }),
+  });
+  await visionObservationForJob(
+    {
+      id: "order-thinking-line",
+      subject: "Нужно обновить покрытие забора",
+      body: "Фото приложено.",
+      attachmentJson: JSON.stringify({
+        name: "fence.jpg",
+        src: "/api/uploads?key=test",
+      }),
+    },
+    0,
+  );
+
+  const visionEvent = events.find(([stage]) => stage === "vision");
+  assert.ok(visionEvent, "vision stage event is published");
+  const visionDetail = visionEvent[2];
+  assert.match(visionDetail, /fence\.jpg/u);
+  assert.match(visionDetail, /Нужно обновить покрытие забора/u);
+  assert.match(visionDetail, /видимые признаки/u);
+  assert.doesNotMatch(visionDetail, /стенд|учебн/iu);
+
+  const processJob = bridge.slice(
+    bridge.indexOf("async function processJob"),
+    bridge.indexOf("async function heartbeatLoop"),
+  );
+  assert.match(
+    processJob,
+    /addConfirmedEvent\(\s*job,\s*"primary",[\s\S]{0,200}job\.subject[\s\S]{0,200}continuationContext/u,
+  );
+
+  assert.match(stand, /const latestRunEvent = currentRunEvents\.at\(-1\);/u);
+  assert.match(stand, /humanizeText\(latestRunEvent\.detail\)/u);
+});
+
 test("prompt contract specializes generic human candidates from specific visible facts", async () => {
   const [visionPrompt, salesPrompt] = await Promise.all([
     readFile(new URL("../public/prompts/vision-agent.md", import.meta.url), "utf8"),
