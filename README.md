@@ -434,7 +434,11 @@ node tests/run-webinar-probes.mjs --url "$STAND_URL" --json
 ```
 
 Для диагностики только модельной цепочки, но не вместо deployed gate, четыре
-holdout-family можно прогнать по три раза:
+holdout-family можно прогнать по три раза. Сертификация требует 12/12 жёстких
+инвариантов; наличие живого supplier-лида в wow-08 фиксируется отдельной
+строкой `supplierLeadRuns` и не гейтит серию (решение владельца от 2026-08-23:
+внешний веб-поиск недетерминирован, на сцене гарантированный fallback —
+snapshot-план «ПромКолор Опт»):
 
 ```bash
 KOLER_LIVE_REPEAT=3 node tests/run-agent-wow-live.mjs \

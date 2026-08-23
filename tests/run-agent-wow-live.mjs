@@ -2552,8 +2552,12 @@ export function evaluateLiveResult(
     );
   }
   if (shortageExpectations.has(item.id)) {
-    check("opened-public-supplier-leads", () => {
-      assert.ok(result.supplierLeads.length >= 1);
+    // По решению владельца (2026-08-23): наличие живого лида недетерминировано
+    // (внешний веб-поиск) и не гейтит серию — фиксируется отдельной строкой
+    // supplierLeadRuns в манифесте. Жёстким остаётся качество лидов: если они
+    // есть, каждый должен быть открытой публичной страницей с
+    // confirmationNeeded и без выдуманных склада/цены, не более трёх.
+    check("opened-public-supplier-leads-shape", () => {
       assert.ok(result.supplierLeads.length <= 3);
       const opened = new Set(
         openedSourceUrls.map(canonicalHttpUrl).filter(Boolean),
@@ -3183,11 +3187,23 @@ export function evaluateLiveReadiness(
   if (quality.percent === null || quality.percent < qualityThreshold) {
     failures.push(`six-quality score is below ${qualityThreshold}%`);
   }
+  const supplierLeadRuns = records.filter(
+    (record) =>
+      record?.caseId === "wow-08-two-ton-shortage" &&
+      Number(record?.observed?.supplierLeadCount ?? 0) >= 1,
+  ).length;
+  const supplierLeadRepeatTotal = records.filter(
+    (record) => record?.caseId === "wow-08-two-ton-shortage",
+  ).length;
   return {
     passed: failures.length === 0,
     failures,
     quality,
     repeatGate,
+    // Живой веб-поиск поставщиков недетерминирован; по решению владельца
+    // (2026-08-23) наличие лида не гейтит сертификацию и фиксируется отдельно.
+    supplierLeadRuns,
+    supplierLeadRepeatTotal,
   };
 }
 

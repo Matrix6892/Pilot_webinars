@@ -2175,7 +2175,7 @@ test("vision does not retry when its remaining cap cannot cover termination", as
   assert.equal(calls, 1);
 });
 
-test("shortage live gate rejects a missing opened public supplier lead", () => {
+test("shortage live gate tolerates a missing supplier lead as a reported metric", () => {
   const item = holdout.cases.find(
     (candidate) => candidate.id === "wow-08-two-ton-shortage",
   );
@@ -2196,11 +2196,11 @@ test("shortage live gate rejects a missing opened public supplier lead", () => {
     job.openedSourceUrls,
   );
 
-  assert.equal(evaluation.hardInvariantsPassed, false);
-  assert.match(
-    evaluation.failures.join(" "),
-    /opened-public-supplier-leads/u,
-  );
+  // По решению владельца (2026-08-23): наличие живого лида не гейтит серию —
+  // недетерминированность внешнего веб-поиска фиксируется отдельной метрикой
+  // supplierLeadRuns в манифесте сертификации.
+  assert.equal(evaluation.hardInvariantsPassed, true);
+  assert.equal(evaluation.failures.join(" "), "");
 });
 
 test("shortage live gate treats a trailing slash as the same opened URL", () => {
@@ -2234,7 +2234,7 @@ test("shortage live gate treats a trailing slash as the same opened URL", () => 
   );
 });
 
-test("shortage gate requires an opened direct supplier page, not a snippet lead", () => {
+test("shortage gate keeps only leads backed by an opened direct supplier page", () => {
   const item = holdout.cases.find(
     (candidate) => candidate.id === "wow-08-two-ton-shortage",
   );
@@ -2247,15 +2247,20 @@ test("shortage gate requires an opened direct supplier page, not a snippet lead"
   const draft = structuredClone(item.recordedDraft);
   draft.supplierLeads = structuredClone(shortageCase.supplierLeadCandidates);
   const result = normalizeV2AgentResult(draft, demoData, job);
+
+  // Сниппетные лиды без открытой страницы отбрасываются нормализацией:
+  // непроверенный источник не доходит до клиента (и не попадает в метрику).
+  assert.deepEqual(result.supplierLeads, []);
   const evaluation = evaluateLiveResult(item, result, job.openedSourceUrls);
-  assert.equal(evaluation.hardInvariantsPassed, false);
-  assert.match(evaluation.failures.join(" "), /opened-public-supplier-leads/u);
+  assert.equal(evaluation.hardInvariantsPassed, true);
+  assert.equal(evaluation.failures.join(" "), "");
 
   job.openedSourceUrls = [shortageCase.toolObservation.openedPages[0].url];
   job.openedSources = verifiedSupplierSourcesFor(
     shortageCase.toolObservation.openedPages,
   );
   const openedResult = normalizeV2AgentResult(draft, demoData, job);
+  assert.equal(openedResult.supplierLeads.length >= 1, true);
   const openedEvaluation = evaluateLiveResult(
     item,
     openedResult,
